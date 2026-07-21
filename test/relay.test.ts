@@ -323,7 +323,7 @@ test("host session catalogs return a Mac-only cloud mirror to its Windows owner"
   assert.equal(match?.status, "working");
 });
 
-test("temporary Windows new-thread keys merge with the session-backed Mac mirror", () => {
+test("temporary Windows new-thread keys merge with a titleless session-backed Mac mirror", () => {
   const windows: CodexHost = {
     hostId: "11111111-1111-4111-8111-111111111111", hostName: "Windows", platform: "win32"
   };
@@ -334,16 +334,16 @@ test("temporary Windows new-thread keys merge with the session-backed Mac mirror
   const macSnapshot = structuredClone(snapshot);
   windowsSnapshot.agentSource = "priority";
   macSnapshot.agentSource = "priority";
-  windowsSnapshot.activeThreadKey = temporary;
+  windowsSnapshot.activeThreadKey = rollout;
   windowsSnapshot.slots[0] = {
     ...windowsSnapshot.slots[0]!, threadKey: temporary, title, status: "idle",
     selected: true, ownedByHost: false
   };
   windowsSnapshot.hostSessions = [
-    { threadId: rollout, activityAt: 2_000, status: "complete", completionRevision: 10 }
+    { threadId: rollout, activityAt: 2_000, status: "working", contextUsedPercent: 59 }
   ];
   macSnapshot.slots[0] = {
-    ...macSnapshot.slots[0]!, threadKey: `local:${rollout}`, title, status: "working",
+    ...macSnapshot.slots[0]!, threadKey: `local:${rollout}`, title: null, status: "working",
     selected: false, ownedByHost: false
   };
 
@@ -359,6 +359,7 @@ test("temporary Windows new-thread keys merge with the session-backed Mac mirror
   assert.equal(matches[0]!.threadKey, temporary, "commands keep the live Windows slot key");
   assert.equal(matches[0]!.selected, true);
   assert.equal(matches[0]!.status, "working", "the live mirror status remains visible");
+  assert.equal(matches[0]!.contextUsedPercent, 59);
 });
 
 test("delayed mirror status does not reorder an owned active task", () => {

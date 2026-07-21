@@ -29,8 +29,11 @@ test("agent context ring is bounded and can be hidden globally", () => {
   const hidden = renderAgentSvg(0, "Context test", "thinking", false, 0, "dark", "M", "ready", 84, false);
   assert.doesNotMatch(hidden, /data-context-used=/);
 
-  const unavailable = renderAgentSvg(0, "No context", "idle", false, 0, "dark", "M", "ready", undefined, true);
-  assert.doesNotMatch(unavailable, /data-context-used=/);
+  const pending = renderAgentSvg(0, "New task", "idle", false, 0, "dark", "M", "ready", undefined, true);
+  assert.match(pending, /data-context-used="unknown"/);
+
+  const empty = renderAgentSvg(0, "Not assigned", "empty", false, 0, "dark", "M", "ready", undefined, true);
+  assert.doesNotMatch(empty, /data-context-used=/);
 });
 
 test("user-local monochrome SVGs normalize to an off-white dark glyph", () => {

@@ -78,7 +78,7 @@ export function renderAgentSvg(_slot: number, title: string, status: AgentVisual
     <rect x="12" y="12" width="120" height="120" rx="12" fill="url(#frost)" stroke="${surface.innerBorder}" stroke-width="1" opacity="${theme === "dark" ? ".86" : ".72"}"/>
     <path d="M18 21C46 12 99 12 126 23" fill="none" stroke="${surface.sheen}" stroke-width="6" stroke-linecap="round" opacity="${theme === "dark" ? "0" : ".68"}"/>
     ${renderHostHealthMark(hostHealth, theme)}
-    ${hostHealth === "ready" && showContextRing ? renderContextRing(contextUsedPercent, theme, surface) : ""}
+    ${hostHealth === "ready" && status !== "empty" && showContextRing ? renderContextRing(contextUsedPercent, theme, surface) : ""}
     ${hostBadge ? `<g data-agent-host="${escapeXml(hostBadge)}"><rect x="108" y="16" width="20" height="18" rx="7" fill="${surface.title}" fill-opacity=".11"/><text x="118" y="29" text-anchor="middle" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" fill="${surface.title}" fill-opacity=".82">${escapeXml(hostBadge)}</text></g>` : ""}
     <g font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif">${titleMarkup}</g>
     ${statusMark}
@@ -331,7 +331,11 @@ function renderContextRing(
   theme: ThemeMode,
   surface: SurfacePalette
 ): string {
-  if (value == null || !Number.isFinite(value)) return "";
+  if (value == null || !Number.isFinite(value)) {
+    return `<g data-context-used="unknown" aria-label="Context usage pending">
+      <circle cx="25" cy="25" r="9" fill="${surface.keyMiddle}" fill-opacity=".58" stroke="${surface.title}" stroke-width="3" stroke-opacity=".18"/>
+    </g>`;
+  }
   const percent = Math.max(0, Math.min(100, value));
   const radius = 9;
   const circumference = 2 * Math.PI * radius;

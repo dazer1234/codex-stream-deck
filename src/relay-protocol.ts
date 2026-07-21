@@ -415,6 +415,13 @@ function temporaryThreadAliases(inputs: HostSnapshot[]): Map<string, string> {
 
     for (const slot of input.snapshot.slots) {
       if (!slot.threadKey?.toLowerCase().includes(":client-new-thread:")) continue;
+      const activeIdentity = input.snapshot.activeThreadKey
+        ? threadIdentity(input.snapshot.activeThreadKey) : null;
+      if (slot.selected && activeIdentity && ownedSessions.has(activeIdentity) &&
+        !input.snapshot.activeThreadKey?.toLowerCase().includes(":client-new-thread:")) {
+        aliases.set(aliasKey(input.host, threadIdentity(slot.threadKey)), activeIdentity);
+        continue;
+      }
       const title = normalizedTitle(slot.title);
       if (!title) continue;
       const matches = new Set<string>();
