@@ -34,7 +34,7 @@ For a released build, either download **Source code (zip)** from that GitHub
 release and extract it, or clone the matching tag in Terminal:
 
 ```zsh
-git clone --branch v0.7.0 --depth 1 https://github.com/dazer1234/codex-stream-deck.git
+git clone --branch v0.7.0.1 --depth 1 https://github.com/dazer1234/codex-stream-deck.git
 cd codex-stream-deck
 ```
 

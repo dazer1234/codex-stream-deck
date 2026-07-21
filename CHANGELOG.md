@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0.1 - 2026-07-22
+
+- Fixed one cross-host Codex task appearing twice when a new Windows or Mac thread transitioned from its temporary renderer ID to its stable rollout ID.
+- Remember resolved temporary thread aliases across later task selections and relay reconnects so mirrored tasks remain de-duplicated.
+- Preserve the available title and context usage from either host when the rollout owner temporarily publishes incomplete renderer metadata.
+- Reserve `Not assigned` for genuinely empty agent slots; assigned titleless threads now use `New chat` while their native title is pending.
+- Keep a neutral context ring visible until a new thread publishes its first token-count event.
+- Added bidirectional Windows-to-Mac and Mac-to-Windows regression coverage for task identity, title fallback, selection changes, and reconnects.
+
 ## 0.7.0 - 2026-07-21
 
 - Added a source-distributed native SwiftUI iPhone companion that merges authenticated Mac and Windows snapshots while leaving the Stream Deck plugin independent.

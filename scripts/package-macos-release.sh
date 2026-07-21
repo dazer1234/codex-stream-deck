@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="$(node -p "require('$ROOT/package.json').version")"
+PACKAGE_VERSION="$(node -p "require('$ROOT/package.json').version")"
+VERSION="${CODEX_DECK_RELEASE_VERSION:-$PACKAGE_VERSION}"
 OUTPUT="${1:-$ROOT/outputs/codex-deck-launcher-macos-v$VERSION.zip}"
 mkdir -p "${OUTPUT:h}"
 rm -f "$OUTPUT"

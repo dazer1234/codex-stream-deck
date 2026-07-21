@@ -16,7 +16,7 @@ test("iPhone source-install docs state the current Mac and distribution boundary
     assert.match(prose, /control only\s+(?:a\s+)?Windows/i);
     assert.match(prose, /App Store/);
   }
-  assert.match(install, /git clone --branch v0\.7\.0 --depth 1/);
+  assert.match(install, /git clone --branch v0\.7\.0\.1 --depth 1/);
 });
 
 test("release docs preserve inspiration credit and independent implementation wording", async () => {

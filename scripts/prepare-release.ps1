@@ -1,4 +1,7 @@
-param([string]$MacArchivePath)
+param(
+  [string]$MacArchivePath,
+  [string]$ReleaseVersion
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -14,7 +17,10 @@ function Get-Sha256Hex([string]$Path) {
 
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
-$version = [string]$package.version
+$version = if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) { [string]$package.version } else { $ReleaseVersion.Trim() }
+if ($version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?$') {
+  throw "Invalid release version: $version"
+}
 $output = Join-Path $root "outputs\release-v$version"
 
 Push-Location $root
