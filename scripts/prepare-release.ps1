@@ -48,7 +48,8 @@ try {
   }
   $artifacts = Get-ChildItem -LiteralPath $output -File | Sort-Object Name
   $checksums = @($artifacts | ForEach-Object { "{0}  {1}" -f (Get-Sha256Hex $_.FullName), $_.Name })
-  [IO.File]::WriteAllLines((Join-Path $output 'SHA256SUMS.txt'), $checksums, [Text.UTF8Encoding]::new($false))
+  $checksumText = ($checksums -join "`n") + "`n"
+  [IO.File]::WriteAllText((Join-Path $output 'SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
   Write-Host "Release candidate prepared at: $output"
 } finally {
   Pop-Location

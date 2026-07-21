@@ -39,3 +39,10 @@ test("local Wi-Fi guide proves Nearby works with Tailscale off and keeps CDP pri
   assert.match(guide, /Chrome DevTools/);
   assert.doesNotMatch(guide, /0\.0\.0\.0/);
 });
+
+test("release checksums use portable LF line endings on Windows", async () => {
+  const source = await text("scripts/prepare-release.ps1");
+  assert.match(source, /\$checksums -join "`n"/);
+  assert.match(source, /WriteAllText/);
+  assert.doesNotMatch(source, /WriteAllLines/);
+});
