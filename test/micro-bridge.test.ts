@@ -169,3 +169,9 @@ test("controller avoids overlapping polls and redundant image writes", async () 
   assert.match(source, /targetPlatform === "darwin"/);
   assert.doesNotMatch(source, /setInterval\(/);
 });
+
+test("assigned titleless threads use a new-chat label instead of Not assigned", async () => {
+  const source = await readFile(new URL("../src/controller.ts", import.meta.url), "utf8");
+  assert.match(source, /agent\?\.threadKey\s*&&\s*health\.state\s*===\s*"ready"\s*\?\s*"New chat"/);
+  assert.match(source, /:\s*"Not assigned"/);
+});

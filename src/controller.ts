@@ -415,7 +415,7 @@ export class DeckController {
     const unavailableTitle = health.state === "degraded" ? "Signals uncertain"
       : health.state === "offline" ? "Host offline"
         : health.state === "connecting" ? "Connecting" : "Not assigned";
-    const title = agent?.title ?? unavailableTitle;
+    const title = agent?.title ?? (agent?.threadKey && health.state === "ready" ? "New chat" : unavailableTitle);
     const status = agent ? visualStatusFromMicro(agent.status) : "empty";
     const theme = this.targetSnapshot()?.theme ?? this.localSnapshot?.snapshot.theme ?? "dark";
     const hostBadge = agent && this.relayClient ? (agent.host.platform === "darwin" ? "M" : "W") : undefined;

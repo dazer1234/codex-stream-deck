@@ -48,15 +48,18 @@ export type HostSnapshot = { host: CodexHost; snapshot: MicroSnapshot; observedA
 
 type ActivityRecord = { activityAt: number; signature: string; lastSeenAt: number };
 type SessionOwner = { input: HostSnapshot; session: HostSessionPresence };
+type TemporaryAliasRecord = { identity: string; lastSeenAt: number };
 const MIRROR_STATUS_FRESHNESS_MS = 5_000;
 const SESSION_COMPLETION_FALLBACK_MS = 5 * 60_000;
+const TEMPORARY_ALIAS_RETENTION_MS = 24 * 60 * 60_000;
 
 export class HostActivityIndex {
   private readonly activity = new Map<string, ActivityRecord>();
   private readonly acknowledgedCompletions = new Map<string, number>();
+  private readonly temporaryAliases = new Map<string, TemporaryAliasRecord>();
 
   merge(inputs: HostSnapshot[], now = Date.now(), authoritativeHostId?: string): RoutedAgentSlot[] {
-    const aliases = temporaryThreadAliases(inputs);
+    const aliases = temporaryThreadAliases(inputs, this.temporaryAliases, now);
     const routed: RoutedAgentSlot[] = [];
     for (const input of inputs) {
       for (const slot of input.snapshot.slots) {
@@ -334,10 +337,12 @@ function mergeMirrors(
   const contextCandidate = candidates.find((candidate) =>
     candidate.ownedByHost === true && candidate.contextUsedPercent != null)
     ?? candidates.find((candidate) => candidate.contextUsedPercent != null);
+  const titleCandidate = candidates.find((candidate) => normalizedTitle(candidate.title));
   return {
     ...owner,
     host: routedOwner,
     ownedByHost: sessionOwner ? true : owner.ownedByHost,
+    title: normalizedTitle(owner.title) ? owner.title : titleCandidate?.title ?? null,
     status,
     selected: statusCandidates.some((candidate) => candidate.selected),
     contextUsedPercent: sessionOwner?.session.contextUsedPercent ?? contextCandidate?.contextUsedPercent,
@@ -406,7 +411,11 @@ function threadIdentity(value: string): string {
   return value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)?.[0]?.toLowerCase() ?? value;
 }
 
-function temporaryThreadAliases(inputs: HostSnapshot[]): Map<string, string> {
+function temporaryThreadAliases(
+  inputs: HostSnapshot[],
+  remembered: Map<string, TemporaryAliasRecord>,
+  now: number
+): Map<string, string> {
   const aliases = new Map<string, string>();
   for (const input of inputs) {
     const ownedSessions = new Set(
@@ -415,11 +424,18 @@ function temporaryThreadAliases(inputs: HostSnapshot[]): Map<string, string> {
 
     for (const slot of input.snapshot.slots) {
       if (!slot.threadKey?.toLowerCase().includes(":client-new-thread:")) continue;
+      const temporaryKey = aliasKey(input.host, threadIdentity(slot.threadKey));
+      const prior = remembered.get(temporaryKey);
+      if (prior && now - prior.lastSeenAt <= TEMPORARY_ALIAS_RETENTION_MS) {
+        aliases.set(temporaryKey, prior.identity);
+        prior.lastSeenAt = now;
+      }
       const activeIdentity = input.snapshot.activeThreadKey
         ? threadIdentity(input.snapshot.activeThreadKey) : null;
       if (slot.selected && activeIdentity && ownedSessions.has(activeIdentity) &&
         !input.snapshot.activeThreadKey?.toLowerCase().includes(":client-new-thread:")) {
-        aliases.set(aliasKey(input.host, threadIdentity(slot.threadKey)), activeIdentity);
+        aliases.set(temporaryKey, activeIdentity);
+        remembered.set(temporaryKey, { identity: activeIdentity, lastSeenAt: now });
         continue;
       }
       const title = normalizedTitle(slot.title);
@@ -434,9 +450,13 @@ function temporaryThreadAliases(inputs: HostSnapshot[]): Map<string, string> {
         }
       }
       if (matches.size !== 1) continue;
-      aliases.set(
-        aliasKey(input.host, threadIdentity(slot.threadKey)), [...matches][0]!);
+      const identity = [...matches][0]!;
+      aliases.set(temporaryKey, identity);
+      remembered.set(temporaryKey, { identity, lastSeenAt: now });
     }
+  }
+  for (const [key, record] of remembered) {
+    if (now - record.lastSeenAt > TEMPORARY_ALIAS_RETENTION_MS) remembered.delete(key);
   }
   return aliases;
 }

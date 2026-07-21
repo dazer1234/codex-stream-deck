@@ -347,7 +347,8 @@ test("temporary Windows new-thread keys merge with a titleless session-backed Ma
     selected: false, ownedByHost: false
   };
 
-  const merged = new HostActivityIndex().merge([
+  const index = new HostActivityIndex();
+  const merged = index.merge([
     { host: windows, snapshot: windowsSnapshot, observedAt: 2_000 },
     { host, snapshot: macSnapshot, observedAt: 2_000 }
   ], 2_000, windows.hostId);
@@ -360,6 +361,82 @@ test("temporary Windows new-thread keys merge with a titleless session-backed Ma
   assert.equal(matches[0]!.selected, true);
   assert.equal(matches[0]!.status, "working", "the live mirror status remains visible");
   assert.equal(matches[0]!.contextUsedPercent, 59);
+
+  windowsSnapshot.slots[0]!.selected = false;
+  windowsSnapshot.activeThreadKey = "10000000-0000-4000-8000-000000000000";
+  const afterSelectionMoves = index.merge([
+    { host: windows, snapshot: windowsSnapshot, observedAt: 3_000 },
+    { host, snapshot: macSnapshot, observedAt: 3_000 }
+  ], 3_000, windows.hostId).filter((slot) => slot.threadKey?.endsWith(rollout) || slot.threadKey === temporary);
+  assert.equal(afterSelectionMoves.length, 1, "the learned alias survives a later selection change");
+  assert.equal(afterSelectionMoves[0]!.title, title);
+});
+
+test("a titled mirror supplies the label when the rollout owner is titleless", () => {
+  const windows: CodexHost = {
+    hostId: "11111111-1111-4111-8111-111111111111", hostName: "Windows", platform: "win32"
+  };
+  const shared = "11000000-0000-4000-8000-000000000000";
+  const windowsSnapshot = structuredClone(snapshot);
+  const macSnapshot = structuredClone(snapshot);
+  windowsSnapshot.slots[0] = {
+    ...windowsSnapshot.slots[0]!, threadKey: shared, title: "Visible on Windows", ownedByHost: false
+  };
+  macSnapshot.slots[0] = {
+    ...macSnapshot.slots[0]!, threadKey: `local:${shared}`, title: null, ownedByHost: true
+  };
+  macSnapshot.hostSessions = [{ threadId: shared, activityAt: 2_000, status: "idle" }];
+
+  const merged = new HostActivityIndex().merge([
+    { host: windows, snapshot: windowsSnapshot, observedAt: 2_000 },
+    { host, snapshot: macSnapshot, observedAt: 2_000 }
+  ], 2_000, windows.hostId);
+  const matches = merged.filter((slot) => slot.threadKey?.endsWith(shared));
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.host.platform, "darwin");
+  assert.equal(matches[0]!.title, "Visible on Windows");
+});
+
+test("a learned Mac new-thread alias survives a Windows relay reconnect", () => {
+  const windows: CodexHost = {
+    hostId: "11111111-1111-4111-8111-111111111111", hostName: "Windows", platform: "win32"
+  };
+  const temporary = "local:client-new-thread:12000000-0000-4000-8000-000000000000";
+  const rollout = "13000000-0000-4000-8000-000000000000";
+  const title = "New Mac task";
+  const windowsSnapshot = structuredClone(snapshot);
+  const macSnapshot = structuredClone(snapshot);
+  windowsSnapshot.agentSource = "priority";
+  macSnapshot.agentSource = "priority";
+  windowsSnapshot.slots[0] = {
+    ...windowsSnapshot.slots[0]!, threadKey: rollout, title: null, status: "working",
+    selected: false, ownedByHost: false
+  };
+  macSnapshot.activeThreadKey = rollout;
+  macSnapshot.slots[0] = {
+    ...macSnapshot.slots[0]!, threadKey: temporary, title, status: "working",
+    selected: true, ownedByHost: false
+  };
+  macSnapshot.hostSessions = [
+    { threadId: rollout, activityAt: 2_000, status: "working", contextUsedPercent: 12 }
+  ];
+  const index = new HostActivityIndex();
+  const inputs = () => [
+    { host: windows, snapshot: windowsSnapshot, observedAt: 2_000 },
+    { host, snapshot: macSnapshot, observedAt: 2_000 }
+  ];
+
+  assert.equal(index.merge(inputs(), 2_000, windows.hostId)
+    .filter((slot) => slot.threadKey?.endsWith(rollout) || slot.threadKey === temporary).length, 1);
+  index.merge([{ host: windows, snapshot: windowsSnapshot, observedAt: 2_500 }], 2_500, windows.hostId);
+  macSnapshot.slots[0]!.selected = false;
+  macSnapshot.activeThreadKey = "14000000-0000-4000-8000-000000000000";
+  const reconnected = index.merge(inputs().map((input) => ({ ...input, observedAt: 3_000 })), 3_000, windows.hostId)
+    .filter((slot) => slot.threadKey?.endsWith(rollout) || slot.threadKey === temporary);
+  assert.equal(reconnected.length, 1);
+  assert.equal(reconnected[0]!.host.platform, "darwin");
+  assert.equal(reconnected[0]!.title, title);
+  assert.equal(reconnected[0]!.contextUsedPercent, 12);
 });
 
 test("delayed mirror status does not reorder an owned active task", () => {
