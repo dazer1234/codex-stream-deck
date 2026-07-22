@@ -13,7 +13,10 @@ import {
   CodexRelayServer, readRelayServerConfig, relayDiscoveryTxt,
   relaySnapshotFailureShouldDegrade, validateRelayServerConfig
 } from "../src/codex-relay-server.js";
-import { HostActivityIndex, RELAY_PROTOCOL_VERSION, parseRelayCommand, type HostSnapshot } from "../src/relay-protocol.js";
+import {
+  HostActivityIndex, RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt,
+  parseRelayCommand, type HostSnapshot
+} from "../src/relay-protocol.js";
 import type { CodexHost, MicroSnapshot } from "../src/types.js";
 
 const host: CodexHost = { hostId: "56fd97ad-7073-42cc-85ce-befa17546d7c", hostName: "Test Mac", platform: "darwin" };
@@ -172,6 +175,59 @@ test("relay health becomes degraded from local receipt age without trusting remo
   });
   const offline = { state: "offline", reason: "relay-disconnected", changedAt: 2_000 } as const;
   assert.equal(resolveRelayHealth(offline, true, 1_000, 99_000), offline);
+});
+
+test("remote snapshots are normalized to the receiver clock", () => {
+  const remote = structuredClone(snapshot);
+  remote.hostSessions = [{
+    threadId: remote.slots[0]!.threadKey!, activityAt: 970_000,
+    status: "working", completionRevision: undefined
+  }];
+  remote.usage = {
+    windows: [{
+      id: "weekly", kind: "weekly", usedPercent: 40, remainingPercent: 60,
+      windowDurationMins: 10_080, resetsAt: 1_600_000
+    }],
+    observedAt: 1_000_000,
+    resetCreditsAvailable: 1,
+    resetCreditsApplicable: 1
+  };
+  remote.slots[0]!.activityAt = 990_000;
+
+  const normalized = normalizeHostSnapshotAtReceipt(
+    { host, snapshot: remote, observedAt: 1_000_000 }, 1_030_000);
+  assert.equal(normalized.observedAt, 1_030_000);
+  assert.equal(normalized.snapshot.slots[0]!.activityAt, 1_020_000);
+  assert.equal(normalized.snapshot.hostSessions![0]!.activityAt, 1_000_000);
+  assert.equal(normalized.snapshot.usage!.observedAt, 1_030_000);
+  assert.equal(normalized.snapshot.usage!.windows[0]!.resetsAt, 1_630_000);
+});
+
+test("clock skew cannot hide a remote owner status or selection", () => {
+  const windows: CodexHost = {
+    hostId: "11111111-1111-4111-8111-111111111111", hostName: "Windows", platform: "win32"
+  };
+  const threadKey = snapshot.slots[0]!.threadKey!;
+  const macMirror = structuredClone(snapshot);
+  const windowsOwner = structuredClone(snapshot);
+  macMirror.slots[0]!.status = "idle";
+  macMirror.slots[0]!.selected = false;
+  macMirror.slots[0]!.ownedByHost = false;
+  windowsOwner.slots[0]!.status = "working";
+  windowsOwner.slots[0]!.selected = true;
+  windowsOwner.slots[0]!.ownedByHost = true;
+  windowsOwner.hostSessions = [{
+    threadId: threadKey, activityAt: 995_000, status: "working", completionRevision: undefined
+  }];
+  const normalizedRemote = normalizeHostSnapshotAtReceipt(
+    { host: windows, snapshot: windowsOwner, observedAt: 1_000_000 }, 1_030_000);
+  const merged = new HostActivityIndex().merge([
+    { host, snapshot: macMirror, observedAt: 1_030_000 }, normalizedRemote
+  ]);
+  const task = merged.find((slot) => slot.threadKey === threadKey)!;
+  assert.equal(task.status, "working");
+  assert.equal(task.selected, true);
+  assert.equal(task.host.hostId, windows.hostId);
 });
 
 test("relay suppresses one transient renderer failure after a healthy snapshot", () => {

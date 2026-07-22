@@ -160,6 +160,52 @@ final class MobileMergeTests: XCTestCase {
     XCTAssertEqual(result?.snapshot.usage?.resetCreditsAvailable, 1)
   }
 
+  func testSnapshotReceiptNormalizationRemovesHostClockSkew() throws {
+    let mac = host("mac", .darwin)
+    let thread = "11111111-1111-4111-8111-111111111111"
+    let input = HostSnapshot(
+      host: mac,
+      observedAt: 1_000_000,
+      snapshot: MicroSnapshot(
+        slots: (0..<6).map { index in
+          AgentSlot(
+            id: index,
+            threadKey: index == 0 ? thread : nil,
+            title: index == 0 ? "Clock skew" : nil,
+            status: index == 0 ? "working" : "off",
+            selected: index == 0,
+            activityAt: index == 0 ? 990_000 : nil,
+            ownedByHost: index == 0 ? true : nil)
+        },
+        activeThreadKey: thread,
+        activeThreadTitle: "Clock skew",
+        layout: MicroLayout(version: 1, slots: [:]),
+        agentSource: "recent",
+        lightingAutoOff: "never",
+        theme: "light",
+        usage: UsageSnapshot(
+          windows: [
+            UsageWindow(
+              id: "weekly", kind: "weekly", usedPercent: 40, remainingPercent: 60,
+              windowDurationMins: 10_080, resetsAt: 1_600_000)
+          ],
+          observedAt: 1_000_000,
+          resetCreditsAvailable: 1,
+          resetCreditsApplicable: 1),
+        hostSessions: [
+          HostSessionPresence(
+            threadId: thread, activityAt: 970_000, status: "working",
+            completionRevision: nil)
+        ]))
+
+    let normalized = input.normalizedToReceiptTime(1_030_000)
+    XCTAssertEqual(normalized.observedAt, 1_030_000)
+    XCTAssertEqual(normalized.snapshot.slots[0].activityAt, 1_020_000)
+    XCTAssertEqual(normalized.snapshot.hostSessions?[0].activityAt, 1_000_000)
+    XCTAssertEqual(normalized.snapshot.usage?.observedAt, 1_030_000)
+    XCTAssertEqual(normalized.snapshot.usage?.windows[0].resetsAt, 1_630_000)
+  }
+
   func testContextUsageFollowsTheBackingHostAcrossMirrors() {
     let windows = host("win", .win32)
     let mac = host("mac", .darwin)
@@ -772,6 +818,108 @@ final class MobileMergeTests: XCTestCase {
     XCTAssertEqual(store.nodes[second.id]?.state, .degraded)
     XCTAssertEqual(store.nodes[second.id]?.requiresRepair, true)
     XCTAssertTrue(store.nodes[second.id]?.detail?.contains("Duplicate connection") == true)
+  }
+
+  @MainActor
+  func testDuplicateProfileRoutesCommandsThroughTheHealthyConnection() async throws {
+    let suiteName = "CodexDeckMobileTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let first = NodeProfile(
+      id: UUID(), name: "Keeper", url: URL(string: "wss://keeper.example.ts.net")!)
+    let second = NodeProfile(
+      id: UUID(), name: "Duplicate", url: URL(string: "wss://duplicate.example.ts.net")!)
+    defaults.set(try JSONEncoder().encode([first, second]), forKey: "node-profiles")
+    for profile in [first, second] {
+      try KeychainStore.set("t".repeated(32), for: profile.tokenKey)
+    }
+    defer { [first, second].forEach { KeychainStore.remove($0.tokenKey) } }
+    var connections: [UUID: MockRelayConnection] = [:]
+    let store = DashboardStore(defaults: defaults) { profile, _, update in
+      let connection = MockRelayConnection(profileID: profile.id, update: update)
+      connections[profile.id] = connection
+      return connection
+    }
+    await store.start()
+    let authenticated = host("shared-host", .darwin)
+    connections[second.id]?.publishStatus(NodeStatus(state: .ready, host: authenticated))
+    connections[first.id]?.publishStatus(NodeStatus(state: .ready, host: authenticated))
+
+    XCTAssertEqual(store.connectionState(for: authenticated.hostId), .ready)
+    await store.pressEncoder()
+
+    XCTAssertEqual(connections[first.id]?.commands.count, 2)
+    XCTAssertTrue(connections[second.id]?.commands.isEmpty == true)
+    XCTAssertEqual(store.commandReceipt?.stage, .stateConfirmed)
+  }
+
+  @MainActor
+  func testOfflineSingleHostSnapshotIsVisibleButNotReportedConnected() throws {
+    let suiteName = "CodexDeckMobileTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let profile = NodeProfile(
+      id: UUID(), name: "Offline Mac", url: URL(string: "wss://mac.example.ts.net")!)
+    let mac = host("offline-mac", .darwin)
+    defaults.set(try JSONEncoder().encode([profile]), forKey: "node-profiles")
+    defaults.set(
+      try JSONEncoder().encode(
+        snapshot(
+          host: mac,
+          slot: slot(
+            thread: "11111111-1111-4111-8111-111111111111", title: "Last known task",
+            status: "working"),
+          sessions: [])),
+      forKey: "snapshot-\(profile.id.uuidString)")
+
+    let store = DashboardStore(defaults: defaults)
+    XCTAssertEqual(store.agents.first?.title, "Last known task")
+    XCTAssertEqual(store.connectionState(for: mac.hostId), .offline)
+    XCTAssertEqual(store.connectedCount, 0)
+  }
+
+  @MainActor
+  func testMixedConnectionKeepsUniqueOfflineTasksWithoutOverridingLiveTasks() async throws {
+    let suiteName = "CodexDeckMobileTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let liveProfile = NodeProfile(
+      id: UUID(), name: "Windows", url: URL(string: "wss://windows.example.ts.net")!)
+    let offlineProfile = NodeProfile(
+      id: UUID(), name: "Mac", url: URL(string: "wss://mac.example.ts.net")!)
+    defaults.set(
+      try JSONEncoder().encode([liveProfile, offlineProfile]), forKey: "node-profiles")
+    for profile in [liveProfile, offlineProfile] {
+      try KeychainStore.set("t".repeated(32), for: profile.tokenKey)
+    }
+    defer { [liveProfile, offlineProfile].forEach { KeychainStore.remove($0.tokenKey) } }
+    let offlineMac = host("offline-mac", .darwin)
+    defaults.set(
+      try JSONEncoder().encode(
+        snapshot(
+          host: offlineMac,
+          slot: slot(
+            thread: "22222222-2222-4222-8222-222222222222", title: "Offline Mac task",
+            status: "working"),
+          sessions: [])),
+      forKey: "snapshot-\(offlineProfile.id.uuidString)")
+    var connections: [UUID: MockRelayConnection] = [:]
+    let store = DashboardStore(defaults: defaults) { profile, _, update in
+      let connection = MockRelayConnection(profileID: profile.id, update: update)
+      connections[profile.id] = connection
+      return connection
+    }
+    await store.start()
+    connections[liveProfile.id]?.publish(
+      snapshot(
+        host: host("live-win", .win32),
+        slot: slot(
+          thread: "33333333-3333-4333-8333-333333333333", title: "Live Windows task",
+          status: "idle"),
+        sessions: []))
+
+    XCTAssertEqual(Set(store.agents.map(\.title)), Set(["Live Windows task", "Offline Mac task"]))
+    XCTAssertEqual(store.connectionState(for: offlineMac.hostId), .offline)
   }
 
   @MainActor

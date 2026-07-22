@@ -513,6 +513,8 @@ private struct AgentCard: View {
       }
     }
     .buttonStyle(.plain)
+    .disabled(hostState == .offline || hostState == .connecting)
+    .opacity(hostState == .offline || hostState == .connecting ? 0.68 : 1)
     .accessibilityHint("Opens this task on \(agent.host.hostName)")
   }
 

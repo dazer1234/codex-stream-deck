@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0.2 - 2026-07-22
+
+- Normalize remote snapshot timestamps to local receipt time so ordinary Mac/Windows clock differences cannot hide working, selected, approval, or usage state.
+- Reset a stale opposite-platform control target when the plugin starts without a configured second host, while preserving intentional remote targeting during temporary relay outages.
+- Keep unique last-known tasks visible when one iPhone node is offline, clearly mark them offline in the app and widgets, and prevent offline agent keys from dispatching commands.
+- Prefer the live connection when duplicate iPhone profiles authenticate as the same computer, including command delivery and displayed connection health.
+- Added regression coverage for Mac-only, Windows-only, mixed online/offline, duplicate-profile, and cross-host clock-skew behavior.
+
 ## 0.7.0.1 - 2026-07-22
 
 - Fixed one cross-host Codex task appearing twice when a new Windows or Mac thread transitioned from its temporary renderer ID to its stable rollout ID.

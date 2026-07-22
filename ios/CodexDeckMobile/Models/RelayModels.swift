@@ -120,6 +120,62 @@ struct HostSnapshot: Codable, Hashable, Sendable {
   let host: CodexHost
   let observedAt: Double
   let snapshot: MicroSnapshot
+
+  func normalizedToReceiptTime(_ receivedAt: Double) -> HostSnapshot {
+    guard receivedAt.isFinite, receivedAt > 0, observedAt.isFinite, observedAt > 0 else {
+      return self
+    }
+    let offset = receivedAt - observedAt
+    func shifted(_ value: Double?) -> Double? {
+      guard let value, value.isFinite, value > 0 else { return value }
+      return max(1, value + offset)
+    }
+    let normalizedUsage = snapshot.usage.map { usage in
+      UsageSnapshot(
+        windows: usage.windows.map { window in
+          UsageWindow(
+            id: window.id,
+            kind: window.kind,
+            usedPercent: window.usedPercent,
+            remainingPercent: window.remainingPercent,
+            windowDurationMins: window.windowDurationMins,
+            resetsAt: shifted(window.resetsAt))
+        },
+        observedAt: shifted(usage.observedAt) ?? receivedAt,
+        resetCreditsAvailable: usage.resetCreditsAvailable,
+        resetCreditsApplicable: usage.resetCreditsApplicable)
+    }
+    return HostSnapshot(
+      host: host,
+      observedAt: receivedAt,
+      snapshot: MicroSnapshot(
+        slots: snapshot.slots.map { slot in
+          AgentSlot(
+            id: slot.id,
+            threadKey: slot.threadKey,
+            title: slot.title,
+            status: slot.status,
+            selected: slot.selected,
+            activityAt: shifted(slot.activityAt),
+            ownedByHost: slot.ownedByHost,
+            contextUsedPercent: slot.contextUsedPercent)
+        },
+        activeThreadKey: snapshot.activeThreadKey,
+        activeThreadTitle: snapshot.activeThreadTitle,
+        layout: snapshot.layout,
+        agentSource: snapshot.agentSource,
+        lightingAutoOff: snapshot.lightingAutoOff,
+        theme: snapshot.theme,
+        usage: normalizedUsage,
+        hostSessions: snapshot.hostSessions?.map { session in
+          HostSessionPresence(
+            threadId: session.threadId,
+            activityAt: shifted(session.activityAt) ?? receivedAt,
+            status: session.status,
+            completionRevision: session.completionRevision,
+            contextUsedPercent: session.contextUsedPercent)
+        }))
+  }
 }
 
 enum ThreadIdentity {

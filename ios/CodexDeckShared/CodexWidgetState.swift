@@ -10,10 +10,12 @@ struct CodexWidgetAgent: Codable, Equatable, Identifiable, Sendable {
   let activityAt: Date
   let selected: Bool
   let contextUsedPercent: Double?
+  let hostConnected: Bool?
 
   init(
     id: String, title: String, status: String, hostName: String, hostLabel: String,
-    activityAt: Date, selected: Bool, contextUsedPercent: Double? = nil
+    activityAt: Date, selected: Bool, contextUsedPercent: Double? = nil,
+    hostConnected: Bool = true
   ) {
     self.id = id
     self.title = title
@@ -23,7 +25,10 @@ struct CodexWidgetAgent: Codable, Equatable, Identifiable, Sendable {
     self.activityAt = activityAt
     self.selected = selected
     self.contextUsedPercent = contextUsedPercent
+    self.hostConnected = hostConnected
   }
+
+  var isHostConnected: Bool { hostConnected ?? true }
 }
 
 struct CodexWidgetUsage: Codable, Equatable, Sendable {
@@ -135,6 +140,7 @@ enum CodexWidgetStateStore {
     return [
       agent.id, agent.title, agent.status, agent.hostName, agent.hostLabel,
       agent.selected ? "1" : "0", agent.contextUsedPercent.map { String($0) } ?? "",
+      agent.isHostConnected ? "1" : "0",
     ]
   }
 

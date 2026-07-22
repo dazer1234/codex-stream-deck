@@ -110,18 +110,63 @@ final class DashboardStore {
     publishWidgetState()
   }
 
-  var snapshots: [HostSnapshot] {
-    let live = nodes.values.filter { $0.state == .ready || $0.state == .degraded }
-      .compactMap(\.snapshot)
-    let snapshots = live.isEmpty ? nodes.values.compactMap(\.snapshot) : live
-    return Dictionary(grouping: snapshots, by: \.host.hostId)
+  private var liveSnapshots: [HostSnapshot] {
+    latestSnapshots(nodes.compactMap { profileID, status in
+      guard connections[profileID] != nil,
+        status.state == .ready || status.state == .degraded
+      else { return nil }
+      return status.snapshot
+    })
+  }
+
+  private func latestSnapshots(_ values: [HostSnapshot]) -> [HostSnapshot] {
+    Dictionary(grouping: values, by: \.host.hostId)
       .values
       .compactMap { $0.max(by: { $0.observedAt < $1.observedAt }) }
   }
 
+  private func connectionPriority(_ state: NodeConnectionState) -> Int {
+    switch state {
+    case .ready: 3
+    case .degraded: 2
+    case .connecting: 1
+    case .offline: 0
+    }
+  }
+
+  var snapshots: [HostSnapshot] {
+    liveSnapshots.isEmpty ? latestSnapshots(nodes.values.compactMap(\.snapshot)) : liveSnapshots
+  }
+
   var agents: [RoutedAgent] {
-    MobileMerge.agents(
-      from: snapshots, acknowledgedCompletions: acknowledgedCompletionRevisions)
+    let live = liveSnapshots
+    guard !live.isEmpty else {
+      return MobileMerge.agents(
+        from: snapshots, acknowledgedCompletions: acknowledgedCompletionRevisions)
+    }
+    let liveAgents = MobileMerge.agents(
+      from: live, acknowledgedCompletions: acknowledgedCompletionRevisions)
+    let liveIdentities = Set(liveAgents.map { ThreadIdentity.canonical($0.threadKey) })
+    let liveHostIDs = Set(live.map { $0.host.hostId })
+    let cached = latestSnapshots(
+      nodes.values.compactMap(\.snapshot).filter { !liveHostIDs.contains($0.host.hostId) })
+    let cachedOnly = MobileMerge.agents(
+      from: cached, acknowledgedCompletions: acknowledgedCompletionRevisions
+    ).filter { !liveIdentities.contains(ThreadIdentity.canonical($0.threadKey)) }
+    return Array((liveAgents + cachedOnly).prefix(6)).enumerated().map { index, agent in
+      RoutedAgent(
+        id: index,
+        threadKey: agent.threadKey,
+        title: agent.title,
+        status: agent.status,
+        selected: agent.selected,
+        activityAt: agent.activityAt,
+        host: agent.host,
+        sourceSlot: agent.sourceSlot,
+        originPlatform: agent.originPlatform,
+        ownedByHost: agent.ownedByHost,
+        contextUsedPercent: agent.contextUsedPercent)
+    }
   }
   var mobileAgentPlacements: [MobileAgentPlacement] {
     (0..<6).map { position in
@@ -142,7 +187,9 @@ final class DashboardStore {
     }
   }
   var connectedCount: Int {
-    Set(nodes.values.filter { $0.state == .ready }.compactMap(\.host?.hostId)).count
+    Set(nodes.compactMap { profileID, status in
+      connections[profileID] != nil && status.state == .ready ? status.host?.hostId : nil
+    }).count
   }
   var expectedCount: Int {
     let discovered = Set(nodes.values.compactMap(\.host?.hostId)).count
@@ -193,7 +240,11 @@ final class DashboardStore {
   }
 
   func connectionState(for hostID: String) -> NodeConnectionState {
-    nodes.values.first(where: { $0.host?.hostId == hostID })?.state ?? .offline
+    nodes.compactMap { profileID, status in
+      status.host?.hostId == hostID && connections[profileID] != nil ? status.state : nil
+    }.max {
+      connectionPriority($0) < connectionPriority($1)
+    } ?? .offline
   }
 
   func agent(for reference: AgentReference) -> RoutedAgent? {
@@ -700,12 +751,20 @@ final class DashboardStore {
   }
 
   private func deliver(_ command: RelayCommand, to hostID: String) async throws -> RelayDelivery {
-    guard let pair = nodes.first(where: {
-      $0.value.host?.hostId == hostID
-        && ($0.value.state == .ready || $0.value.state == .degraded)
-    }),
-      let connection = connections[pair.key]
-    else {
+    let candidates = nodes.compactMap { profileID, status -> (NodeStatus, any RelayNodeConnecting)? in
+      guard status.host?.hostId == hostID,
+        status.state == .ready || status.state == .degraded,
+        let connection = connections[profileID]
+      else { return nil }
+      return (status, connection)
+    }.sorted { left, right in
+      if connectionPriority(left.0.state) != connectionPriority(right.0.state) {
+        return connectionPriority(left.0.state) > connectionPriority(right.0.state)
+      }
+      return (left.0.lastSnapshotReceivedAt ?? .distantPast)
+        > (right.0.lastSnapshotReceivedAt ?? .distantPast)
+    }
+    guard let connection = candidates.first?.1 else {
       throw CommandTransactionError.hostOffline
     }
     return try await connection.send(command)
@@ -1172,7 +1231,8 @@ final class DashboardStore {
         hostLabel: agent.originPlatform.shortLabel,
         activityAt: Date(timeIntervalSince1970: agent.activityAt / 1_000),
         selected: agent.selected,
-        contextUsedPercent: agent.contextUsedPercent)
+        contextUsedPercent: agent.contextUsedPercent,
+        hostConnected: [.ready, .degraded].contains(connectionState(for: agent.host.hostId)))
     }
     let activeStatuses = Set([
       "working", "thinking", "approval", "awaiting-approval", "awaiting-response", "error",

@@ -3,7 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { isRemoteControlRequest, readControlTarget } from "../src/control-target.js";
+import {
+  isRemoteControlRequest, readControlTarget, resolveStartupControlTarget
+} from "../src/control-target.js";
 
 test("control targeting treats each platform as local on its own host", () => {
   assert.equal(isRemoteControlRequest("win32", "win32"), false);
@@ -25,4 +27,14 @@ test("invalid persisted targets fall back to the local platform", async () => {
     assert.equal(await readControlTarget(path, "darwin"), "darwin");
     assert.equal(await readControlTarget(join(root, "missing.json"), "win32"), "win32");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("single-host startup resets a stale opposite-host target", () => {
+  assert.equal(resolveStartupControlTarget("win32", "darwin", false), "darwin");
+  assert.equal(resolveStartupControlTarget("darwin", "win32", false), "win32");
+});
+
+test("configured relay preserves an explicit remote target while offline", () => {
+  assert.equal(resolveStartupControlTarget("win32", "darwin", true), "win32");
+  assert.equal(resolveStartupControlTarget("darwin", "win32", true), "darwin");
 });

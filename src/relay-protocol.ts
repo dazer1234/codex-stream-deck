@@ -46,6 +46,46 @@ export type RelayServerMessage = RelayReadyMessage | RelaySnapshotMessage | Rela
 
 export type HostSnapshot = { host: CodexHost; snapshot: MicroSnapshot; observedAt: number };
 
+export function normalizeHostSnapshotAtReceipt(
+  input: HostSnapshot,
+  receivedAt = Date.now()
+): HostSnapshot {
+  if (!Number.isFinite(receivedAt) || receivedAt <= 0 || !Number.isFinite(input.observedAt) || input.observedAt <= 0) {
+    return input;
+  }
+  const offset = receivedAt - input.observedAt;
+  const shift = (value: number): number => {
+    if (!Number.isFinite(value) || value <= 0) return value;
+    return Math.max(1, value + offset);
+  };
+  const usage = input.snapshot.usage
+    ? {
+        ...input.snapshot.usage,
+        observedAt: shift(input.snapshot.usage.observedAt)!,
+        windows: input.snapshot.usage.windows.map((window) => ({
+          ...window,
+          resetsAt: window.resetsAt == null ? null : shift(window.resetsAt)
+        }))
+      }
+    : undefined;
+  return {
+    host: input.host,
+    observedAt: receivedAt,
+    snapshot: {
+      ...input.snapshot,
+      slots: input.snapshot.slots.map((slot) => ({
+        ...slot,
+        activityAt: slot.activityAt == null ? undefined : shift(slot.activityAt)
+      })),
+      hostSessions: input.snapshot.hostSessions?.map((session) => ({
+        ...session,
+        activityAt: shift(session.activityAt)!
+      })),
+      usage
+    }
+  };
+}
+
 type ActivityRecord = { activityAt: number; signature: string; lastSeenAt: number };
 type SessionOwner = { input: HostSnapshot; session: HostSessionPresence };
 type TemporaryAliasRecord = { identity: string; lastSeenAt: number };

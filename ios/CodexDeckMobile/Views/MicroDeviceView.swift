@@ -246,6 +246,10 @@ private struct MicroAgentKey: View {
 
   private var agent: RoutedAgent? { placement.agent }
   private var reference: AgentReference? { placement.reference }
+  private var hostState: NodeConnectionState {
+    agent.map { store.connectionState(for: $0.host.hostId) } ?? .offline
+  }
+  private var hostConnected: Bool { hostState == .ready || hostState == .degraded }
 
   var body: some View {
     ZStack {
@@ -253,21 +257,27 @@ private struct MicroAgentKey: View {
         VStack(spacing: 2) {
           HStack(spacing: 3) {
             if let context = agent.contextUsedPercent, store.showContextRings {
-              ContextUsageIndicator(percent: context, status: agent.status)
+              ContextUsageIndicator(
+                percent: context, status: hostConnected ? agent.status : "offline")
             } else {
-              Circle().fill(CodexTheme.statusColor(agent.status))
+              Circle().fill(
+                hostConnected ? CodexTheme.statusColor(agent.status) : CodexTheme.secondary)
                 .frame(width: 5, height: 5)
             }
             Spacer(minLength: 0)
             Text(agent.originPlatform.shortLabel)
               .font(.system(size: 6.5, weight: .black))
+              .foregroundStyle(hostConnected ? CodexTheme.ink : CodexTheme.red)
           }
           Spacer(minLength: 0)
           Text(agent.title)
             .font(.system(size: 7.1, weight: .semibold))
             .lineLimit(2)
             .multilineTextAlignment(.center)
-            .foregroundStyle(CodexTheme.ink.opacity(agent.selected ? 0.92 : 0.68))
+            .foregroundStyle(
+              hostConnected
+                ? CodexTheme.ink.opacity(agent.selected ? 0.92 : 0.68)
+                : CodexTheme.secondary)
           Spacer(minLength: 0)
         }
       } else {
@@ -291,10 +301,13 @@ private struct MicroAgentKey: View {
       }
     }
     .scaleEffect(pressing ? 1.035 : 1)
+    .opacity(agent != nil && !hostConnected ? 0.62 : 1)
     .animation(.smooth(duration: 0.18), value: pressing)
     .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
     .onTapGesture {
-      guard let agent, Date().timeIntervalSince(lastLongPressAt) > 0.35 else { return }
+      guard let agent, hostConnected, Date().timeIntervalSince(lastLongPressAt) > 0.35 else {
+        return
+      }
       Task { await store.activate(agent) }
     }
     .onLongPressGesture(

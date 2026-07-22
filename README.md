@@ -179,8 +179,8 @@ npm run audit:release
 `npm run release:prepare` creates a versioned local release-candidate directory with the plugin package, Windows launcher ZIP, and SHA-256 checksums. The macOS ZIP must be created on macOS with `scripts/package-macos-release.sh` so executable bits survive; pass that ZIP to `scripts/prepare-release.ps1 -MacArchivePath ...`.
 
 For a four-component Stream Deck hotfix version, set
-`CODEX_DECK_RELEASE_VERSION=0.7.0.1` while running the macOS packager and pass
-`-ReleaseVersion 0.7.0.1` to `prepare-release.ps1`. The npm package keeps its
+`CODEX_DECK_RELEASE_VERSION=0.7.0.2` while running the macOS packager and pass
+`-ReleaseVersion 0.7.0.2` to `prepare-release.ps1`. The npm package keeps its
 SemVer-compatible prerelease form.
 
 Nothing is published automatically. See [CONTRIBUTING.md](CONTRIBUTING.md).

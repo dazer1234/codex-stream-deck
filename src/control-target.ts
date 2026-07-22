@@ -6,6 +6,14 @@ import type { CodexHost } from "./types.js";
 export type HostPlatform = CodexHost["platform"];
 const CONTROL_TARGET_PATH = join(codexDeckStateRoot(), "control-target.json");
 
+export function resolveStartupControlTarget(
+  persisted: HostPlatform,
+  local: HostPlatform,
+  relayConfigured: boolean
+): HostPlatform {
+  return relayConfigured ? persisted : local;
+}
+
 export function isRemoteControlRequest(
   targetPlatform: HostPlatform,
   localPlatform: HostPlatform,

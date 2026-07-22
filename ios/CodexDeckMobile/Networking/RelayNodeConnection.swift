@@ -171,9 +171,11 @@ final class RelayNodeConnection: RelayNodeConnecting {
       status.requiresRepair = false
       publish(state: .ready, detail: nil)
     case .snapshot(let snapshot):
+      let receivedAt = Date()
       status.host = snapshot.host
-      status.snapshot = snapshot
-      status.lastSnapshotReceivedAt = .now
+      status.snapshot = snapshot.normalizedToReceiptTime(
+        receivedAt.timeIntervalSince1970 * 1_000)
+      status.lastSnapshotReceivedAt = receivedAt
       status.requiresRepair = false
       publish(state: .ready, detail: nil)
     case .health(let host, let reason, _):

@@ -368,12 +368,15 @@ private struct CurrentAgentWidgetView: View {
           }
           if family == .systemMedium {
             HStack {
-              Label(agent.status.replacingOccurrences(of: "-", with: " "), systemImage: "waveform.path")
+              Label(
+                agent.isHostConnected
+                  ? agent.status.replacingOccurrences(of: "-", with: " ") : "offline",
+                systemImage: agent.isHostConnected ? "waveform.path" : "wifi.slash")
               Spacer()
               if agent.selected { Label("Selected", systemImage: "viewfinder") }
             }
             .font(.caption.weight(.semibold))
-            .foregroundStyle(CodexWidgetPalette.status(agent.status))
+            .foregroundStyle(CodexWidgetPalette.status(displayStatus(agent)))
           }
         } else {
           EmptyWidgetState(message: "No active agent yet")
@@ -428,18 +431,24 @@ private struct AgentTile: View {
         .lineLimit(compact ? 3 : 2)
         .privacySensitive()
       Spacer(minLength: 0)
-      Text(agent.activityAt, style: .relative)
-        .font(.system(size: 8, weight: .medium))
-        .foregroundStyle(CodexWidgetPalette.secondary)
+      if agent.isHostConnected {
+        Text(agent.activityAt, style: .relative)
+          .font(.system(size: 8, weight: .medium))
+          .foregroundStyle(CodexWidgetPalette.secondary)
+      } else {
+        Label("Offline", systemImage: "wifi.slash")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(CodexWidgetPalette.secondary)
+      }
     }
     .padding(compact ? 9 : 11)
     .frame(maxWidth: .infinity, minHeight: compact ? 82 : 94, alignment: .topLeading)
     .background(
-      CodexWidgetPalette.status(agent.status).opacity(agent.selected ? 0.18 : 0.08),
+      CodexWidgetPalette.status(displayStatus(agent)).opacity(agent.selected ? 0.18 : 0.08),
       in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     .overlay {
       RoundedRectangle(cornerRadius: 15, style: .continuous)
-        .stroke(CodexWidgetPalette.status(agent.status).opacity(agent.selected ? 0.7 : 0.18))
+        .stroke(CodexWidgetPalette.status(displayStatus(agent)).opacity(agent.selected ? 0.7 : 0.18))
     }
   }
 }
@@ -450,7 +459,7 @@ private struct WidgetAgentStatusOrb: View {
 
   var body: some View {
     ZStack {
-      Circle().fill(CodexWidgetPalette.status(agent.status).opacity(0.13))
+      Circle().fill(CodexWidgetPalette.status(displayStatus(agent)).opacity(0.13))
       Circle().stroke(CodexWidgetPalette.panel, lineWidth: 3)
       if let context = agent.contextUsedPercent {
         Circle()
@@ -458,9 +467,9 @@ private struct WidgetAgentStatusOrb: View {
           .stroke(contextColor(context), style: StrokeStyle(lineWidth: 3, lineCap: .round))
           .rotationEffect(.degrees(-90))
       }
-      Image(systemName: statusSymbol(agent.status))
+      Image(systemName: agent.isHostConnected ? statusSymbol(agent.status) : "wifi.slash")
         .font(.system(size: size * 0.34, weight: .bold))
-        .foregroundStyle(CodexWidgetPalette.status(agent.status))
+        .foregroundStyle(CodexWidgetPalette.status(displayStatus(agent)))
     }
     .frame(width: size, height: size)
     .widgetAccentable()
@@ -479,7 +488,7 @@ private struct WidgetContextIndicator: View {
           .stroke(contextColor(context), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
           .rotationEffect(.degrees(-90))
       }
-      Circle().fill(CodexWidgetPalette.status(agent.status)).frame(width: 3, height: 3)
+      Circle().fill(CodexWidgetPalette.status(displayStatus(agent))).frame(width: 3, height: 3)
     }
     .frame(width: 10, height: 10)
     .widgetAccentable()
@@ -589,6 +598,10 @@ private func statusSymbol(_ status: String) -> String {
   }
   if status == "error" { return "xmark.octagon.fill" }
   return "circle.fill"
+}
+
+private func displayStatus(_ agent: CodexWidgetAgent) -> String {
+  agent.isHostConnected ? agent.status : "offline"
 }
 
 struct CodexCapacityWidget: Widget {

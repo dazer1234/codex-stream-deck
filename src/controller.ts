@@ -2,7 +2,10 @@ import streamDeck, { type KeyAction } from "@elgato/streamdeck";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
-import { isRemoteControlRequest, readControlTarget, writeControlTarget, type HostPlatform as ControlTarget } from "./control-target.js";
+import {
+  isRemoteControlRequest, readControlTarget, resolveStartupControlTarget, writeControlTarget,
+  type HostPlatform as ControlTarget
+} from "./control-target.js";
 import { CodexRelayClient, readRelayClientConfig } from "./codex-relay-client.js";
 import { CodexRelayServer, readRelayServerConfig } from "./codex-relay-server.js";
 import { CodexMicroRendererBridge } from "./codex-micro-renderer-bridge.js";
@@ -82,9 +85,12 @@ export class DeckController {
       streamDeck.logger.warn(`Context-ring settings were unavailable; using enabled by default: ${String(error)}`);
     }
     this.localHost = await getOrCreateHostIdentity();
-    this.targetPlatform = await readControlTarget(undefined, this.localHost.platform);
-    if (this.targetPlatform === this.localHost.platform) this.targetHostId = this.localHost.hostId;
+    const persistedTarget = await readControlTarget(undefined, this.localHost.platform);
     const relayConfig = await readRelayClientConfig();
+    this.targetPlatform = resolveStartupControlTarget(
+      persistedTarget, this.localHost.platform, relayConfig != null);
+    if (this.targetPlatform !== persistedTarget) await writeControlTarget(this.targetPlatform);
+    if (this.targetPlatform === this.localHost.platform) this.targetHostId = this.localHost.hostId;
     if (relayConfig) {
       this.relayClient = new CodexRelayClient(
         relayConfig,

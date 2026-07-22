@@ -5,7 +5,7 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { isAllowedRelayHost } from "./relay-network.js";
 import {
-  RELAY_PROTOCOL_VERSION, parseRelayServerMessage,
+  RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
   type HostSnapshot, type RelayCommand, type RelayResultMessage
 } from "./relay-protocol.js";
 import type { CodexHost, HostHealth } from "./types.js";
@@ -102,10 +102,14 @@ export class CodexRelayClient {
       this.health = { state: "degraded", reason: "awaiting-snapshot", changedAt: Date.now() };
       this.log(`Remote Codex host connected: ${message.host.hostName} (${message.host.platform}).`);
     } else if (message.type === "snapshot") {
+      const receivedAt = Date.now();
       this.host = message.host;
-      this.snapshot = { host: message.host, snapshot: message.snapshot, observedAt: message.observedAt };
-      this.lastSnapshotReceivedAt = Date.now();
-      this.health = { state: "ready", changedAt: Date.now() };
+      this.snapshot = normalizeHostSnapshotAtReceipt(
+        { host: message.host, snapshot: message.snapshot, observedAt: message.observedAt },
+        receivedAt
+      );
+      this.lastSnapshotReceivedAt = receivedAt;
+      this.health = { state: "ready", changedAt: receivedAt };
       this.onSnapshot(this.snapshot);
     } else if (message.type === "health") {
       this.host = message.host;
