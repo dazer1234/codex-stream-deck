@@ -42,6 +42,12 @@ export type AgentDispatchPlan =
   | { kind: "native"; slot: number; threadKey: string }
   | { kind: "direct"; threadKey: string };
 
+export function localThreadKeyVariants(threadKey: string): string[] {
+  return threadKey.startsWith("local:")
+    ? [threadKey, threadKey.slice("local:".length)]
+    : [threadKey, `local:${threadKey}`];
+}
+
 export function resolveAgentDispatch(
   snapshot: MicroSnapshot,
   requestedSlot: number,
@@ -352,8 +358,10 @@ export class CodexMicroRendererBridge {
   }
 
   private async ensureThreadActivated(threadKey: string): Promise<void> {
+    const threadKeyVariants = localThreadKeyVariants(threadKey);
     const result = await this.evaluate<"active" | "opened" | "missing" | "failed">(`(async () => {
       const threadKey = ${JSON.stringify(threadKey)};
+      const threadKeyVariants = ${JSON.stringify(threadKeyVariants)};
       const activeThreadKey = () => document.querySelector('[data-above-composer-conversation-id]')
         ?.getAttribute('data-above-composer-conversation-id')
         ?? document.querySelector('[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active="true"]')
@@ -364,14 +372,14 @@ export class CodexMicroRendererBridge {
       const waitForActive = async (duration) => {
         const deadline = Date.now() + duration;
         while (Date.now() < deadline) {
-          if (activeThreadKey() === threadKey) return true;
+          if (threadKeyVariants.includes(activeThreadKey())) return true;
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        return activeThreadKey() === threadKey;
+        return threadKeyVariants.includes(activeThreadKey());
       };
       if (await waitForActive(250)) return 'active';
       const item = [...document.querySelectorAll('[data-app-action-sidebar-thread-id]')]
-        .find((element) => element.getAttribute('data-app-action-sidebar-thread-id') === threadKey);
+        .find((element) => threadKeyVariants.includes(element.getAttribute('data-app-action-sidebar-thread-id')));
       if (!item) return 'missing';
       const selector = 'button, a, [role="button"], [role="link"]';
       const clickable = item.matches(selector) ? item : item.querySelector(selector) ?? item.closest(selector) ?? item;

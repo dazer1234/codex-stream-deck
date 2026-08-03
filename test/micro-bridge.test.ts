@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  REASONING_ENCODER_KEYS, resolveAgentDispatch, retainEvaluationPromise, selectCodexMainTarget
+  localThreadKeyVariants, REASONING_ENCODER_KEYS, resolveAgentDispatch, retainEvaluationPromise, selectCodexMainTarget
 } from "../src/codex-micro-renderer-bridge.js";
 import { ADDITIONAL_KEYCAPS, OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 import { visualStatusFromMicro } from "../src/status.js";
@@ -75,6 +75,12 @@ test("renderer evaluations retain their awaited promise until CDP has collected 
   assert.match(expression, /setTimeout\(\(\) => store\.delete/);
   const namespaced = retainEvaluationPromise("Promise.resolve(true)", "bridge-a-1");
   assert.match(namespaced, /codex-deck-bridge-a-1/);
+});
+
+test("renderer activation accepts local-prefixed and bare forms of the same thread key", () => {
+  const threadId = "019fc4e4-4ecc-7f20-b7f5-855c11da7b37";
+  assert.deepEqual(localThreadKeyVariants(`local:${threadId}`), [`local:${threadId}`, threadId]);
+  assert.deepEqual(localThreadKeyVariants(threadId), [threadId, `local:${threadId}`]);
 });
 
 test("agent routing follows the stable thread identity when a cross-host slot is stale", () => {
