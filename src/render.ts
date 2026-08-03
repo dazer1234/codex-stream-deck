@@ -45,19 +45,22 @@ export function renderAgentKey(slot: number, title: string, status: AgentVisualS
   return toDataUrl(renderAgentSvg(slot, title, status, selected, phase, theme, hostBadge, hostHealth, contextUsedPercent, showContextRing));
 }
 
-export function renderAgentSvg(_slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true): string {
+export function renderAgentSvg(slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true): string {
   const surface = SURFACES[theme];
   const color = SIGNAL_COLORS[theme][status];
-  const [line1, line2] = splitTitle(title);
-  const pulse = 0.70 + 0.30 * ((Math.sin((phase / 12) * Math.PI * 2) + 1) / 2);
+  const [line1, line2, line3] = splitTitle(title);
+  const statusPhase = status === "thinking" ? (phase + (slot * 7) % 12) % 12 : phase;
+  const pulse = 0.70 + 0.30 * ((Math.sin((statusPhase / 12) * Math.PI * 2) + 1) / 2);
   const glowColor = status === "idle" ? (theme === "dark" ? "#D5D9DC" : "#AAB4BB") : color;
   const themeBoost = theme === "dark" ? .08 : 0;
   const glowOpacity = Math.min(1, (status === "empty" ? .12 : status === "idle" ? .18 : status === "thinking" ? .50 + pulse * .16 : status === "input" ? .42 + pulse * .12 : .52) + themeBoost);
   const surfaceOpacity = (status === "empty" ? .04 : status === "idle" ? .06 : status === "thinking" ? .30 + pulse * .12 : status === "input" ? .24 + pulse * .08 : .28) + (theme === "dark" && status !== "empty" ? .06 : 0);
-  const statusMark = renderAgentStatusMark(status, glowColor, phase, pulse);
-  const titleMarkup = line2
-    ? `<text x="72" y="55" text-anchor="middle" font-size="${fitTitleFont(line1, 16.5)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line1)}</text><text x="72" y="75" text-anchor="middle" font-size="${fitTitleFont(line2, 16.5)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line2)}</text>`
-    : `<text x="72" y="66" text-anchor="middle" font-size="${fitTitleFont(line1, 18)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line1)}</text>`;
+  const statusMark = hostHealth === "ready" ? renderAgentStatusMark(status, glowColor, statusPhase, pulse, theme) : "";
+  const titleMarkup = line3
+    ? `<text x="72" y="62" text-anchor="middle" font-size="${fitTitleFont(line1, 24, 17)}" font-weight="650" letter-spacing=".03" fill="${surface.title}">${escapeXml(line1)}</text><text x="72" y="91" text-anchor="middle" font-size="${fitTitleFont(line2, 24, 17)}" font-weight="650" letter-spacing=".03" fill="${surface.title}">${escapeXml(line2)}</text><text x="72" y="120" text-anchor="middle" font-size="${fitTitleFont(line3, 24, 17)}" font-weight="650" letter-spacing=".03" fill="${surface.title}">${escapeXml(line3)}</text>`
+    : line2
+      ? `<text x="72" y="73" text-anchor="middle" font-size="${fitTitleFont(line1, 26, 17)}" font-weight="650" letter-spacing=".04" fill="${surface.title}">${escapeXml(line1)}</text><text x="72" y="107" text-anchor="middle" font-size="${fitTitleFont(line2, 26, 17)}" font-weight="650" letter-spacing=".04" fill="${surface.title}">${escapeXml(line2)}</text>`
+      : `<text x="72" y="90" text-anchor="middle" font-size="${fitTitleFont(line1, 27)}" font-weight="650" letter-spacing=".04" fill="${surface.title}">${escapeXml(line1)}</text>`;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
     <defs>
@@ -79,7 +82,7 @@ export function renderAgentSvg(_slot: number, title: string, status: AgentVisual
     <path d="M18 21C46 12 99 12 126 23" fill="none" stroke="${surface.sheen}" stroke-width="6" stroke-linecap="round" opacity="${theme === "dark" ? "0" : ".68"}"/>
     ${renderHostHealthMark(hostHealth, theme)}
     ${hostHealth === "ready" && status !== "empty" && showContextRing ? renderContextRing(contextUsedPercent, theme, surface) : ""}
-    ${hostBadge ? `<g data-agent-host="${escapeXml(hostBadge)}"><rect x="108" y="16" width="20" height="18" rx="7" fill="${surface.title}" fill-opacity=".11"/><text x="118" y="29" text-anchor="middle" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" fill="${surface.title}" fill-opacity=".82">${escapeXml(hostBadge)}</text></g>` : ""}
+    ${hostBadge ? `<g data-agent-host="${escapeXml(hostBadge)}"><rect x="86" y="16" width="20" height="18" rx="7" fill="${surface.title}" fill-opacity=".11"/><text x="96" y="29" text-anchor="middle" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" fill="${surface.title}" fill-opacity=".82">${escapeXml(hostBadge)}</text></g>` : ""}
     <g font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif">${titleMarkup}</g>
     ${statusMark}
   </svg>`;
@@ -101,10 +104,10 @@ export function renderImportedKeycap(svg: string, theme: ThemeMode = "light"): s
 
   const surface = SURFACES[theme];
   const glyphColor = theme === "dark" ? "#F2F2EE" : "#24292D";
-  const size = 90;
+  const size = 108;
   const scale = Math.min(size / width, size / height);
-  const x = 27 + (size - width * scale) / 2 - minX * scale;
-  const y = 27 + (size - height * scale) / 2 - minY * scale;
+  const x = 18 + (size - width * scale) / 2 - minX * scale;
+  const y = 18 + (size - height * scale) / 2 - minY * scale;
   const glyph = body
     .replaceAll("currentColor", glyphColor)
     .replace(/#(?:000000|000|ffffff|fff)\b/gi, glyphColor)
@@ -142,12 +145,12 @@ export function renderBuiltinKeycap(name: BuiltinIconName, theme: ThemeMode = "l
 export function renderFallbackKeycap(keycapId: string, theme: ThemeMode = "light"): string {
   const surface = SURFACES[theme];
   const label = escapeXml(keycapId);
-  const fontSize = keycapId.length > 5 ? 17 : 21;
+  const fontSize = keycapId.length <= 4 ? 34 : keycapId.length === 5 ? 29 : 24;
   return toDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
     <defs><linearGradient id="keycap" x1="0" y1="0" x2="0" y2="1"><stop stop-color="${surface.keyTop}"/><stop offset=".52" stop-color="${surface.keyMiddle}"/><stop offset="1" stop-color="${surface.keyBottom}"/></linearGradient></defs>
     <rect data-theme="${theme}" x="4" y="4" width="136" height="136" rx="18" fill="url(#keycap)" stroke="${surface.border}" stroke-width="2" stroke-opacity="${theme === "dark" ? ".88" : ".34"}"/>
     <rect x="7.5" y="7.5" width="129" height="129" rx="15" fill="none" stroke="${surface.innerBorder}" stroke-width="1"/>
-    <text data-icon-source="fallback-label" x="72" y="78" text-anchor="middle" font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="${fontSize}" font-weight="650" letter-spacing="1.1" fill="${surface.title}">${label}</text>
+    <text data-icon-source="fallback-label" x="72" y="83" text-anchor="middle" font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="${fontSize}" font-weight="700" letter-spacing=".7" fill="${surface.title}">${label}</text>
   </svg>`);
 }
 
@@ -272,24 +275,30 @@ export function escapeXml(value: string): string {
   })[character] ?? character);
 }
 
-function splitTitle(value: string): [string, string] {
+function splitTitle(value: string): [string, string, string] {
   const clean = value.replace(/\s+/g, " ").trim();
-  if (clean.length <= 16) return [clean, ""];
-  const words = clean.split(" ");
-  let first = "";
-  let second = "";
-  for (const word of words) {
-    if (!second && `${first} ${word}`.trim().length <= 16) first = `${first} ${word}`.trim();
-    else if (`${second} ${word}`.trim().length <= 16) second = `${second} ${word}`.trim();
-    else break;
+  if (clean.length <= 10) return [clean, "", ""];
+
+  const lines: string[] = [];
+  let remaining = clean;
+  while (remaining && lines.length < 3) {
+    if (remaining.length <= 10) {
+      lines.push(remaining);
+      remaining = "";
+      break;
+    }
+    const candidate = remaining.slice(0, 11);
+    const lastSpace = candidate.lastIndexOf(" ");
+    const nextSpace = remaining.indexOf(" ");
+    const breakAt = lastSpace > 0 ? lastSpace : nextSpace > 0 && nextSpace <= 12 ? nextSpace : 10;
+    lines.push(remaining.slice(0, breakAt).trim());
+    remaining = remaining.slice(breakAt).trim();
   }
-  if (!first) first = clean.slice(0, 15);
-  const used = `${first}${second ? ` ${second}` : ""}`.length;
-  if (used < clean.length) second = `${(second || clean.slice(first.length).trim()).slice(0, 15)}…`;
-  return [first, second];
+  if (remaining && lines.length === 3) lines[2] = `${lines[2]!.slice(0, 9)}…`;
+  return [lines[0] ?? "", lines[1] ?? "", lines[2] ?? ""];
 }
 
-function fitTitleFont(value: string, maximum: number): string {
+function fitTitleFont(value: string, maximum: number, minimum = 15.5): string {
   let units = 0;
   for (const character of value) {
     if (/\s/.test(character)) units += .32;
@@ -298,19 +307,20 @@ function fitTitleFont(value: string, maximum: number): string {
     else if (/[A-ZÄÖÜ]/.test(character)) units += .63;
     else units += .54;
   }
-  return Math.max(12.5, Math.min(maximum, 112 / Math.max(units, 1))).toFixed(2);
+  return Math.max(minimum, Math.min(maximum, 108 / Math.max(units, 1))).toFixed(2);
 }
 
-function renderAgentStatusMark(status: AgentVisualStatus, color: string, phase: number, pulse: number): string {
+function renderAgentStatusMark(status: AgentVisualStatus, color: string, phase: number, pulse: number, theme: ThemeMode): string {
+  const contrastInk = theme === "dark" ? "#FFFFFF" : "#15202A";
   if (status === "thinking") {
-    const x = 45 + (phase % 12) * 2.75;
-    return `<g data-agent-motion="working"><rect x="43" y="104" width="58" height="8" rx="4" fill="#77838C" fill-opacity=".18"/><rect x="${x.toFixed(2)}" y="106" width="20" height="4" rx="2" fill="${color}" fill-opacity=".98"/><rect x="${(x - 2).toFixed(2)}" y="104" width="24" height="8" rx="4" fill="${color}" fill-opacity=".16" filter="url(#softGlow)"/></g>`;
+    const x = 15 + (phase % 12) * 1.2;
+    return `<g data-agent-motion="working"><rect x="13" y="19" width="26" height="11" rx="5.5" fill="${contrastInk}" fill-opacity=".16" stroke="${contrastInk}" stroke-width="1.5" stroke-opacity=".42"/><rect x="${x.toFixed(2)}" y="21" width="10" height="7" rx="3.5" fill="${contrastInk}" fill-opacity=".98" stroke="${color}" stroke-width="1"/><rect x="${(x - 2).toFixed(2)}" y="19" width="14" height="11" rx="5.5" fill="${color}" fill-opacity=".38" filter="url(#softGlow)"/></g>`;
   }
-  if (status === "input") return `<g data-agent-motion="input" fill="${color}" fill-opacity="${(.72 + pulse * .24).toFixed(3)}"><rect x="63" y="98" width="6" height="22" rx="3"/><rect x="75" y="98" width="6" height="22" rx="3"/><circle cx="72" cy="109" r="19" fill="${color}" fill-opacity="${(.04 + pulse * .06).toFixed(3)}" filter="url(#softGlow)"/></g>`;
-  if (status === "complete") return `<g data-agent-motion="complete" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><circle cx="72" cy="108" r="17"/><path d="M63 108l6 6 12-14"/></g>`;
-  if (status === "error") return `<g data-agent-motion="error" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round"><circle cx="72" cy="108" r="17"/><path d="M65 101l14 14M79 101l-14 14"/></g>`;
-  if (status === "empty") return `<rect x="59" y="106" width="26" height="4" rx="2" fill="${color}" fill-opacity=".32"/>`;
-  return `<circle data-agent-motion="idle" cx="72" cy="108" r="5" fill="${color}" fill-opacity=".76"/><circle cx="72" cy="108" r="12" fill="${color}" fill-opacity=".07"/>`;
+  if (status === "input") return `<g data-agent-motion="input" fill="${color}" fill-opacity="${(.72 + pulse * .24).toFixed(3)}"><rect x="19" y="17" width="4" height="17" rx="2"/><rect x="27" y="17" width="4" height="17" rx="2"/><circle cx="25" cy="25" r="14" fill="${color}" fill-opacity="${(.04 + pulse * .06).toFixed(3)}" filter="url(#softGlow)"/></g>`;
+  if (status === "complete") return `<g data-agent-motion="complete" fill="none" stroke="${color}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><circle cx="25" cy="25" r="11"/><path d="M19 25l4 4 8-9"/></g>`;
+  if (status === "error") return `<g data-agent-motion="error" fill="none" stroke="${color}" stroke-width="4" stroke-linecap="round"><circle cx="25" cy="25" r="11"/><path d="M20 20l10 10M30 20L20 30"/></g>`;
+  if (status === "empty") return `<rect data-agent-motion="empty" x="18" y="23" width="14" height="4" rx="2" fill="${color}" fill-opacity=".32"/>`;
+  return `<circle data-agent-motion="idle" cx="25" cy="25" r="6" fill="${contrastInk}" fill-opacity=".98" stroke="${color}" stroke-width="2"/><circle cx="25" cy="25" r="11" fill="none" stroke="${contrastInk}" stroke-width="2" stroke-opacity=".42"/>`;
 }
 
 function renderHostHealthMark(health: HostHealthState, theme: ThemeMode): string {
@@ -333,7 +343,7 @@ function renderContextRing(
 ): string {
   if (value == null || !Number.isFinite(value)) {
     return `<g data-context-used="unknown" aria-label="Context usage pending">
-      <circle cx="25" cy="25" r="9" fill="${surface.keyMiddle}" fill-opacity=".58" stroke="${surface.title}" stroke-width="3" stroke-opacity=".18"/>
+      <circle cx="116" cy="25" r="9" fill="${surface.keyMiddle}" fill-opacity=".58" stroke="${surface.title}" stroke-width="3" stroke-opacity=".18"/>
     </g>`;
   }
   const percent = Math.max(0, Math.min(100, value));
@@ -344,7 +354,7 @@ function renderContextRing(
     ? SIGNAL_COLORS[theme].error
     : percent >= 80 ? SIGNAL_COLORS[theme].input : surface.title;
   return `<g data-context-used="${Math.round(percent)}" aria-label="Context usage ${Math.round(percent)} percent">
-    <circle cx="25" cy="25" r="${radius}" fill="${surface.keyMiddle}" fill-opacity=".58" stroke="${surface.title}" stroke-width="3" stroke-opacity=".14"/>
-    <circle cx="25" cy="25" r="${radius}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${dash.toFixed(2)} ${circumference.toFixed(2)}" transform="rotate(-90 25 25)"/>
+    <circle cx="116" cy="25" r="${radius}" fill="${surface.keyMiddle}" fill-opacity=".58" stroke="${surface.title}" stroke-width="3" stroke-opacity=".14"/>
+    <circle cx="116" cy="25" r="${radius}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${dash.toFixed(2)} ${circumference.toFixed(2)}" transform="rotate(-90 116 25)"/>
   </g>`;
 }
