@@ -39,6 +39,12 @@ Tailscale remote access remains a separate optional profile; see
    **Start Codex Deck.command** is the double-clickable equivalent of `start`.
 5. Open **Codex Settings > Codex Micro**, configure the native slots, and add the actions from the [recommended layout](../README.md#recommended-15-key-layout). Leave the Windows/Mac target position empty or replace it with another action.
 
+### Focus Codex when opening an agent
+
+Each agent key's **Agent Display** inspector has a global **Focus Codex** option. It is off by default. When enabled, a local Mac agent press activates Codex before its native Micro event is sent, so approval and other keyboard shortcuts target Codex instead of the previously active app. Remote agents never activate the local app.
+
+For a local installation or test environment, set `CODEX_DECK_FOCUS_CODEX_ON_AGENT_PRESS=true` before starting Stream Deck; it supplies the initial default until the inspector setting is saved.
+
 If an archive tool removed executable permissions, restore only the two launcher files:
 
 ```zsh

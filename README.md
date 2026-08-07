@@ -23,6 +23,7 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 ## Features
 
 - Six dynamic agent keys using the source and assignments selected in **Codex Settings > Codex Micro**.
+- Optional macOS focus on local agent presses, so Codex receives subsequent keyboard shortcuts even when another app was active.
 - Live idle, working, unread completion, approval/input, error, and empty states.
 - Codex-aligned light and dark rendering with restrained status animation.
 - Native key-down/key-up handling for Micro slots `ACT06` through `ACT12`.
@@ -93,6 +94,10 @@ The action names describe the default Codex Micro setup. The keys always follow 
 ²Use the target key only in Windows + Mac mode. In a single-computer setup, leave it empty or replace it with another keycap action. ³Configure Stream Deck's built-in **Switch Profile** action to return to your own standard profile; no user-specific profile ID is distributed.
 
 The page-navigation and profile-switch keys are built-in Stream Deck actions. All other named controls come from Codex Deck. Every official Codex Micro keycap is also exposed as a standalone action, so extra pages can be customized without changing the six synchronized Micro action slots.
+
+### Optional macOS app focus
+
+The **Agent Display** inspector includes a global **Focus Codex** setting for the six agent keys. It defaults to off. On a local Mac, enabling it activates Codex before the agent action, so keyboard shortcuts such as approval target Codex rather than the previously active app. It never focuses the local app for an agent routed to a remote host. For an environment default, set `CODEX_DECK_FOCUS_CODEX_ON_AGENT_PRESS=true` before starting Stream Deck; an explicit inspector choice takes precedence.
 
 ### Usage and reset controls
 

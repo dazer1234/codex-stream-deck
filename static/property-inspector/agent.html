@@ -8,6 +8,7 @@
     :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; padding: 14px; color: #d8d8d8; background: #2d2d2d; font-size: 12px; }
     label { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 8px; cursor: pointer; }
+    label + label { margin-top: 10px; }
     input { width: 17px; height: 17px; margin: 0; accent-color: #1683ff; }
     p { margin: 12px 0 0 100px; color: #a9a9a9; line-height: 1.35; }
   </style>
@@ -17,7 +18,11 @@
     <span>Context ring</span>
     <input id="show-context-rings" type="checkbox" checked>
   </label>
-  <p>This global option applies to all six Codex agent keys on this computer.</p>
+  <label>
+    <span>Focus Codex</span>
+    <input id="focus-codex-on-agent-press" type="checkbox">
+  </label>
+  <p>These global options apply to all six Codex agent keys on this computer. Focus Codex activates the local Mac app before opening an agent, so its keyboard shortcuts are ready.</p>
   <script>
     let websocket;
     let pluginContext;
@@ -35,11 +40,21 @@
         if (event.event !== "didReceiveGlobalSettings") return;
         globalSettings = event.payload?.settings ?? {};
         document.getElementById("show-context-rings").checked = globalSettings.showContextRings !== false;
+        document.getElementById("focus-codex-on-agent-press").checked = globalSettings.focusCodexOnAgentPress === true;
       });
     };
 
     document.getElementById("show-context-rings").addEventListener("change", (event) => {
       globalSettings = { ...globalSettings, showContextRings: event.target.checked };
+      if (websocket?.readyState === WebSocket.OPEN) {
+        websocket.send(JSON.stringify({
+          event: "setGlobalSettings", context: pluginContext, payload: globalSettings
+        }));
+      }
+    });
+
+    document.getElementById("focus-codex-on-agent-press").addEventListener("change", (event) => {
+      globalSettings = { ...globalSettings, focusCodexOnAgentPress: event.target.checked };
       if (websocket?.readyState === WebSocket.OPEN) {
         websocket.send(JSON.stringify({
           event: "setGlobalSettings", context: pluginContext, payload: globalSettings
