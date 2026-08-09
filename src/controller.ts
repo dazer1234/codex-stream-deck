@@ -66,6 +66,7 @@ export class DeckController {
   private poll?: NodeJS.Timeout;
   private animation?: NodeJS.Timeout;
   private refreshInFlight?: Promise<void>;
+  private localSnapshotGeneration = 0;
   private stopped = false;
   private animationFrame = 0;
   private lastError = "";
@@ -108,10 +109,7 @@ export class DeckController {
         let mobileSnapshotDirty = false;
         const runAndInvalidate = async (operation: () => Promise<void>): Promise<void> => {
           await operation();
-          // The relay server publishes a fresh snapshot after acknowledging the
-          // command. Do not make the command result wait for a second full
-          // controller refresh: a renderer refresh can take several seconds
-          // and remote clients intentionally use a short command timeout.
+          // The relay server publishes a fresh snapshot after the command.
           mobileSnapshotDirty = true;
         };
         const mobileControl = {
@@ -137,7 +135,10 @@ export class DeckController {
             () => this.microBridge.adjustReasoning(direction)),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
-          refreshUsage: () => runAndInvalidate(() => this.microBridge.requestUsageRefresh().then(() => undefined)),
+          refreshUsage: async () => {
+            await this.refreshLocalUsage();
+            mobileSnapshotDirty = false;
+          },
           consumeRateLimitReset: () => runAndInvalidate(() => this.microBridge.consumeRateLimitReset())
         };
         if (mobileRelayConfig) {
@@ -339,9 +340,17 @@ export class DeckController {
       return;
     }
 
-    const host = this.localHost ?? await getOrCreateHostIdentity();
+    await this.refreshLocalUsage();
+  }
+
+  private async refreshLocalUsage(): Promise<MicroSnapshot> {
+    const generation = ++this.localSnapshotGeneration;
     try {
+      const host = this.localHost ?? await getOrCreateHostIdentity();
       const snapshot = await this.microBridge.requestUsageRefresh();
+      if (generation !== this.localSnapshotGeneration) {
+        throw new Error("Codex usage refresh was superseded by a newer refresh.");
+      }
       const observedAt = Date.now();
       this.localHost = host;
       this.mobileRelayServer?.updateHost(host);
@@ -349,7 +358,10 @@ export class DeckController {
       this.localSnapshot = { host, snapshot, observedAt };
       this.localHealth = { state: "ready", changedAt: observedAt };
       this.lastError = "";
+      await this.refreshDisplay();
+      return snapshot;
     } catch (error) {
+      if (generation !== this.localSnapshotGeneration) throw error;
       this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
       const message = String(error);
       if (message !== this.lastError) {
@@ -359,7 +371,6 @@ export class DeckController {
       await this.refreshDisplay();
       throw error;
     }
-    await this.refreshDisplay();
   }
 
   private async refresh(): Promise<void> {
@@ -371,15 +382,20 @@ export class DeckController {
   }
 
   private async refreshOnce(): Promise<void> {
+    const generation = this.localSnapshotGeneration;
     try {
       const snapshot = await this.microBridge.refresh();
-      this.localHost = await getOrCreateHostIdentity();
-      this.mobileRelayServer?.updateHost(this.localHost);
-      this.localMobileRelayServer?.updateHost(this.localHost);
-      this.localSnapshot = { host: this.localHost, snapshot, observedAt: Date.now() };
+      if (generation !== this.localSnapshotGeneration) return;
+      const host = await getOrCreateHostIdentity();
+      if (generation !== this.localSnapshotGeneration) return;
+      this.localHost = host;
+      this.mobileRelayServer?.updateHost(host);
+      this.localMobileRelayServer?.updateHost(host);
+      this.localSnapshot = { host, snapshot, observedAt: Date.now() };
       this.localHealth = { state: "ready", changedAt: Date.now() };
       this.lastError = "";
     } catch (error) {
+      if (generation !== this.localSnapshotGeneration) return;
       this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
       const message = String(error);
       if (message !== this.lastError) {

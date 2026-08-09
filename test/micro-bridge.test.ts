@@ -66,7 +66,16 @@ test("renderer snapshots choose the visible reasoning composer trigger", () => {
 test("forced and normal bridge snapshots carry independent lexical refresh modes", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const expressions: string[] = [];
-  const nativeSnapshot = snapshotFixture();
+  const nativeSnapshot: MicroSnapshot = {
+    ...snapshotFixture(),
+    usage: {
+      windows: [{
+        id: "five-hour", kind: "five-hour", usedPercent: 25, remainingPercent: 75,
+        windowDurationMins: 300, resetsAt: null
+      }],
+      observedAt: 10_000, resetCreditsAvailable: null, resetCreditsApplicable: null
+    }
+  };
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
     evaluate: <T>(expression: string) => Promise<T>;
@@ -102,6 +111,73 @@ test("forced usage query failures reject while normal background refresh remains
 
   const normal = { state: { data: "last-known", dataUpdatedAt: 1 }, fetch: async () => { throw failure; } };
   assert.equal(await read(normal, false, 20_000, {}), "last-known");
+});
+
+test("forced usage accepts only a normalized rate-limit window after fetch", async () => {
+  const normalizeRendererUsage = Reflect.get(microBridgeModule, "normalizeRendererUsage") as unknown;
+  assert.equal(typeof normalizeRendererUsage, "function");
+  const normalize = normalizeRendererUsage as (
+    data: unknown, dataUpdatedAt?: number, now?: number
+  ) => MicroSnapshot["usage"];
+  const readUsageQueryData = Reflect.get(microBridgeModule, "readUsageQueryData") as (
+    query: { state: { data?: unknown; dataUpdatedAt: number }; fetch: () => Promise<unknown> },
+    forceUsageRefresh: boolean,
+    now?: number,
+    refreshState?: Record<symbol, unknown>
+  ) => Promise<unknown>;
+  const invalidData = [
+    undefined,
+    { account: "present-without-rate-limit" },
+    { rate_limit: { primary_window: { used_percent: "unknown", limit_window_seconds: 18_000 } } }
+  ];
+
+  for (const data of invalidData) {
+    const query = { state: { data, dataUpdatedAt: 10_000 }, fetch: async () => undefined };
+    const fetched = await readUsageQueryData(query, true, 20_000, {});
+    assert.equal(normalize(fetched, query.state.dataUpdatedAt, 20_000), undefined);
+  }
+
+  const valid = normalize({
+    rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18_000, reset_at: 30_000 } }
+  }, 10_000, 20_000);
+  assert.equal(valid?.windows.length, 1);
+  assert.equal(valid?.windows[0]?.kind, "five-hour");
+  assert.equal(valid?.windows[0]?.remainingPercent, 75);
+});
+
+test("forced bridge snapshots reject absent or empty normalized usage", async () => {
+  for (const nativeSnapshot of [
+    snapshotFixture(),
+    {
+      ...snapshotFixture(),
+      usage: {
+        windows: [], observedAt: 10_000,
+        resetCreditsAvailable: null, resetCreditsApplicable: null
+      }
+    },
+    {
+      ...snapshotFixture(),
+      usage: {
+        windows: [{
+          id: "five-hour", kind: "five-hour", usedPercent: Number.NaN, remainingPercent: 75,
+          windowDurationMins: 300, resetsAt: null
+        }],
+        observedAt: 10_000, resetCreditsAvailable: null, resetCreditsApplicable: null
+      }
+    }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(expression: string) => Promise<T>;
+      sessionOwnership: { annotate: (value: MicroSnapshot) => Promise<MicroSnapshot> };
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = async <T>(): Promise<T> => structuredClone(nativeSnapshot) as T;
+    testBridge.sessionOwnership = { annotate: async (value) => value };
+
+    await assert.rejects(bridge.requestUsageRefresh(), /valid rate-limit usage/);
+  }
 });
 
 test("renderer bridge prefers the main index document over macOS avatar surfaces", () => {

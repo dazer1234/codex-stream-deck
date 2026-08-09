@@ -7,7 +7,9 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
-import type { MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment } from "./types.js";
+import type {
+  MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, UsageSnapshot, UsageWindow
+} from "./types.js";
 
 type DebugTarget = {
   type: string;
@@ -95,6 +97,80 @@ export async function readUsageQueryData(
   return query.state?.data;
 }
 
+export function normalizeRendererUsage(
+  data: unknown,
+  dataUpdatedAt?: number,
+  now = Date.now()
+): UsageSnapshot | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const record = data as Record<string, unknown>;
+  const rateLimit = record.rate_limit;
+  if (!rateLimit || typeof rateLimit !== "object" || Array.isArray(rateLimit)) return undefined;
+  const rateLimitRecord = rateLimit as Record<string, unknown>;
+  const toEpoch = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value < 100000000000 ? value * 1000 : value;
+    }
+    if (typeof value === "string") {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  };
+  const normalizeWindow = (value: unknown, role: string): UsageWindow | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const window = value as Record<string, unknown>;
+    const used = Number(window.used_percent);
+    if (!Number.isFinite(used)) return null;
+    const seconds = Number(window.limit_window_seconds);
+    const minutes = Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : null;
+    const kind: UsageWindow["kind"] = minutes != null && Math.abs(minutes - 300) <= 1 ? "five-hour"
+      : minutes != null && Math.abs(minutes - 10080) <= 1 ? "weekly"
+        : "other";
+    const usedPercent = Math.min(100, Math.max(0, used));
+    return {
+      id: kind === "other" ? `${role}-${String(minutes ?? "unknown")}` : kind,
+      kind,
+      usedPercent,
+      remainingPercent: 100 - usedPercent,
+      windowDurationMins: minutes,
+      resetsAt: toEpoch(window.reset_at) ?? null
+    };
+  };
+  const windows = [
+    normalizeWindow(rateLimitRecord.primary_window, "primary"),
+    normalizeWindow(rateLimitRecord.secondary_window, "secondary")
+  ].filter((window): window is NonNullable<typeof window> => window != null);
+  if (windows.length === 0) return undefined;
+  const credits = record.rate_limit_reset_credits;
+  const creditRecord = credits && typeof credits === "object" && !Array.isArray(credits)
+    ? credits as Record<string, unknown>
+    : {};
+  const available = Number(creditRecord.available_count);
+  const applicable = Number(creditRecord.applicable_available_count);
+  return {
+    windows,
+    observedAt: Number.isFinite(dataUpdatedAt) && Number(dataUpdatedAt) > 0 ? Number(dataUpdatedAt) : now,
+    resetCreditsAvailable: Number.isFinite(available) ? Math.max(0, Math.floor(available)) : null,
+    resetCreditsApplicable: Number.isFinite(applicable) ? Math.max(0, Math.floor(applicable)) : null
+  };
+}
+
+function hasValidNormalizedUsage(usage: UsageSnapshot | undefined): usage is UsageSnapshot {
+  if (!usage || !Array.isArray(usage.windows) || usage.windows.length === 0 || usage.windows.length > 8) return false;
+  if (!Number.isFinite(usage.observedAt) || usage.observedAt <= 0) return false;
+  const validCredit = (value: number | null): boolean => value == null || (Number.isSafeInteger(value) && value >= 0);
+  if (!validCredit(usage.resetCreditsAvailable) || !validCredit(usage.resetCreditsApplicable)) return false;
+  return usage.windows.every((window) =>
+    typeof window.id === "string" && window.id.length > 0 && window.id.length <= 64 &&
+    ["five-hour", "weekly", "other"].includes(window.kind) &&
+    Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 &&
+    Number.isFinite(window.remainingPercent) && window.remainingPercent >= 0 && window.remainingPercent <= 100 &&
+    (window.windowDurationMins == null || (Number.isFinite(window.windowDurationMins) && window.windowDurationMins > 0)) &&
+    (window.resetsAt == null || (Number.isFinite(window.resetsAt) && window.resetsAt > 0))
+  );
+}
+
 type ReasoningEffortElement = {
   isConnected?: boolean;
   getClientRects?: () => { length: number };
@@ -120,6 +196,7 @@ export function readActiveReasoningEffort(
 const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () => {
   const forceUsageRefresh = ${forceUsageRefresh};
   const readUsageQueryData = (${readUsageQueryData.toString()});
+  const normalizeRendererUsage = (${normalizeRendererUsage.toString()});
   const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
   const urls = [...new Set([
     ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
@@ -274,47 +351,15 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
       );
       if (forceUsageRefresh && query && typeof query.fetch === 'function') forcedUsageQueryFound = true;
       const data = await readUsageQueryData(query, forceUsageRefresh);
-      const rateLimit = data?.rate_limit;
-      if (!rateLimit || typeof rateLimit !== 'object') continue;
-      const normalizeWindow = (window, role) => {
-        if (!window || typeof window !== 'object') return null;
-        const used = Number(window.used_percent);
-        if (!Number.isFinite(used)) return null;
-        const seconds = Number(window.limit_window_seconds);
-        const minutes = Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : null;
-        const kind = minutes != null && Math.abs(minutes - 300) <= 1 ? 'five-hour'
-          : minutes != null && Math.abs(minutes - 10080) <= 1 ? 'weekly'
-            : 'other';
-        const usedPercent = Math.min(100, Math.max(0, used));
-        return {
-          id: kind === 'other' ? role + '-' + String(minutes ?? 'unknown') : kind,
-          kind,
-          usedPercent,
-          remainingPercent: 100 - usedPercent,
-          windowDurationMins: minutes,
-          resetsAt: toEpoch(window.reset_at) ?? null
-        };
-      };
-      const windows = [
-        normalizeWindow(rateLimit.primary_window, 'primary'),
-        normalizeWindow(rateLimit.secondary_window, 'secondary')
-      ].filter(Boolean);
-      const available = Number(data.rate_limit_reset_credits?.available_count);
-      const applicable = Number(data.rate_limit_reset_credits?.applicable_available_count);
-      usage = {
-        windows,
-        observedAt: Number.isFinite(query.state?.dataUpdatedAt) && query.state.dataUpdatedAt > 0
-          ? query.state.dataUpdatedAt
-          : Date.now(),
-        resetCreditsAvailable: Number.isFinite(available) ? Math.max(0, Math.floor(available)) : null,
-        resetCreditsApplicable: Number.isFinite(applicable) ? Math.max(0, Math.floor(applicable)) : null
-      };
+      usage = normalizeRendererUsage(data, query?.state?.dataUpdatedAt);
+      if (!usage) continue;
       break;
     } catch (error) {
       if (forceUsageRefresh) throw error;
     }
   }
   if (forceUsageRefresh && !forcedUsageQueryFound) throw new Error('Codex usage query is unavailable.');
+  if (forceUsageRefresh && !usage) throw new Error('Codex usage refresh returned no valid rate-limit usage.');
 
   const html = document.documentElement;
   const body = document.body;
@@ -396,6 +441,9 @@ export class CodexMicroRendererBridge {
   private async readSnapshot(forceUsageRefresh: boolean): Promise<MicroSnapshot> {
     await this.ensureConnected();
     const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION(forceUsageRefresh));
+    if (forceUsageRefresh && !hasValidNormalizedUsage(nativeSnapshot.usage)) {
+      throw new Error("Codex usage refresh returned no valid rate-limit usage.");
+    }
     const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
     this.lastSnapshot = snapshot;
     return snapshot;

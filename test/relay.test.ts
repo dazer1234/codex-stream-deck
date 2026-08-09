@@ -1058,7 +1058,7 @@ test("controller refreshes account usage on its source host instead of the selec
   assert.match(source, /refreshUsage[\s\S]*supportsCapabilityForSnapshot\("usage-refresh", source\.hostId\)/);
   assert.match(source, /refreshUsage[\s\S]*\{ kind: "usage-refresh" \}/);
   assert.match(source, /Remote Codex host does not support usage refresh\./);
-  assert.match(source, /refreshUsage: \(\) => runAndInvalidate\(\(\) => this\.microBridge\.requestUsageRefresh\(\)\.then\(\(\) => undefined\)\)/);
+  assert.match(source, /refreshUsage: async \(\) => \{[\s\S]*?await this\.refreshLocalUsage\(\);[\s\S]*?mobileSnapshotDirty = false/);
 });
 
 test("controller preserves last-known usage and degrades health when forced refresh rejects", async () => {
@@ -1093,6 +1093,52 @@ test("controller preserves last-known usage and degrades health when forced refr
   assert.equal(state.localSnapshot.snapshot.usage?.observedAt, 1_000);
   assert.equal(state.localHealth.state, "degraded");
   assert.equal(state.localHealth.reason, "local-bridge-unavailable");
+});
+
+test("forced controller usage wins over a pre-command refresh in flight", async () => {
+  const { DeckController } = await import("../src/controller.js");
+  const controller = new DeckController();
+  let releasePreCommand!: (value: MicroSnapshot) => void;
+  const preCommand = new Promise<MicroSnapshot>((resolve) => { releasePreCommand = resolve; });
+  const forcedSnapshot: MicroSnapshot = {
+    ...structuredClone(snapshot),
+    reasoningEffort: "forced",
+    usage: {
+      windows: [{
+        id: "five-hour", kind: "five-hour", usedPercent: 20, remainingPercent: 80,
+        windowDurationMins: 300, resetsAt: 30_000
+      }],
+      observedAt: 20_000, resetCreditsAvailable: 1, resetCreditsApplicable: 1
+    }
+  };
+  const state = controller as unknown as {
+    microBridge: {
+      refresh: () => Promise<MicroSnapshot>;
+      requestUsageRefresh: () => Promise<MicroSnapshot>;
+    };
+    localHost: CodexHost;
+    localSnapshot?: HostSnapshot;
+    localHealth: { state: string; changedAt: number; reason?: string };
+    refresh: () => Promise<void>;
+    refreshDisplay: () => Promise<void>;
+  };
+  state.microBridge = {
+    refresh: async () => preCommand,
+    requestUsageRefresh: async () => structuredClone(forcedSnapshot)
+  };
+  state.localHost = host;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.refreshDisplay = async () => {};
+
+  const olderRefresh = state.refresh();
+  await controller.refreshUsage();
+  assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "forced");
+
+  releasePreCommand({ ...structuredClone(snapshot), reasoningEffort: "stale-pre-command" });
+  await olderRefresh;
+  assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "forced");
+  assert.equal(state.localSnapshot?.snapshot.usage?.observedAt, 20_000);
+  assert.equal(state.localHealth.state, "ready");
 });
 
 async function freePort(): Promise<number> {
