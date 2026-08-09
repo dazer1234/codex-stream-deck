@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
-import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import type { DeckController } from "../src/controller.js";
 import { CodexDialAction } from "../src/dial-action.js";
 
-const execFileAsync = promisify(execFile);
 const text = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 type ManifestAction = {
@@ -39,14 +37,17 @@ function adapterHarness(): { adapter: CodexDialAction; calls: ControllerCall[] }
   };
 }
 
-test("manifest adds exactly one Encoder-only Codex Dial without changing keypad actions", async () => {
-  const manifest = JSON.parse(await text("static/manifest.json")) as { Version: string; Actions: ManifestAction[] };
+test("manifest adds exactly one Encoder-only Codex Dial and covers every declared action", async () => {
+  const manifest = JSON.parse(await text("static/manifest.json")) as { Actions: ManifestAction[] };
   const uuids = manifest.Actions.map(({ UUID }) => UUID);
   const dials = manifest.Actions.filter(({ UUID }) => UUID === "com.simeo.codex-deck.codex-dial");
+  const actionSources = await Promise.all([text("src/actions.ts"), text("src/dial-action.ts")]);
+  const declaredUuids = [...actionSources.join("\n").matchAll(/@action\(\{ UUID: "([^"]+)" \}\)/g)]
+    .map(([, uuid]) => uuid)
+    .filter((uuid): uuid is string => uuid !== undefined);
 
-  assert.equal(manifest.Version, "0.7.0.2");
-  assert.equal(manifest.Actions.length, 54, "the existing 53 actions plus Codex Dial remain present");
   assert.equal(new Set(uuids).size, uuids.length, "every action UUID is unique");
+  assert.deepEqual([...uuids].sort(), [...declaredUuids].sort(), "manifest and declared actions stay in parity");
   assert.equal(dials.length, 1);
   assert.deepEqual(dials[0]?.Controllers, ["Encoder"]);
   assert.equal(dials[0]?.Encoder?.Icon, "static/imgs/dial");
@@ -137,12 +138,37 @@ test("dial artwork and the Task 5 inspector shell are self-contained", async () 
   assert.doesNotMatch(inspector, /<input|<select|<button/i, "full configuration controls belong to Task 6");
 });
 
-test("build emits every Encoder asset at its manifest path", async () => {
-  await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: new URL("..", import.meta.url) });
-  for (const path of [
-    "dist/com.simeo.codex-deck.sdPlugin/static/imgs/dial.svg",
-    "dist/com.simeo.codex-deck.sdPlugin/static/imgs/dial@2x.svg",
-    "dist/com.simeo.codex-deck.sdPlugin/static/layouts/codex-dial.json",
-    "dist/com.simeo.codex-deck.sdPlugin/static/property-inspector/codex-dial.html"
-  ]) await access(new URL(`../${path}`, import.meta.url));
+test("minimal inspector opens loopback WebSocket and sends the Stream Deck registration payload", async () => {
+  const inspector = await text("static/property-inspector/codex-dial.html");
+  const script = inspector.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "inspector contains an executable registration script");
+
+  const sockets: FakeWebSocket[] = [];
+  class FakeWebSocket {
+    readonly listeners = new Map<string, () => void>();
+    readonly sent: string[] = [];
+    constructor(readonly url: string) { sockets.push(this); }
+    addEventListener(name: string, listener: () => void): void { this.listeners.set(name, listener); }
+    send(payload: string): void { this.sent.push(payload); }
+  }
+  const window: Record<string, unknown> = {};
+  runInNewContext(script, { window, WebSocket: FakeWebSocket });
+  const connect = window.connectElgatoStreamDeckSocket as
+    ((port: number, uuid: string, registerEvent: string) => void) | undefined;
+
+  assert.ok(connect);
+  connect(24680, "plugin-uuid", "registerPropertyInspector");
+  assert.equal(sockets[0]?.url, "ws://127.0.0.1:24680");
+  sockets[0]?.listeners.get("open")?.();
+  assert.deepEqual(sockets[0]?.sent.map((payload) => JSON.parse(payload)), [
+    { event: "registerPropertyInspector", uuid: "plugin-uuid" }
+  ]);
+});
+
+test("build wires every Encoder asset without executing the source-mutating generator", async () => {
+  const source = await text("scripts/build.mjs");
+  assert.match(source, /mkdir\(resolve\(output, "static\/layouts"\)/);
+  for (const filename of ["dial.svg", "dial@2x.svg", "codex-dial.json", "codex-dial.html"]) {
+    assert.match(source, new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
