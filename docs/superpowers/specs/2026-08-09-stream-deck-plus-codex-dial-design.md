@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-09
 
-**Status:** Draft for user review
+**Status:** Approved by user
 
 **Repository:** `dazer1234/codex-stream-deck`
 
