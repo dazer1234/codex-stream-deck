@@ -1,5 +1,5 @@
 import { readFile, readdir, stat } from "node:fs/promises";
-import { basename, extname, resolve } from "node:path";
+import { basename, extname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
 
 const roots = process.argv.slice(2).length
   ? process.argv.slice(2).map((path) => resolve(path))
@@ -18,12 +18,7 @@ const forbiddenText = [
   ...String(process.env.CODEX_DECK_PRIVATE_MARKERS ?? "").split("|").filter(Boolean).map((marker) => new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"))
 ];
 const textExtensions = new Set([".cmd", ".command", ".html", ".js", ".json", ".map", ".md", ".mjs", ".ps1", ".sh", ".svg", ".txt"]);
-const codexDialAssets = [
-  "static/property-inspector/codex-dial.html",
-  "static/layouts/codex-dial.json",
-  "static/imgs/dial.svg",
-  "static/imgs/dial@2x.svg"
-];
+const codexDialUuid = "com.simeo.codex-deck.codex-dial";
 const failures = [];
 
 async function walk(path) {
@@ -75,20 +70,59 @@ async function readPluginManifest(root) {
 
 async function auditDeclaredCodexDialAssets(root) {
   const manifest = await readPluginManifest(root);
-  if (!manifest) {
+  if (!manifest) return;
+  const actions = manifest.Actions.filter((action) =>
+    action && typeof action === "object" && !Array.isArray(action) && action.UUID === codexDialUuid
+  );
+  if (actions.length !== 1) {
+    failures.push(`${root}: plugin manifest must declare exactly one Codex Dial action`);
     return;
   }
-  const declaresDial = manifest.Actions.some(
-    (action) => action?.UUID === "com.simeo.codex-deck.codex-dial"
-  );
-  if (!declaresDial) return;
-  for (const relative of codexDialAssets) {
-    try {
-      const info = await stat(resolve(root, relative));
-      if (!info.isFile()) throw new Error("not a file");
-    } catch {
-      failures.push(`${root}: missing packaged Codex Dial asset: ${relative}`);
-    }
+  const action = actions[0];
+  if (!action.Encoder || typeof action.Encoder !== "object" || Array.isArray(action.Encoder)) {
+    failures.push(`${root}: Codex Dial Encoder must be an object`);
+    return;
+  }
+  const inspector = safeDeclaredPath(root, action.PropertyInspectorPath, "PropertyInspectorPath");
+  const layout = safeDeclaredPath(root, action.Encoder.layout, "Encoder.layout");
+  const icon = safeDeclaredPath(root, action.Encoder.Icon, "Encoder.Icon", true);
+  if (!inspector || !layout || !icon) return;
+  await Promise.all([
+    auditDeclaredFile(root, inspector, "PropertyInspectorPath"),
+    auditDeclaredFile(root, layout, "Encoder.layout"),
+    auditDeclaredFile(root, { path: `${icon.path}.svg`, absolute: `${icon.absolute}.svg` }, "Encoder.Icon"),
+    auditDeclaredFile(root, { path: `${icon.path}@2x.svg`, absolute: `${icon.absolute}@2x.svg` }, "Encoder.Icon")
+  ]);
+}
+
+function safeDeclaredPath(root, value, field, extensionless = false) {
+  const suffix = extensionless ? " extensionless" : "";
+  const invalid = () => {
+    failures.push(`${root}: Codex Dial ${field} must be a non-empty safe relative${suffix} path`);
+    return undefined;
+  };
+  if (typeof value !== "string" || value.length === 0 || value.trim() !== value ||
+      value.includes("\\") || value.includes(":")) return invalid();
+  if (posix.isAbsolute(value) || win32.isAbsolute(value)) return invalid();
+  const normalized = posix.normalize(value);
+  if (normalized !== value || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    return invalid();
+  }
+  if (extensionless && posix.extname(value) !== "") return invalid();
+  const absolute = resolve(root, value);
+  const fromRoot = relative(root, absolute);
+  if (!fromRoot || isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
+    return invalid();
+  }
+  return { path: value, absolute };
+}
+
+async function auditDeclaredFile(root, declared, field) {
+  try {
+    const info = await stat(declared.absolute);
+    if (!info.isFile()) throw new Error("not a file");
+  } catch {
+    failures.push(`${root}: missing packaged Codex Dial asset: ${declared.path} (declared by ${field})`);
   }
 }
 

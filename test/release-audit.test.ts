@@ -7,9 +7,34 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const auditScript = fileURLToPath(new URL("../scripts/audit-release.mjs", import.meta.url));
+const dialUuid = "com.simeo.codex-deck.codex-dial";
+const canonicalDial = {
+  UUID: dialUuid,
+  PropertyInspectorPath: "static/property-inspector/codex-dial.html",
+  Encoder: {
+    layout: "static/layouts/codex-dial.json",
+    Icon: "static/imgs/dial"
+  }
+};
 
 function audit(root: string) {
   return spawnSync(process.execPath, [auditScript, root], { encoding: "utf8" });
+}
+
+async function writeAssets(root: string, paths: string[]): Promise<void> {
+  for (const relative of paths) {
+    await mkdir(join(root, relative, ".."), { recursive: true });
+    await writeFile(join(root, relative), "fixture\n", "utf8");
+  }
+}
+
+async function writeCanonicalDialAssets(root: string): Promise<void> {
+  await writeAssets(root, [
+    canonicalDial.PropertyInspectorPath,
+    canonicalDial.Encoder.layout,
+    `${canonicalDial.Encoder.Icon}.svg`,
+    `${canonicalDial.Encoder.Icon}@2x.svg`
+  ]);
 }
 
 test("release audit accepts explicit clean roots and rejects private state", async () => {
@@ -72,25 +97,102 @@ test("release audit requires every packaged Codex Dial asset declared by a plugi
   try {
     await mkdir(root);
     await writeFile(join(root, "manifest.json"), JSON.stringify({
-      Actions: [{ UUID: "com.simeo.codex-deck.codex-dial", Controllers: ["Encoder"] }]
+      Actions: [canonicalDial]
     }), "utf8");
 
     const missingResult = audit(root);
     assert.equal(missingResult.status, 1);
-    for (const relative of [
+    const required = [
       "static/property-inspector/codex-dial.html",
       "static/layouts/codex-dial.json",
       "static/imgs/dial.svg",
       "static/imgs/dial@2x.svg"
-    ]) {
+    ];
+    for (const relative of required) {
       assert.match(missingResult.stderr, new RegExp(`missing packaged Codex Dial asset: ${relative.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      await mkdir(join(root, relative, ".."), { recursive: true });
-      await writeFile(join(root, relative), "fixture\n", "utf8");
     }
+    await writeAssets(root, required);
 
     const completeResult = audit(root);
     assert.equal(completeResult.status, 0, completeResult.stderr);
     assert.match(completeResult.stdout, /passed for 1 artifact roots/);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("release audit follows safe manifest-declared Codex Dial asset paths", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-deck-declared-assets-audit-"));
+  try {
+    const relocated = join(parent, "relocated.sdPlugin");
+    const relocatedDial = {
+      UUID: dialUuid,
+      PropertyInspectorPath: "ui/dial-inspector.html",
+      Encoder: { layout: "feedback/dial-layout.json", Icon: "art/encoder/dial-mark" }
+    };
+    await mkdir(relocated);
+    await writeFile(join(relocated, "manifest.json"), JSON.stringify({ Actions: [relocatedDial] }), "utf8");
+    await writeAssets(relocated, [
+      relocatedDial.PropertyInspectorPath,
+      relocatedDial.Encoder.layout,
+      `${relocatedDial.Encoder.Icon}.svg`,
+      `${relocatedDial.Encoder.Icon}@2x.svg`
+    ]);
+    const relocatedResult = audit(relocated);
+    assert.equal(relocatedResult.status, 0, relocatedResult.stderr);
+
+    const wrong = join(parent, "wrong-declarations.sdPlugin");
+    const wrongDial = {
+      UUID: dialUuid,
+      PropertyInspectorPath: "declared/missing-inspector.html",
+      Encoder: { layout: "declared/missing-layout.json", Icon: "declared/missing-icon" }
+    };
+    await mkdir(wrong);
+    await writeFile(join(wrong, "manifest.json"), JSON.stringify({ Actions: [wrongDial] }), "utf8");
+    await writeCanonicalDialAssets(wrong);
+    const wrongResult = audit(wrong);
+    assert.equal(wrongResult.status, 1, "canonical files cannot satisfy different declared paths");
+    for (const relative of [
+      wrongDial.PropertyInspectorPath,
+      wrongDial.Encoder.layout,
+      `${wrongDial.Encoder.Icon}.svg`,
+      `${wrongDial.Encoder.Icon}@2x.svg`
+    ]) assert.match(wrongResult.stderr, new RegExp(relative.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("release audit rejects duplicate, incomplete, typed-wrong, and unsafe Codex Dial declarations", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-deck-unsafe-dial-audit-"));
+  try {
+    const cases: Array<[string, unknown, RegExp]> = [
+      ["missing-dial", { Actions: [] }, /exactly one Codex Dial action/],
+      ["duplicate-dial", { Actions: [canonicalDial, canonicalDial] }, /exactly one Codex Dial action/],
+      ["missing-encoder", { Actions: [{ UUID: dialUuid, PropertyInspectorPath: canonicalDial.PropertyInspectorPath }] }, /Encoder must be an object/],
+      ["missing-inspector", { Actions: [{ UUID: dialUuid, Encoder: canonicalDial.Encoder }] }, /PropertyInspectorPath must be a non-empty safe relative path/],
+      ["wrong-inspector-type", { Actions: [{ ...canonicalDial, PropertyInspectorPath: 7 }] }, /PropertyInspectorPath must be a non-empty safe relative path/],
+      ["missing-layout", { Actions: [{ ...canonicalDial, Encoder: { Icon: canonicalDial.Encoder.Icon } }] }, /Encoder\.layout must be a non-empty safe relative path/],
+      ["wrong-layout-type", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, layout: [] } }] }, /Encoder\.layout must be a non-empty safe relative path/],
+      ["missing-icon", { Actions: [{ ...canonicalDial, Encoder: { layout: canonicalDial.Encoder.layout } }] }, /Encoder\.Icon must be a non-empty safe relative extensionless path/],
+      ["wrong-icon-type", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, Icon: {} } }] }, /Encoder\.Icon must be a non-empty safe relative extensionless path/],
+      ["traversal", { Actions: [{ ...canonicalDial, PropertyInspectorPath: "../outside.html" }] }, /PropertyInspectorPath must be a non-empty safe relative path/],
+      ["normalized-traversal", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, layout: "static/layouts/../manifest.json" } }] }, /Encoder\.layout must be a non-empty safe relative path/],
+      ["posix-absolute", { Actions: [{ ...canonicalDial, PropertyInspectorPath: "/tmp/dial.html" }] }, /PropertyInspectorPath must be a non-empty safe relative path/],
+      ["windows-absolute", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, Icon: "C:\\temp\\dial" } }] }, /Encoder\.Icon must be a non-empty safe relative extensionless path/],
+      ["backslash-relative", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, layout: "static\\layouts\\dial.json" } }] }, /Encoder\.layout must be a non-empty safe relative path/],
+      ["icon-extension", { Actions: [{ ...canonicalDial, Encoder: { ...canonicalDial.Encoder, Icon: "static/imgs/dial.svg" } }] }, /Encoder\.Icon must be a non-empty safe relative extensionless path/]
+    ];
+
+    for (const [name, manifest, expected] of cases) {
+      const root = join(parent, `${name}.sdPlugin`);
+      await mkdir(root);
+      await writeFile(join(root, "manifest.json"), JSON.stringify(manifest), "utf8");
+      await writeCanonicalDialAssets(root);
+      const result = audit(root);
+      assert.equal(result.status, 1, `${name} must fail closed`);
+      assert.match(result.stderr, expected, `${name} reports the rejected declaration`);
+    }
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
