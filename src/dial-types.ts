@@ -1,14 +1,20 @@
-import type { JsonObject } from "@elgato/utils";
 import type { OfficialKeycapId } from "./keycaps.js";
 import type { MicroActionSlot, MicroDirection } from "./types.js";
 
-export const DIAL_PRESETS = ["reasoning", "agents", "actions", "navigation", "usage", "custom"] as const;
+export type JsonValue = boolean | number | string | null | undefined | JsonObject | JsonValue[];
+export interface JsonObject { [key: string]: JsonValue }
+
+export const DIAL_PRESETS = Object.freeze(
+  ["reasoning", "agents", "actions", "navigation", "usage", "custom"] as const
+);
 export type DialPreset = typeof DIAL_PRESETS[number];
 
-export const DIAL_FEEDBACK_MODES = ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"] as const;
+export const DIAL_FEEDBACK_MODES = Object.freeze(
+  ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"] as const
+);
 export type DialFeedbackMode = typeof DIAL_FEEDBACK_MODES[number];
 
-export const DIAL_SELECTOR_SOURCES = ["agents", "actions", "usage"] as const;
+export const DIAL_SELECTOR_SOURCES = Object.freeze(["agents", "actions", "usage"] as const);
 export type DialSelectorSource = typeof DIAL_SELECTOR_SOURCES[number];
 
 export type DialBindingId =
