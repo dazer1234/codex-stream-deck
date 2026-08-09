@@ -616,7 +616,7 @@ export class DeckController {
 
   async sendMicroAction(slot: MicroActionSlot, act: 0 | 1): Promise<void> {
     const target = this.pressTarget(`action:${slot}`, act);
-    await this.sendToHost(target, { kind: "action", slot, act }, () => this.microBridge.sendAction(slot, act));
+    await this.sendToHost(target, { kind: "action", slot, act }, () => this.runLocalMicroAction(slot, act));
   }
 
   async sendJoystick(direction: MicroDirection, distance: 0 | 1): Promise<void> {
@@ -634,7 +634,7 @@ export class DeckController {
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
-    await this.sendToTarget({ kind: "keycap", keycapId }, () => this.microBridge.runKeycap(keycapId));
+    await this.sendToTarget({ kind: "keycap", keycapId }, () => this.runLocalKeycap(keycapId));
   }
 
   async createTask(): Promise<void> {
@@ -1221,7 +1221,7 @@ export class DeckController {
       return this.sendDialToHost(
         route,
         { kind: "action", slot, act },
-        () => this.microBridge.sendAction(slot, act),
+        () => this.runLocalMicroAction(slot, act),
         act === 1
       );
     }
@@ -1239,7 +1239,7 @@ export class DeckController {
       return this.sendDialToHost(
         route,
         { kind: "keycap", keycapId },
-        () => this.microBridge.runKeycap(keycapId)
+        () => this.runLocalKeycap(keycapId)
       );
     }
     throw new Error("Unsupported Codex dial binding.");
@@ -1354,15 +1354,19 @@ export class DeckController {
     const snapshot = this.targetSnapshot();
     const keycapId = snapshot?.layout.slots[slot]?.keycapId;
     if (!keycapId) return;
-    const image = await this.keycapImage(keycapId, snapshot?.theme ?? "dark");
+    const toggleState = keycapId === "FAST" ? snapshot.fastModeEnabled : undefined;
+    const image = await this.keycapImage(keycapId, snapshot.theme, toggleState);
     if (image) await this.setImage(action, image);
   }
 
   private async renderFixedAction(registration: FixedIconRegistration): Promise<void> {
     const theme = this.targetSnapshot()?.theme ?? "dark";
+    const toggleState = registration.source.kind === "local" && registration.source.keycapId === "FAST"
+      ? this.targetSnapshot()?.fastModeEnabled
+      : undefined;
     const image = registration.source.kind === "builtin"
       ? renderBuiltinKeycap(registration.source.name, theme)
-      : await this.keycapImage(registration.source.keycapId, theme);
+      : await this.keycapImage(registration.source.keycapId, theme, toggleState);
     if (image) await this.setImage(registration.action, image);
   }
 
@@ -1505,6 +1509,18 @@ export class DeckController {
     return target;
   }
 
+  private async runLocalMicroAction(slot: MicroActionSlot, act: 0 | 1): Promise<void> {
+    const refreshFastState = act === 1 &&
+      this.localSnapshot?.snapshot.layout.slots[slot]?.keycapId === "FAST";
+    await this.microBridge.sendAction(slot, act);
+    if (refreshFastState) await this.refresh();
+  }
+
+  private async runLocalKeycap(keycapId: OfficialKeycapId): Promise<void> {
+    await this.microBridge.runKeycap(keycapId);
+    if (keycapId === "FAST") await this.refresh();
+  }
+
   private async setImage(action: KeyAction, image: string): Promise<void> {
     if (this.lastImages.get(action.id) === image) return;
     await Promise.all([action.setImage(image), action.setTitle("")]);
@@ -1546,13 +1562,18 @@ export class DeckController {
     }, 200);
   }
 
-  private keycapImage(keycapId: string, theme: "light" | "dark"): Promise<string | null> {
-    const cacheKey = `${theme}:${keycapId}`;
+  private keycapImage(
+    keycapId: string,
+    theme: "light" | "dark",
+    toggleState?: boolean
+  ): Promise<string | null> {
+    const stateKey = toggleState == null ? "unknown" : toggleState ? "on" : "off";
+    const cacheKey = `${theme}:${keycapId}:${stateKey}`;
     let pending = this.keycapImages.get(cacheKey);
     if (pending) return pending;
     pending = readFile(join(USER_ICON_ROOT, `${keycapId}.svg`), "utf8")
-      .then((svg) => renderImportedKeycap(svg, theme))
-      .catch(() => renderFallbackKeycap(keycapId, theme));
+      .then((svg) => renderImportedKeycap(svg, theme, toggleState))
+      .catch(() => renderFallbackKeycap(keycapId, theme, toggleState));
     this.keycapImages.set(cacheKey, pending);
     return pending;
   }

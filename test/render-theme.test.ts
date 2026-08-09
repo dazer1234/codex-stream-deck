@@ -73,6 +73,49 @@ test("missing local assets receive a readable themed fallback", () => {
   assert.doesNotMatch(output, /#000(?:000)?\b/i);
 });
 
+test("imported FAST keycaps expose authoritative green, red, and neutral states", () => {
+  const input = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M2 2h20v20H2z"/></svg>';
+  for (const [theme, enabled, semantic, signal] of [
+    ["dark", true, "on", SIGNAL_COLORS.dark.complete],
+    ["dark", false, "off", SIGNAL_COLORS.dark.error],
+    ["light", true, "on", SIGNAL_COLORS.light.complete]
+  ] as const) {
+    const output = decodeURIComponent(renderImportedKeycap(input, theme, enabled).replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
+    assert.match(output, new RegExp(`data-toggle-state="${semantic}"`));
+    assert.match(output, new RegExp(`data-toggle-background="${signal}"`, "i"));
+    assert.match(output, new RegExp(`fill="${signal}"`, "i"));
+    assert.match(output, /data-toggle-glyph="#171C20"/i);
+    assert.ok(contrast("#171C20", signal) >= 4.5, `${theme} ${semantic} glyph remains readable`);
+    assert.match(output, /stroke-width="2"/, "outer keycap border remains present");
+    assert.match(output, /stroke-width="1"/, "inner keycap border remains present");
+  }
+
+  const unknown = decodeURIComponent(renderImportedKeycap(input, "dark").replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
+  assert.match(unknown, /data-toggle-state="unknown"/);
+  assert.doesNotMatch(unknown, /data-toggle-background=/);
+  assert.match(unknown, /fill="#F2F2EE"/);
+});
+
+test("fallback FAST keycaps expose the same authoritative state backgrounds", () => {
+  for (const [theme, enabled, semantic, signal] of [
+    ["dark", true, "on", SIGNAL_COLORS.dark.complete],
+    ["dark", false, "off", SIGNAL_COLORS.dark.error],
+    ["light", false, "off", SIGNAL_COLORS.light.error]
+  ] as const) {
+    const output = decodeURIComponent(renderFallbackKeycap("FAST", theme, enabled).replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
+    assert.match(output, new RegExp(`data-toggle-state="${semantic}"`));
+    assert.match(output, new RegExp(`data-toggle-background="${signal}"`, "i"));
+    assert.match(output, new RegExp(`fill="${signal}"`, "i"));
+    assert.match(output, /data-toggle-glyph="#171C20"/i);
+    assert.match(output, />FAST<\/text>/);
+  }
+
+  const unknown = decodeURIComponent(renderFallbackKeycap("FAST", "dark").replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
+  assert.match(unknown, /data-toggle-state="unknown"/);
+  assert.doesNotMatch(unknown, /data-toggle-background=/);
+  assert.match(unknown, /fill="#F2F2EF"/);
+});
+
 test("host target and affected agent keys expose degraded and offline state", () => {
   const target = decodeURIComponent(renderHostTargetKey("MAC", "degraded", "dark").replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
   assert.match(target, /data-host-health="degraded"/);

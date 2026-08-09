@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import streamDeck, { type DialAction } from "@elgato/streamdeck";
+import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck";
 import { DeckController } from "../src/controller.js";
 import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
 import type { CodexDialSettings, DialRuntimeState } from "../src/dial-types.js";
@@ -46,6 +46,7 @@ type ControllerProbe = {
   dialSuccessErrors: Set<string>;
   refresh(): Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
+  renderAll(): Promise<void>;
 };
 
 const HOST: CodexHost = {
@@ -114,6 +115,39 @@ function fakeDial(
   return dial as unknown as FakeDial;
 }
 
+type FakeKey = KeyAction & { images: string[]; titles: string[] };
+
+function fakeKey(id: string): FakeKey {
+  const images: string[] = [];
+  const titles: string[] = [];
+  return {
+    id,
+    images,
+    titles,
+    async setImage(image: string) { images.push(image); },
+    async setTitle(title: string) { titles.push(title); }
+  } as unknown as FakeKey;
+}
+
+function snapshotWithFast(fastModeEnabled: boolean | undefined, act06 = "FAST"): MicroSnapshot {
+  const snapshot: MicroSnapshot = {
+    ...SNAPSHOT,
+    layout: {
+      ...SNAPSHOT.layout,
+      slots: {
+        ...SNAPSHOT.layout.slots,
+        ACT06: { keycapId: act06 }
+      }
+    }
+  };
+  if (fastModeEnabled !== undefined) snapshot.fastModeEnabled = fastModeEnabled;
+  return snapshot;
+}
+
+function decodeImage(image: string): string {
+  return decodeURIComponent(image.replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
+}
+
 function probe(controller: DeckController): ControllerProbe {
   return controller as unknown as ControllerProbe;
 }
@@ -154,6 +188,142 @@ test("registration normalizes settings, caches feedback, and survives descriptio
   await settle();
   assert.deepEqual(probe(controller).dials.get(action.id)!.settings, expandDialPreset("reasoning"));
   assert.equal(action.feedbackCalls.length, 1, "unchanged feedback is not rewritten");
+});
+
+test("only effective FAST keycaps render live state and state changes replace cached images", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(true) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  const microFast = fakeKey("micro-fast");
+  const microOther = fakeKey("micro-other");
+  const officialFast = fakeKey("official-fast");
+  const officialOther = fakeKey("official-other");
+
+  controller.registerMicroAction("ACT06", microFast);
+  controller.registerMicroAction("ACT07", microOther);
+  controller.registerFixedAction("FAST", officialFast, { kind: "local", keycapId: "FAST" });
+  controller.registerFixedAction("APPR", officialOther, { kind: "local", keycapId: "APPR" });
+  await settle();
+
+  assert.match(decodeImage(microFast.images.at(-1)!), /data-toggle-state="on"/);
+  assert.match(decodeImage(officialFast.images.at(-1)!), /data-toggle-state="on"/);
+  assert.match(decodeImage(microOther.images.at(-1)!), /data-toggle-state="unknown"/);
+  assert.match(decodeImage(officialOther.images.at(-1)!), /data-toggle-state="unknown"/);
+
+  const priorMicroImage = microFast.images.at(-1)!;
+  const priorOfficialImage = officialFast.images.at(-1)!;
+  state.localSnapshot = { host: HOST, observedAt: 2_000, snapshot: snapshotWithFast(false) };
+  await state.renderAll();
+
+  assert.match(decodeImage(microFast.images.at(-1)!), /data-toggle-state="off"/);
+  assert.match(decodeImage(officialFast.images.at(-1)!), /data-toggle-state="off"/);
+  assert.notEqual(microFast.images.at(-1), priorMicroImage, "Micro FAST setImage changes with authoritative state");
+  assert.notEqual(officialFast.images.at(-1), priorOfficialImage, "official FAST setImage changes with authoritative state");
+
+  state.localSnapshot = { host: HOST, observedAt: 3_000, snapshot: snapshotWithFast(true, "APPR") };
+  await state.renderAll();
+  assert.match(decodeImage(microFast.images.at(-1)!), /data-toggle-state="unknown"/);
+  assert.match(decodeImage(officialFast.images.at(-1)!), /data-toggle-state="on"/);
+});
+
+test("successful local FAST activation refreshes immediately without refreshing releases or other actions", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const commands: string[] = [];
+  let refreshes = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async sendAction(slot, act) { commands.push(`action:${slot}:${act}`); },
+    async runKeycap(keycapId) { commands.push(`keycap:${keycapId}`); }
+  };
+  state.refresh = async () => { refreshes += 1; };
+
+  await controller.sendMicroAction("ACT06", 1);
+  await controller.sendMicroAction("ACT06", 0);
+  await controller.sendMicroAction("ACT07", 1);
+  await controller.runKeycap("FAST");
+  await controller.runKeycap("APPR");
+
+  assert.deepEqual(commands, [
+    "action:ACT06:1", "action:ACT06:0", "action:ACT07:1", "keycap:FAST", "keycap:APPR"
+  ]);
+  assert.equal(refreshes, 2, "only the local Micro FAST down and official FAST activation refresh");
+  assert.equal(state.localSnapshot.snapshot.fastModeEnabled, false, "commands never optimistically flip state");
+});
+
+test("remote, failed, and failed-refresh FAST commands never synthesize local state", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const remoteCommands: unknown[] = [];
+  let refreshes = 0;
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async sendAction() { throw new Error("local FAST failed"); },
+    async runKeycap() { throw new Error("local FAST failed"); }
+  };
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => undefined,
+    async send(command) { remoteCommands.push(command); }
+  };
+  state.refresh = async () => { refreshes += 1; };
+
+  await controller.sendMicroAction("ACT06", 1);
+  await controller.runKeycap("FAST");
+  assert.equal(refreshes, 0, "remote relay commands own their snapshot barrier");
+
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  await assert.rejects(controller.sendMicroAction("ACT06", 1), /local FAST failed/);
+  await assert.rejects(controller.runKeycap("FAST"), /local FAST failed/);
+  assert.equal(refreshes, 0, "failed commands do not refresh");
+  assert.equal(state.localSnapshot.snapshot.fastModeEnabled, false);
+
+  state.microBridge = { async sendAgent() {}, async runKeycap() {} };
+  state.refresh = async () => { throw new Error("authoritative refresh failed"); };
+  await assert.rejects(controller.runKeycap("FAST"), /authoritative refresh failed/);
+  assert.equal(state.localSnapshot.snapshot.fastModeEnabled, false, "failed refresh preserves last authoritative value");
+  assert.equal(remoteCommands.length, 2);
+});
+
+test("local dial touch FAST uses the command path and refreshes its authoritative state", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("touch-fast-refresh");
+  const keycaps: string[] = [];
+  let refreshes = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async runKeycap(keycapId) { keycaps.push(keycapId); }
+  };
+  state.refresh = async () => { refreshes += 1; };
+
+  controller.registerDial(action, { ...expandDialPreset("custom"), touchTap: "keycap.FAST" });
+  await controller.touchDial(action);
+
+  assert.deepEqual(keycaps, ["FAST"]);
+  assert.equal(refreshes, 1);
+  assert.equal(state.localSnapshot.snapshot.fastModeEnabled, false);
 });
 
 test("selector rotation previews only and selector state stays isolated per action", async () => {
@@ -280,6 +450,7 @@ test("rotation rejects malformed or oversized events and atomically bounds one-s
       }
     }
   };
+  state.refresh = async () => {};
   controller.registerDial(action, {
     ...expandDialPreset("custom"),
     rotation: {
