@@ -238,17 +238,20 @@ function emptyRoutedPosition(input: HostSnapshot, id: number): RoutedAgentSlot {
 export function parseRelayServerMessage(value: unknown): RelayServerMessage | null {
   if (!isRecord(value) || value.protocol !== RELAY_PROTOCOL_VERSION || typeof value.type !== "string") return null;
   if (value.type === "ready" && isHost(value.host) &&
-      (value.capabilities == null || (Array.isArray(value.capabilities) && value.capabilities.every((item) => typeof item === "string")))) {
+      (value.bridge === undefined || value.bridge === "native-codex-micro") &&
+      (value.capabilities === undefined || (Array.isArray(value.capabilities) && value.capabilities.length <= 32 &&
+        value.capabilities.every((item) => boundedNonblankString(item, 64))))) {
     return value as RelayReadyMessage;
   }
-  if (value.type === "snapshot" && isHost(value.host) && Number.isFinite(value.observedAt) && isSnapshot(value.snapshot)) {
+  if (value.type === "snapshot" && isHost(value.host) && validProtocolTimestamp(value.observedAt) != null && isSnapshot(value.snapshot)) {
     return value as RelaySnapshotMessage;
   }
   if (value.type === "health" && isHost(value.host) && value.state === "degraded" &&
-      value.reason === "native-signals-unavailable" && Number.isFinite(value.observedAt)) {
+      value.reason === "native-signals-unavailable" && validProtocolTimestamp(value.observedAt) != null) {
     return value as RelayHealthMessage;
   }
-  if (value.type === "result" && typeof value.requestId === "string" && typeof value.ok === "boolean") {
+  if (value.type === "result" && boundedNonblankString(value.requestId, 128) && typeof value.ok === "boolean" &&
+      (value.error === undefined || (typeof value.error === "string" && value.error.length <= 512))) {
     return value as RelayResultMessage;
   }
   return null;
@@ -262,44 +265,64 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
   if (value.kind === "encoder" && binary(value.act)) return value as RelayCommand;
   if (value.kind === "reasoning" && ["decrease", "increase"].includes(String(value.direction))) return value as RelayCommand;
   if (value.kind === "usage-refresh" && Object.keys(value).length === 1) return value as RelayCommand;
-  if (value.kind === "rate-limit-reset") return value as RelayCommand;
+  if (value.kind === "rate-limit-reset" && Object.keys(value).length === 1) return value as RelayCommand;
   if (value.kind === "keycap" && typeof value.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(value.keycapId as OfficialKeycapId)) return value as RelayCommand;
   return null;
 }
 
 function isSnapshot(value: unknown): value is MicroSnapshot {
-  if (!isRecord(value) || !Array.isArray(value.slots) || value.slots.length !== 6 || !isRecord(value.layout)) return false;
-  if (!value.slots.every((slot, index) => isRecord(slot) && slot.id === index && typeof slot.status === "string" &&
-    (slot.contextUsedPercent == null || finitePercent(slot.contextUsedPercent)))) return false;
-  if (value.activeThreadKey != null && !isThreadKey(value.activeThreadKey)) return false;
-  if (value.activeThreadTitle != null && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
-  if (value.reasoningEffort != null &&
+  if (!isRecord(value) || !Array.isArray(value.slots) || value.slots.length !== 6 || !isLayout(value.layout)) return false;
+  if (!value.slots.every((slot, index) => isRecord(slot) && slot.id === index &&
+    (slot.threadKey === null || isThreadKey(slot.threadKey)) &&
+    (slot.title === null || (typeof slot.title === "string" && slot.title.length <= 240)) &&
+    boundedNonblankString(slot.status, 64) && typeof slot.selected === "boolean" &&
+    (slot.activityAt === undefined || validProtocolTimestamp(slot.activityAt) != null) &&
+    (slot.ownedByHost === undefined || typeof slot.ownedByHost === "boolean") &&
+    (slot.contextUsedPercent === undefined || finitePercent(slot.contextUsedPercent)))) return false;
+  if (!(["pinned", "recent", "priority", "custom"] as const).includes(value.agentSource as never)) return false;
+  if (!boundedNonblankString(value.lightingAutoOff, 64) || !(["light", "dark"] as const).includes(value.theme as never)) return false;
+  if (value.activeThreadKey !== undefined && !isThreadKey(value.activeThreadKey)) return false;
+  if (value.activeThreadTitle !== undefined && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
+  if (value.reasoningEffort !== undefined &&
       (typeof value.reasoningEffort !== "string" || value.reasoningEffort.trim().length === 0 || value.reasoningEffort.length > 64)) return false;
-  if (value.usage != null && !isUsageSnapshot(value.usage)) return false;
-  if (value.hostSessions == null) return true;
+  if (value.usage !== undefined && !isUsageSnapshot(value.usage)) return false;
+  if (value.hostSessions === undefined) return true;
   return Array.isArray(value.hostSessions) && value.hostSessions.length <= 128 && value.hostSessions.every((session) =>
-    isRecord(session) && isThreadKey(session.threadId) && validTimestamp(session.activityAt) != null &&
-    ["idle", "working", "complete"].includes(String(session.status)) &&
-    (session.completionRevision == null || integerIn(session.completionRevision, 0, Number.MAX_SAFE_INTEGER)) &&
-    (session.contextUsedPercent == null || finitePercent(session.contextUsedPercent))
+    isRecord(session) && isThreadKey(session.threadId) && validProtocolTimestamp(session.activityAt) != null &&
+    typeof session.status === "string" && ["idle", "working", "complete"].includes(session.status) &&
+    (session.completionRevision === undefined || integerIn(session.completionRevision, 0, Number.MAX_SAFE_INTEGER)) &&
+    (session.contextUsedPercent === undefined || finitePercent(session.contextUsedPercent))
   );
 }
 
+function isLayout(value: unknown): value is MicroSnapshot["layout"] {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.slots) || !isRecord(value.analogStick)) return false;
+  const slots = value.slots;
+  const actionSlots: readonly MicroActionSlot[] = ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"];
+  if (!actionSlots.every((key) => {
+    const slot = slots[key];
+    return isRecord(slot) && boundedNonblankString(slot.keycapId, 64) &&
+      (slot.commandId === undefined || (typeof slot.commandId === "string" && slot.commandId.length <= 128));
+  })) return false;
+  return (["up", "right", "down", "left"] as const).every((key) =>
+    Object.prototype.hasOwnProperty.call(value.analogStick, key));
+}
+
 function isUsageSnapshot(value: unknown): boolean {
-  if (!isRecord(value) || !Array.isArray(value.windows) || value.windows.length > 8 || validTimestamp(value.observedAt) == null) return false;
-  if (value.resetCreditsAvailable != null && !integerIn(value.resetCreditsAvailable, 0, Number.MAX_SAFE_INTEGER)) return false;
-  if (value.resetCreditsApplicable != null && !integerIn(value.resetCreditsApplicable, 0, Number.MAX_SAFE_INTEGER)) return false;
-  return value.windows.every((window) => isRecord(window) && typeof window.id === "string" && window.id.length <= 64 &&
-    ["five-hour", "weekly", "other"].includes(String(window.kind)) &&
+  if (!isRecord(value) || !Array.isArray(value.windows) || value.windows.length > 8 || validProtocolTimestamp(value.observedAt) == null) return false;
+  if (value.resetCreditsAvailable !== null && !integerIn(value.resetCreditsAvailable, 0, Number.MAX_SAFE_INTEGER)) return false;
+  if (value.resetCreditsApplicable !== null && !integerIn(value.resetCreditsApplicable, 0, Number.MAX_SAFE_INTEGER)) return false;
+  return value.windows.every((window) => isRecord(window) && boundedNonblankString(window.id, 64) &&
+    typeof window.kind === "string" && ["five-hour", "weekly", "other"].includes(window.kind) &&
     finitePercent(window.usedPercent) && finitePercent(window.remainingPercent) &&
-    (window.windowDurationMins == null || (typeof window.windowDurationMins === "number" && Number.isFinite(window.windowDurationMins) && window.windowDurationMins > 0)) &&
-    (window.resetsAt == null || validTimestamp(window.resetsAt) != null));
+    (window.windowDurationMins === null || positiveBoundedNumber(window.windowDurationMins)) &&
+    (window.resetsAt === null || validProtocolTimestamp(window.resetsAt) != null));
 }
 
 function isHost(value: unknown): value is CodexHost {
-  return isRecord(value) && typeof value.hostId === "string" && typeof value.hostName === "string" &&
-    ["win32", "darwin"].includes(String(value.platform)) &&
-    (value.codexVersion == null || (typeof value.codexVersion === "string" && value.codexVersion.length <= 64));
+  return isRecord(value) && boundedNonblankString(value.hostId, 128) && boundedNonblankString(value.hostName, 128) &&
+    typeof value.platform === "string" && ["win32", "darwin"].includes(value.platform) &&
+    (value.codexVersion === undefined || boundedNonblankString(value.codexVersion, 64));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -307,6 +330,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function binary(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }
+function boundedNonblankString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
+}
 function finitePercent(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
 }
@@ -315,6 +341,12 @@ function integerIn(value: unknown, minimum: number, maximum: number): value is n
 }
 function validTimestamp(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+function validProtocolTimestamp(value: unknown): number | null {
+  return positiveBoundedNumber(value) ? value : null;
+}
+function positiveBoundedNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER;
 }
 
 function compareOwnership(left: RoutedAgentSlot, right: RoutedAgentSlot): number {

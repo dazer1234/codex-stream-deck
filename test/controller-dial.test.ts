@@ -714,6 +714,54 @@ test("dial rate-limit reset requires ready usage-host health", async () => {
   }
 });
 
+test("keypad and dial reset paths fail closed unless applicability is a positive safe integer", async () => {
+  const invalidApplicable: unknown[] = [undefined, null, 0, -1, 1.5, Number.NaN, Infinity, "1", false, [], {}];
+  for (const route of ["keypad", "dial"] as const) {
+    for (const applicable of invalidApplicable) {
+      const controller = new DeckController();
+      const state = probe(controller);
+      const action = fakeDial(`${route}-${String(applicable)}`);
+      let resets = 0;
+      state.localHost = HOST;
+      state.localSnapshot = {
+        host: HOST, observedAt: 1_000,
+        snapshot: {
+          ...structuredClone(SNAPSHOT),
+          usage: { ...structuredClone(SNAPSHOT.usage!), resetCreditsApplicable: applicable as number }
+        }
+      };
+      state.localHealth = { state: "ready", changedAt: 1_000 };
+      state.microBridge = {
+        async sendAgent() {},
+        async consumeRateLimitReset() { resets += 1; }
+      };
+      state.refresh = async () => {};
+      controller.beginRateLimitReset(action, 10_000, route === "dial" ? HOST.hostId : undefined);
+      await assert.rejects(
+        controller.finishRateLimitReset(action, 11_200, route === "dial" ? HOST.hostId : undefined),
+        /No rate-limit reset credit is currently applicable\./
+      );
+      assert.equal(resets, 0, `${route}:${String(applicable)}`);
+    }
+  }
+
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("valid-applicability");
+  let resets = 0;
+  state.localHost = HOST;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: structuredClone(SNAPSHOT) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async consumeRateLimitReset() { resets += 1; }
+  };
+  state.refresh = async () => {};
+  controller.beginRateLimitReset(action, 20_000);
+  assert.equal(await controller.finishRateLimitReset(action, 21_200), true);
+  assert.equal(resets, 1);
+});
+
 test("two dials pressing the same momentary binding keep independent captured hosts", async () => {
   const controller = new DeckController();
   const state = probe(controller);

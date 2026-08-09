@@ -172,7 +172,7 @@ export class DeckController {
     if (relayConfig) {
       this.relayClient = new CodexRelayClient(
         relayConfig,
-        () => { void this.refreshDisplay(); },
+        () => { void this.refreshDisplayAfterRelaySnapshot(); },
         (message) => streamDeck.logger.info(message)
       );
       this.relayClient.start();
@@ -506,8 +506,14 @@ export class DeckController {
       throw new Error("The captured Codex usage host is not ready.");
     }
     const usage = source.snapshot?.usage;
-    if ((usage?.resetCreditsAvailable ?? 0) <= 0) throw new Error("No rate-limit reset credit is available.");
-    if (usage?.resetCreditsApplicable === 0) throw new Error("No rate-limit reset credit is currently applicable.");
+    const available = usage?.resetCreditsAvailable;
+    if (typeof available !== "number" || !Number.isSafeInteger(available) || available <= 0) {
+      throw new Error("No rate-limit reset credit is available.");
+    }
+    const applicable = usage?.resetCreditsApplicable;
+    if (typeof applicable !== "number" || !Number.isSafeInteger(applicable) || applicable <= 0) {
+      throw new Error("No rate-limit reset credit is currently applicable.");
+    }
     if (capturedHostId == null) {
       await this.sendToHost(
         source.hostId,
@@ -755,6 +761,13 @@ export class DeckController {
       if (target) streamDeck.logger.info(`Codex Micro layout synchronized (${target.agentSource}, ${target.theme} theme).`);
     }
     await this.renderAll();
+  }
+
+  private async refreshDisplayAfterRelaySnapshot(): Promise<void> {
+    try { await this.refreshDisplay(); }
+    catch (error) {
+      streamDeck.logger.error(`Remote Codex snapshot display failed: ${String(error)}`);
+    }
   }
 
   private async renderAll(): Promise<void> {

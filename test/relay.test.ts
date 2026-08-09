@@ -15,7 +15,7 @@ import {
 } from "../src/codex-relay-server.js";
 import {
   HostActivityIndex, RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt,
-  parseRelayCommand, type HostSnapshot
+  parseRelayCommand, parseRelayServerMessage, type HostSnapshot
 } from "../src/relay-protocol.js";
 import type { CodexHost, MicroSnapshot } from "../src/types.js";
 
@@ -112,6 +112,7 @@ test("relay command parser permits only the narrow native command surface", () =
   assert.deepEqual(parseRelayCommand({ kind: "agent", slot: 5, threadKey, act: 1 }), { kind: "agent", slot: 5, threadKey, act: 1 });
   assert.deepEqual(parseRelayCommand({ kind: "reasoning", direction: "increase" }), { kind: "reasoning", direction: "increase" });
   assert.deepEqual(parseRelayCommand({ kind: "rate-limit-reset" }), { kind: "rate-limit-reset" });
+  assert.equal(parseRelayCommand({ kind: "rate-limit-reset", force: true }), null);
   assert.deepEqual(parseRelayCommand({ kind: "usage-refresh" }), { kind: "usage-refresh" });
   assert.equal(parseRelayCommand({ kind: "usage-refresh", expression: "process.exit()" }), null);
   assert.equal(parseRelayCommand({ kind: "agent", slot: 6, threadKey, act: 1 }), null);
@@ -138,7 +139,6 @@ test("relay snapshots accept an optional bounded reasoning effort", async () => 
 });
 
 test("relay snapshot parser bounds and validates host session catalogs", async () => {
-  const { parseRelayServerMessage } = await import("../src/relay-protocol.js");
   const valid = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
   valid.snapshot.hostSessions = [{ threadId: "00000000-0000-4000-8000-000000000000", activityAt: 1, status: "working", completionRevision: 42 }];
   valid.snapshot.hostSessions[0]!.contextUsedPercent = 56;
@@ -180,6 +180,109 @@ test("relay snapshot parser bounds and validates host session catalogs", async (
   assert.equal(parseRelayServerMessage({
     type: "health", protocol: 1, host, state: "offline",
     reason: "native-signals-unavailable", observedAt: 2
+  }), null);
+});
+
+test("relay parser rejects malformed snapshot fields before activity merge", () => {
+  const makePacket = () => ({
+    type: "snapshot", protocol: 1, host: structuredClone(host), observedAt: 2_000,
+    snapshot: structuredClone(snapshot)
+  });
+  const invalid: unknown[] = [];
+  const add = (mutate: (packet: ReturnType<typeof makePacket>) => void): void => {
+    const packet = makePacket();
+    mutate(packet);
+    invalid.push(packet);
+  };
+  add((packet) => { packet.snapshot.slots[0]!.threadKey = {} as unknown as string; });
+  add((packet) => { packet.snapshot.slots[0]!.title = 7 as unknown as string; });
+  add((packet) => { packet.snapshot.slots[0]!.title = "x".repeat(241); });
+  add((packet) => { packet.snapshot.slots[0]!.status = "x".repeat(65); });
+  add((packet) => { packet.snapshot.slots[0]!.selected = "yes" as unknown as boolean; });
+  add((packet) => { packet.snapshot.slots[0]!.activityAt = 0; });
+  add((packet) => { packet.snapshot.slots[0]!.activityAt = 1e308; });
+  add((packet) => { packet.snapshot.slots[0]!.ownedByHost = "yes" as unknown as boolean; });
+  add((packet) => { packet.snapshot.layout.version = 2 as 1; });
+  add((packet) => { packet.snapshot.layout.slots.ACT06 = { keycapId: "" }; });
+  add((packet) => { packet.snapshot.layout.slots.ACT06 = { keycapId: "x".repeat(65) }; });
+  add((packet) => { packet.snapshot.layout.slots.ACT06 = { keycapId: "FAST", commandId: "x".repeat(129) }; });
+  add((packet) => { packet.snapshot.layout.analogStick = [] as unknown as MicroSnapshot["layout"]["analogStick"]; });
+  add((packet) => { packet.snapshot.agentSource = "random" as MicroSnapshot["agentSource"]; });
+  add((packet) => { packet.snapshot.lightingAutoOff = "x".repeat(65); });
+  add((packet) => { packet.snapshot.theme = "sepia" as MicroSnapshot["theme"]; });
+  add((packet) => { packet.observedAt = 0; });
+  add((packet) => { packet.observedAt = 1e308; });
+  add((packet) => { packet.snapshot.activeThreadKey = null as unknown as string; });
+  add((packet) => { packet.snapshot.activeThreadTitle = null as unknown as string; });
+  add((packet) => { packet.snapshot.reasoningEffort = null as unknown as string; });
+  add((packet) => { packet.snapshot.usage = null as unknown as NonNullable<MicroSnapshot["usage"]>; });
+  add((packet) => { packet.snapshot.hostSessions = null as unknown as NonNullable<MicroSnapshot["hostSessions"]>; });
+  add((packet) => { packet.snapshot.usage = {
+    windows: [], observedAt: 1e308, resetCreditsAvailable: null, resetCreditsApplicable: null
+  }; });
+  add((packet) => { packet.snapshot.usage = {
+    windows: [], observedAt: 2_000, resetCreditsAvailable: null
+  } as unknown as NonNullable<MicroSnapshot["usage"]>; });
+  add((packet) => { packet.snapshot.usage = {
+    windows: [{ id: "weekly", kind: "weekly", usedPercent: 1, remainingPercent: 99, windowDurationMins: 1e308, resetsAt: null }],
+    observedAt: 2_000, resetCreditsAvailable: null, resetCreditsApplicable: null
+  }; });
+  add((packet) => { packet.snapshot.hostSessions = [{
+    threadId: packet.snapshot.slots[0]!.threadKey!, activityAt: 1e308, status: "working"
+  }]; });
+  add((packet) => { packet.snapshot.hostSessions = [{
+    threadId: packet.snapshot.slots[0]!.threadKey!, activityAt: 2_000, status: "working",
+    completionRevision: null as unknown as number
+  }]; });
+
+  for (const packet of invalid) assert.equal(parseRelayServerMessage(packet), null);
+  const fractionalProducerPacket = makePacket();
+  fractionalProducerPacket.observedAt = 2_000.5;
+  fractionalProducerPacket.snapshot.slots[0]!.activityAt = 1_000.5;
+  fractionalProducerPacket.snapshot.hostSessions = [{
+    threadId: fractionalProducerPacket.snapshot.slots[0]!.threadKey!, activityAt: 1_500.5, status: "working"
+  }];
+  fractionalProducerPacket.snapshot.usage = {
+    windows: [{
+      id: "other", kind: "other", usedPercent: 1, remainingPercent: 99,
+      windowDurationMins: 2.5, resetsAt: 3_000.5
+    }],
+    observedAt: 2_000.5, resetCreditsAvailable: null, resetCreditsApplicable: null
+  };
+  assert.notEqual(parseRelayServerMessage(fractionalProducerPacket), null);
+  const accepted = invalid.flatMap((packet) => {
+    const parsed = parseRelayServerMessage(packet);
+    return parsed?.type === "snapshot"
+      ? [{ host: parsed.host, snapshot: parsed.snapshot, observedAt: parsed.observedAt }]
+      : [];
+  });
+  assert.deepEqual(new HostActivityIndex().merge(accepted, 2_000, host.hostId), []);
+});
+
+test("relay parser bounds host identity and ready capabilities", () => {
+  const ready = {
+    type: "ready", protocol: 1, host: structuredClone(host),
+    capabilities: ["usage-refresh"], bridge: "native-codex-micro"
+  };
+  assert.notEqual(parseRelayServerMessage(ready), null, "mixed-version peers may omit capabilities or reasoning only");
+  for (const invalid of [
+    { ...ready, host: { ...host, hostId: "" } },
+    { ...ready, host: { ...host, hostId: "x".repeat(129) } },
+    { ...ready, host: { ...host, hostName: "   " } },
+    { ...ready, host: { ...host, hostName: "x".repeat(129) } },
+    { ...ready, host: { ...host, codexVersion: null } },
+    { ...ready, capabilities: Array.from({ length: 33 }, (_, index) => `cap-${index}`) },
+    { ...ready, capabilities: null },
+    { ...ready, capabilities: [""] },
+    { ...ready, capabilities: ["x".repeat(65)] },
+    { ...ready, bridge: "arbitrary-evaluate" },
+    { ...ready, bridge: null }
+  ]) assert.equal(parseRelayServerMessage(invalid), null);
+  const legacy = { ...ready } as { capabilities?: string[] };
+  delete legacy.capabilities;
+  assert.notEqual(parseRelayServerMessage(legacy), null);
+  assert.equal(parseRelayServerMessage({
+    type: "result", protocol: 1, requestId: "request", ok: false, error: null
   }), null);
 });
 
@@ -1048,6 +1151,71 @@ test("relay capabilities are valid only for a snapshot from the current connecti
   await waitUntil(() => generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId));
   assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
   assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", "wrong-host"), false);
+});
+
+test("relay ready host identity is immutable within one connection generation", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  const otherHost: CodexHost = {
+    ...host, hostId: "66fd97ad-7073-42cc-85ce-befa17546d7d", hostName: "Unexpected Host"
+  };
+  let serverSocket: WebSocket | undefined;
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.once("message", () => {
+      socket.send(JSON.stringify({
+        type: "ready", protocol: 1, host, capabilities: ["usage-refresh"], bridge: "native-codex-micro"
+      }));
+      socket.send(JSON.stringify({ type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot }));
+    });
+  });
+  const delivered: HostSnapshot[] = [];
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) },
+    (value) => delivered.push(value), () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => delivered.length === 1);
+
+  serverSocket!.send(JSON.stringify({
+    type: "health", protocol: 1, host: otherHost, state: "degraded",
+    reason: "native-signals-unavailable", observedAt: Date.now()
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host: otherHost, observedAt: Date.now(),
+    snapshot: { ...structuredClone(snapshot), reasoningEffort: "wrong-host" }
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "ready", protocol: 1, host: otherHost, capabilities: ["usage-refresh"], bridge: "native-codex-micro"
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+    snapshot: { ...structuredClone(snapshot), reasoningEffort: "same-host" }
+  }));
+  await waitUntil(() => delivered.length === 2);
+  assert.equal(client.currentHost()?.hostId, host.hostId);
+  assert.equal(client.currentSnapshot()?.host.hostId, host.hostId);
+  assert.equal(delivered[1]?.snapshot.reasoningEffort, "same-host");
+  assert.equal(client.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
+  assert.equal(client.supportsCapabilityForSnapshot("usage-refresh", otherHost.hostId), false);
+});
+
+test("controller catches relay snapshot display failures", async () => {
+  const { DeckController } = await import("../src/controller.js");
+  const controller = new DeckController();
+  const failure = new Error("relay render failed");
+  const state = controller as unknown as {
+    refreshDisplay: () => Promise<void>;
+    refreshDisplayAfterRelaySnapshot?: () => Promise<void>;
+  };
+  state.refreshDisplay = async () => { throw failure; };
+  assert.equal(typeof state.refreshDisplayAfterRelaySnapshot, "function");
+  await assert.doesNotReject(state.refreshDisplayAfterRelaySnapshot!());
 });
 
 test("controller refreshes account usage on its source host instead of the selected function host", async () => {

@@ -49,7 +49,7 @@ test("renderer bridge uses native Micro events and discovers hashed modules at r
   assert.doesNotMatch(source, /D90_rd6W|SFcKxWqG|DJFcGyy5/);
 });
 
-test("renderer snapshots choose the visible reasoning composer trigger", () => {
+test("renderer snapshots require one unique visible semantic reasoning target", () => {
   const readActiveReasoningEffort = Reflect.get(microBridgeModule, "readActiveReasoningEffort") as unknown;
   assert.equal(typeof readActiveReasoningEffort, "function");
   const read = readActiveReasoningEffort as (
@@ -57,10 +57,42 @@ test("renderer snapshots choose the visible reasoning composer trigger", () => {
     isVisible: (element: { visible: boolean }) => boolean
   ) => string | undefined;
   const elements = [
-    { getAttribute: () => "low", visible: false },
-    { getAttribute: () => " high ", visible: true }
+    { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "low" : "reasoning", visible: false },
+    { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "generic" : "other", visible: true },
+    { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? " high " : "reasoning", visible: true },
+    { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "high" : "reasoning", visible: true }
   ];
   assert.equal(read(elements, (element) => element.visible), "high");
+  assert.equal(read([
+    ...elements,
+    { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "low" : "reasoning", visible: true }
+  ], (element) => element.visible), undefined, "conflicting visible reasoning targets are unavailable");
+});
+
+test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
+  const predicate = Reflect.get(microBridgeModule, "hasApplicableResetCredit") as unknown;
+  assert.equal(typeof predicate, "function");
+  const isApplicable = predicate as (value: unknown) => boolean;
+  for (const value of [undefined, null, 0, -1, 1.5, Number.NaN, Infinity, "1", false, [], {}]) {
+    assert.equal(isApplicable(value), false, String(value));
+  }
+  assert.equal(isApplicable(1), true);
+
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  let expression = "";
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expression = source;
+    return true as T;
+  };
+  await bridge.consumeRateLimitReset();
+  assert.match(expression, /hasApplicableResetCredit/);
+  assert.match(expression, /if \(!hasApplicableResetCredit\(summary\?\.rate_limit_reset_credits\?\.applicable_available_count\)\)/);
+  assert.doesNotMatch(expression, /Number\(summary\?\.rate_limit_reset_credits/);
 });
 
 test("forced and normal bridge snapshots carry independent lexical refresh modes", async () => {

@@ -199,12 +199,18 @@ export function readActiveReasoningEffort(
     return style.display !== "none" && style.visibility !== "hidden";
   }
 ): string | undefined {
+  const candidates = new Set<string>();
   for (const element of elements) {
     if (!isVisible(element)) continue;
+    if (element.getAttribute("data-composer-navigation-target") !== "reasoning") continue;
     const value = element.getAttribute("data-selected-reasoning-effort")?.trim();
-    if (value && value.length <= 64) return value;
+    if (value && value.length <= 64) candidates.add(value);
   }
-  return undefined;
+  return candidates.size === 1 ? candidates.values().next().value : undefined;
+}
+
+export function hasApplicableResetCredit(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () => {
@@ -409,7 +415,7 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
   const reasoningEffort = readActiveReasoningEffort(document.querySelectorAll(
-    'button[data-selected-reasoning-effort], [role="button"][data-selected-reasoning-effort], [aria-haspopup][data-selected-reasoning-effort]'
+    '[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]'
   ));
 
   return {
@@ -619,6 +625,7 @@ export class CodexMicroRendererBridge {
     await this.ensureConnected();
     const redeemRequestId = randomUUID();
     const expression = `(async () => {
+      const hasApplicableResetCredit = (${hasApplicableResetCredit.toString()});
       const urls = [...new Set([
         ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
         ...performance.getEntriesByType('resource').map((entry) => entry.name)
@@ -637,8 +644,9 @@ export class CodexMicroRendererBridge {
       if (!client) throw new Error('Codex usage client is unavailable.');
 
       const summary = await client.safeGet('/wham/usage');
-      const applicable = Number(summary?.rate_limit_reset_credits?.applicable_available_count);
-      if (Number.isFinite(applicable) && applicable <= 0) throw new Error('No reset credit is currently applicable.');
+      if (!hasApplicableResetCredit(summary?.rate_limit_reset_credits?.applicable_available_count)) {
+        throw new Error('No reset credit is currently applicable.');
+      }
 
       const details = await client.safeGet('/wham/rate-limit-reset-credits');
       const credit = Array.isArray(details?.credits)
