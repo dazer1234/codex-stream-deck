@@ -4,15 +4,24 @@ import {
   DEFAULT_ACTION_SELECTOR_ITEMS,
   JOYSTICK_DIRECTIONS,
   MICRO_SLOTS,
+  deriveDialFeedback,
   expandDialPreset,
+  initialDialRuntimeState,
   isDialBindingId,
-  normalizeDialSettings
+  normalizeDialSettings,
+  reconcileSelector,
+  reduceDialRotation,
+  selectedItem,
+  selectorItems
 } from "../src/dial-domain.js";
 import {
   DIAL_FEEDBACK_MODES,
   DIAL_PRESETS,
   DIAL_SELECTOR_SOURCES,
-  type DialPreset
+  type DialBindingId,
+  type CodexDialSettings,
+  type DialPreset,
+  type DialRuntimeView
 } from "../src/dial-types.js";
 
 function withInheritedProperty(
@@ -39,6 +48,361 @@ function assertFrozenCatalog(catalog: readonly string[]): void {
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(mutationThrew, true);
 }
+
+const RUNTIME_VIEW: DialRuntimeView = {
+  health: "ready",
+  reasoningEffort: "high",
+  agents: [
+    {
+      id: 1,
+      identity: "rollout-alpha",
+      threadKey: "thread-alpha",
+      title: "Alpha task",
+      status: "thinking",
+      contextUsedPercent: 42
+    },
+    {
+      id: 4,
+      identity: "rollout-delta",
+      threadKey: "thread-delta",
+      title: "Delta task",
+      status: "idle"
+    }
+  ],
+  actionLabels: {
+    "micro.ACT06": "Approve change",
+    "keycap.FAST": "Fast mode"
+  },
+  usage: {
+    mode: "five-hour",
+    remainingPercent: 72,
+    resetsAt: 10_000,
+    observedAt: 1_000,
+    fiveHourRemaining: 72,
+    weeklyRemaining: 41
+  },
+  now: 1_000
+};
+
+function actionSelector(
+  items: DialBindingId[] = []
+): CodexDialSettings {
+  return normalizeDialSettings({
+    ...expandDialPreset("actions"),
+    rotation: { kind: "selector", source: "actions", wrap: true, items }
+  });
+}
+
+test("runtime selectors expose occupied agents, exact usage choices, and ordered safe actions", () => {
+  const agentSettings = expandDialPreset("agents");
+  assert.deepEqual(selectorItems(agentSettings, RUNTIME_VIEW), [
+    {
+      id: "rollout-alpha",
+      label: "Alpha task",
+      detail: "thinking",
+      agentSlot: 1,
+      threadKey: "thread-alpha"
+    },
+    {
+      id: "rollout-delta",
+      label: "Delta task",
+      detail: "idle",
+      agentSlot: 4,
+      threadKey: "thread-delta"
+    }
+  ]);
+  assert.deepEqual(selectorItems(expandDialPreset("usage"), RUNTIME_VIEW), [
+    { id: "auto", label: "Automatic" },
+    { id: "five-hour", label: "5 hours" },
+    { id: "weekly", label: "Weekly" }
+  ]);
+
+  const actions = actionSelector(["keycap.FAST", "micro.ACT06", "joystick.left", "new-task"]);
+  assert.deepEqual(selectorItems(actions, RUNTIME_VIEW), [
+    { id: "keycap.FAST", label: "Fast mode", binding: "keycap.FAST" },
+    { id: "micro.ACT06", label: "Approve change", binding: "micro.ACT06" },
+    { id: "joystick.left", label: "Joystick Left", binding: "joystick.left" },
+    { id: "new-task", label: "New Task", binding: "new-task" }
+  ]);
+});
+
+test("selector reconciliation preserves stable identity across reorder and handles disappearance", () => {
+  const original = selectorItems(expandDialPreset("agents"), RUNTIME_VIEW);
+  assert.deepEqual(reconcileSelector(initialDialRuntimeState(), original), {
+    usageMode: "auto",
+    usageOverview: false,
+    selectedId: "rollout-alpha"
+  });
+
+  const selectedDelta = {
+    ...initialDialRuntimeState(),
+    selectedId: "rollout-delta"
+  };
+  const reordered = selectorItems(expandDialPreset("agents"), {
+    ...RUNTIME_VIEW,
+    agents: [...RUNTIME_VIEW.agents].reverse()
+  });
+  assert.equal(reconcileSelector(selectedDelta, reordered).selectedId, "rollout-delta");
+  assert.equal(reconcileSelector(selectedDelta, original.slice(0, 1)).selectedId, "rollout-alpha");
+  assert.deepEqual(reconcileSelector(selectedDelta, []), {
+    usageMode: "auto",
+    usageOverview: false
+  });
+});
+
+test("preset and runtime factories return independent mutable structures", () => {
+  const firstPreset = expandDialPreset("actions");
+  const secondPreset = expandDialPreset("actions");
+  assert.notEqual(firstPreset, secondPreset);
+  assert.notEqual(firstPreset.rotation, secondPreset.rotation);
+  if (firstPreset.rotation.kind === "selector" && secondPreset.rotation.kind === "selector") {
+    assert.notEqual(firstPreset.rotation.items, secondPreset.rotation.items);
+    firstPreset.rotation.items.push("keycap.FAST");
+    assert.equal(secondPreset.rotation.items.includes("keycap.FAST"), false);
+  }
+
+  const firstState = initialDialRuntimeState();
+  const secondState = initialDialRuntimeState();
+  assert.notEqual(firstState, secondState);
+  firstState.usageMode = "weekly";
+  firstState.usageOverview = true;
+  assert.deepEqual(secondState, { usageMode: "auto", usageOverview: false });
+});
+
+test("paired rotation emits one binding for every physical detent in both directions", () => {
+  const settings = expandDialPreset("reasoning");
+  const state = initialDialRuntimeState();
+  assert.deepEqual(reduceDialRotation(settings, state, RUNTIME_VIEW, -3), {
+    state,
+    bindings: ["reasoning.decrease", "reasoning.decrease", "reasoning.decrease"]
+  });
+  assert.deepEqual(reduceDialRotation(settings, state, RUNTIME_VIEW, 2), {
+    state,
+    bindings: ["reasoning.increase", "reasoning.increase"]
+  });
+  assert.equal(reduceDialRotation(settings, state, RUNTIME_VIEW, 1_001).bindings.length, 1_001);
+});
+
+test("selector rotation previews without dispatch and wraps or clamps as configured", () => {
+  const usage = expandDialPreset("usage");
+  const weekly = {
+    ...initialDialRuntimeState(),
+    selectedId: "weekly",
+    usageMode: "weekly" as const
+  };
+  const wrapped = reduceDialRotation(usage, weekly, RUNTIME_VIEW, 1);
+  assert.deepEqual(wrapped.bindings, []);
+  assert.deepEqual(wrapped.state, {
+    selectedId: "auto",
+    usageMode: "auto",
+    usageOverview: false
+  });
+
+  const clampedSettings = normalizeDialSettings({
+    ...usage,
+    rotation: { kind: "selector", source: "usage", wrap: false, items: [] }
+  });
+  assert.deepEqual(reduceDialRotation(clampedSettings, weekly, RUNTIME_VIEW, 3), {
+    state: weekly,
+    bindings: []
+  });
+  assert.equal(
+    reduceDialRotation(usage, { ...weekly, selectedId: "auto", usageMode: "auto" }, RUNTIME_VIEW, -1)
+      .state.selectedId,
+    "weekly"
+  );
+});
+
+test("agent selector rotation skips absent slots and selectedItem reconciles stable identity", () => {
+  const agents = expandDialPreset("agents");
+  const initial = reduceDialRotation(agents, initialDialRuntimeState(), RUNTIME_VIEW, 1);
+  assert.deepEqual(initial.bindings, []);
+  assert.equal(initial.state.selectedId, "rollout-delta");
+  assert.equal(selectedItem(agents, initial.state, RUNTIME_VIEW)?.threadKey, "thread-delta");
+
+  const reorderedView = { ...RUNTIME_VIEW, agents: [...RUNTIME_VIEW.agents].reverse() };
+  assert.equal(selectedItem(agents, initial.state, reorderedView)?.id, "rollout-delta");
+  assert.equal(selectedItem(agents, initialDialRuntimeState(), { ...RUNTIME_VIEW, agents: [] }), undefined);
+});
+
+test("empty selectors and invalid, non-finite, fractional, or zero ticks are no-ops", () => {
+  const state = { ...initialDialRuntimeState(), selectedId: "missing" };
+  const emptyView = { ...RUNTIME_VIEW, agents: [] };
+  assert.deepEqual(reduceDialRotation(expandDialPreset("agents"), state, emptyView, 2), {
+    state: { usageMode: "auto", usageOverview: false },
+    bindings: []
+  });
+  for (const ticks of [0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 1.5]) {
+    const result = reduceDialRotation(expandDialPreset("reasoning"), state, RUNTIME_VIEW, ticks);
+    assert.equal(result.state, state, String(ticks));
+    assert.deepEqual(result.bindings, [], String(ticks));
+  }
+});
+
+test("reasoning feedback reports the live effort and never infers an absent value", () => {
+  assert.deepEqual(
+    deriveDialFeedback(expandDialPreset("reasoning"), initialDialRuntimeState(), RUNTIME_VIEW),
+    {
+      title: "REASONING",
+      value: "HIGH",
+      detail: "TURN TO ADJUST",
+      indicator: 75,
+      accent: "#1683FF"
+    }
+  );
+  assert.deepEqual(
+    deriveDialFeedback(
+      expandDialPreset("reasoning"),
+      initialDialRuntimeState(),
+      { ...RUNTIME_VIEW, reasoningEffort: undefined }
+    ),
+    {
+      title: "REASONING",
+      value: "UNAVAILABLE",
+      detail: "LIVE VALUE NOT REPORTED",
+      indicator: 0,
+      accent: "#707B85"
+    }
+  );
+});
+
+test("agent and action feedback use reconciled selections and bounded live labels", () => {
+  const agentState = { ...initialDialRuntimeState(), selectedId: "rollout-alpha" };
+  assert.deepEqual(deriveDialFeedback(expandDialPreset("agents"), agentState, RUNTIME_VIEW), {
+    title: "AGENT 1",
+    value: "ALPHA TASK",
+    detail: "THINKING • 42% CONTEXT",
+    indicator: 42,
+    accent: "#1683FF"
+  });
+
+  const settings = actionSelector(["keycap.FAST", "micro.ACT06"]);
+  assert.deepEqual(deriveDialFeedback(settings, initialDialRuntimeState(), RUNTIME_VIEW), {
+    title: "ACTION 1/2",
+    value: "FAST MODE",
+    detail: "PRESS TO RUN",
+    indicator: 50,
+    accent: "#4CE0C2"
+  });
+
+  const longLabelView = {
+    ...RUNTIME_VIEW,
+    actionLabels: { "keycap.FAST": "  a very long\nlabel that cannot fit on the touchscreen  " }
+  };
+  const bounded = deriveDialFeedback(
+    actionSelector(["keycap.FAST"]), initialDialRuntimeState(), longLabelView
+  );
+  assert.equal(bounded.value, "A VERY LONG LABEL THAT…");
+  assert.equal(bounded.value.length <= 24, true);
+});
+
+test("navigation and static feedback are explicit, while auto follows the rotation source", () => {
+  assert.deepEqual(
+    deriveDialFeedback(expandDialPreset("navigation"), initialDialRuntimeState(), RUNTIME_VIEW),
+    {
+      title: "NAVIGATION",
+      value: "BACK / FORWARD",
+      detail: "TURN LEFT / RIGHT",
+      indicator: 50,
+      accent: "#1683FF"
+    }
+  );
+  assert.deepEqual(
+    deriveDialFeedback(
+      normalizeDialSettings({ ...expandDialPreset("custom"), staticLabel: "Desk control" }),
+      initialDialRuntimeState(),
+      RUNTIME_VIEW
+    ),
+    {
+      title: "CUSTOM",
+      value: "DESK CONTROL",
+      detail: "READY",
+      indicator: 0,
+      accent: "#707B85"
+    }
+  );
+
+  const autoAgents = normalizeDialSettings({ ...expandDialPreset("agents"), feedback: "auto" });
+  assert.equal(deriveDialFeedback(autoAgents, initialDialRuntimeState(), RUNTIME_VIEW).title, "AGENT 1");
+
+  const autoUsagePreset = normalizeDialSettings({
+    ...expandDialPreset("usage"),
+    feedback: "auto",
+    rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" }
+  });
+  assert.equal(
+    deriveDialFeedback(autoUsagePreset, initialDialRuntimeState(), RUNTIME_VIEW).title,
+    "USAGE • 5 HOURS"
+  );
+});
+
+test("usage feedback reports percent left, reset countdown, and both overview windows", () => {
+  const view: DialRuntimeView = {
+    ...RUNTIME_VIEW,
+    now: 1_000,
+    usage: {
+      ...RUNTIME_VIEW.usage!,
+      resetsAt: 9_001_000
+    }
+  };
+  const state = {
+    ...initialDialRuntimeState(),
+    selectedId: "five-hour",
+    usageMode: "five-hour" as const
+  };
+  assert.deepEqual(deriveDialFeedback(expandDialPreset("usage"), state, view), {
+    title: "USAGE • 5 HOURS",
+    value: "72% LEFT",
+    detail: "RESETS IN 2H 30M",
+    indicator: 72,
+    accent: "#35D86B"
+  });
+  assert.deepEqual(deriveDialFeedback(
+    expandDialPreset("usage"),
+    { ...state, usageOverview: true },
+    view
+  ), {
+    title: "USAGE OVERVIEW",
+    value: "5H 72% • WK 41%",
+    detail: "PRESS TO CLOSE",
+    indicator: 72,
+    accent: "#35D86B"
+  });
+
+  assert.deepEqual(deriveDialFeedback(
+    expandDialPreset("usage"),
+    { ...state, selectedId: "weekly", usageMode: "weekly" },
+    { ...view, usage: { ...view.usage!, weeklyRemaining: null } }
+  ), {
+    title: "USAGE • WEEKLY",
+    value: "UNAVAILABLE",
+    detail: "LIVE VALUE NOT REPORTED",
+    indicator: 0,
+    accent: "#707B85"
+  });
+});
+
+test("feedback replaces live values with honest offline, connecting, and degraded states", () => {
+  const expected = {
+    offline: ["OFFLINE", "LIVE DATA UNAVAILABLE", "#FF4B61"],
+    connecting: ["CONNECTING", "WAITING FOR LIVE DATA", "#FF9A3D"],
+    degraded: ["DEGRADED", "LIVE DATA MAY BE STALE", "#FF9A3D"]
+  } as const;
+  for (const health of ["offline", "connecting", "degraded"] as const) {
+    const feedback = deriveDialFeedback(
+      expandDialPreset("reasoning"),
+      initialDialRuntimeState(),
+      { ...RUNTIME_VIEW, health }
+    );
+    assert.deepEqual(feedback, {
+      title: "REASONING",
+      value: expected[health][0],
+      detail: expected[health][1],
+      indicator: 0,
+      accent: expected[health][2]
+    });
+  }
+});
 
 test("status-focused presets expand to the approved independent bindings", () => {
   const actionItems = [

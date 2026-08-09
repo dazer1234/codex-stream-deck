@@ -65,6 +65,33 @@ export type DialRuntimeState = {
   usageOverview: boolean;
 };
 
+export type DialRuntimeAgent = {
+  id: number;
+  identity: string;
+  threadKey: string;
+  title: string;
+  status: string;
+  contextUsedPercent?: number;
+};
+
+export type DialRuntimeUsage = {
+  mode: "auto" | "five-hour" | "weekly";
+  remainingPercent?: number;
+  resetsAt: number | null;
+  observedAt: number;
+  fiveHourRemaining: number | null;
+  weeklyRemaining: number | null;
+};
+
+export type DialRuntimeView = {
+  health: "ready" | "degraded" | "offline" | "connecting";
+  reasoningEffort?: string;
+  agents: DialRuntimeAgent[];
+  actionLabels: Partial<Record<DialBindingId, string>>;
+  usage?: DialRuntimeUsage;
+  now: number;
+};
+
 export type DialFeedback = {
   title: string;
   value: string;
