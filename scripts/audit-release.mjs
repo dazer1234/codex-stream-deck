@@ -43,16 +43,42 @@ async function walk(path) {
   for (const pattern of forbiddenText) if (pattern.test(contents)) failures.push(`${path}: contains private setup marker ${pattern}`);
 }
 
-async function auditDeclaredCodexDialAssets(root) {
+async function readPluginManifest(root) {
   const manifestPath = resolve(root, "manifest.json");
-  let manifest;
-  try { manifest = JSON.parse(await readFile(manifestPath, "utf8")); }
+  const pluginRoot = basename(root).toLowerCase().endsWith(".sdplugin");
+  let source;
+  try { source = await readFile(manifestPath, "utf8"); }
   catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
-    failures.push(`${manifestPath}: cannot inspect plugin manifest (${String(error)})`);
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      if (pluginRoot) failures.push(`${manifestPath}: plugin manifest is required for a .sdPlugin root`);
+      return undefined;
+    }
+    failures.push(`${manifestPath}: cannot read plugin manifest (${String(error)})`);
+    return undefined;
+  }
+  let manifest;
+  try { manifest = JSON.parse(source); }
+  catch {
+    failures.push(`${manifestPath}: plugin manifest is not valid JSON`);
+    return undefined;
+  }
+  if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
+    failures.push(`${manifestPath}: plugin manifest must be a JSON object`);
+    return undefined;
+  }
+  if (!Array.isArray(manifest.Actions)) {
+    failures.push(`${manifestPath}: plugin manifest Actions must be an array`);
+    return undefined;
+  }
+  return manifest;
+}
+
+async function auditDeclaredCodexDialAssets(root) {
+  const manifest = await readPluginManifest(root);
+  if (!manifest) {
     return;
   }
-  const declaresDial = Array.isArray(manifest?.Actions) && manifest.Actions.some(
+  const declaresDial = manifest.Actions.some(
     (action) => action?.UUID === "com.simeo.codex-deck.codex-dial"
   );
   if (!declaresDial) return;

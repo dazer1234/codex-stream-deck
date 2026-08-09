@@ -17,11 +17,13 @@ The recommended layout uses four separate `Codex Dial` instances:
 | Knob | Rotate | Press | Touch | Feedback |
 |---|---|---|---|---|
 | Reasoning | Reasoning decrease counter-clockwise; reasoning increase clockwise | None | Fast mode | Current reasoning effort |
-| Agents | Select the previous or next occupied agent | Focus the highlighted agent | Tasks view | Agent title, status, and context use when available |
-| Actions | Select Fast, Approve, Reject, Fork, Dictation, or Send in that order | Run the highlighted action | Codex Micro Settings | Selected action and activation hint |
-| Usage | Select Automatic, 5-hour, or Weekly | Toggle the selected single-window view and two-window overview | Refresh usage now | Remaining capacity, reset time, health, and view mode |
+| Agents | Select the previous or next occupied agent | Focus the highlighted agent | Tasks view | Agent title, status, context use, and M/W host badge when relevant |
+| Actions | Select Fast, Approve, Reject, Fork, Dictation, or Send in that order | Run the highlighted action | Settings | Selected action and activation hint |
+| Usage | Select Auto, 5h, or Weekly | Toggle the selected single-window view and two-window overview | Refresh usage now | Remaining capacity, reset time, health, and view mode |
 
 Reasoning changes apply once per detent. They do not require a press or confirmation.
+
+The six action names are the default slot labels for the six configured Codex Micro action slots. Feedback labels follow the current Codex Micro assignments, so a customized slot is identified by its current assignment rather than a hardcoded default name.
 
 ## Gesture behavior
 
@@ -31,9 +33,9 @@ In **Paired controls** mode, counter-clockwise and clockwise rotation have separ
 
 ### Rotate to select
 
-In **Rotate to select** mode, rotation only highlights an item; it does not run it. Press **Activate Selection** to run the highlighted agent or configured action. The selector can wrap at either end, and an Actions selector preserves the order chosen in the property inspector. The Usage selector cycles Automatic, 5-hour, and Weekly.
+In **Rotate to select** mode, rotation only highlights an item; it does not run it. Press **Activate Selection** to run the highlighted agent or configured action. The selector can wrap at either end, and an Actions selector preserves the order chosen in the property inspector. The Usage selector cycles Auto, 5h, and Weekly.
 
-An empty selector cannot be activated. It may be shown as `NO ITEMS`, or as `UNAVAILABLE` with a more specific detail such as no active agents or no configured actions, depending on the feedback mode.
+An empty selector shows `NO ITEMS` and cannot be activated. Pressing it produces the standard Stream Deck alert without dispatching an action.
 
 ### Press and touch
 
@@ -60,7 +62,7 @@ Changing an individual field marks only that dial as customized. Settings contai
 
 ### Rate-limit reset protection
 
-**Reset rate-limit credit (hold)** is available only for Press. It is intentionally absent from rotation, touch, and selector item choices. A reset requires a deliberate 1.2-second hold and Codex must report that a credit is both available and applicable. A short press does nothing. Successful use shows the standard success indicator.
+**Reset rate-limit credit (hold)** is available only for Press. It is intentionally absent from rotation, touch, and selector item choices. A reset requires a deliberate 1.2-second hold and Codex must report that a credit is both available and applicable. A short press does nothing. Successful use temporarily shows `RESET COMPLETE` with green feedback before returning to live status.
 
 ## Feedback and routing
 
@@ -68,12 +70,12 @@ Current reasoning is read from Codex's live composer state, not inferred from th
 
 In single-host mode, controls and feedback use the local Codex instance. In multi-host mode:
 
-- Agent selection and focus stay bound to the highlighted task's owning host and stable task identity.
+- Agent selection and focus stay bound to the highlighted task's owning host and stable task identity. Agent feedback includes an M/W host badge when the merged list needs to distinguish the owner.
 - Reasoning, navigation, Micro, keycap, new-task, and host controls use the selected function-control host.
-- Usage is account-scoped. It prefers a healthy local usage snapshot and falls back to the paired host only when local usage is unavailable.
-- A command is not sent through stale display-only data; its captured host must still be live and applicable.
+- Usage is account-scoped. It prefers a healthy local usage snapshot. When healthy local usage is unavailable, it selects a healthy paired host with usable account data.
+- New command starts require a healthy, applicable route. A cleanup release for a momentary action that already went down may still be attempted against its captured route so the remote control is not left pressed.
 
-Feedback may retain last-known information while a host is degraded or offline, but this does not make stale controls executable.
+Feedback may retain last-known information while a host is degraded or offline, but that information is display-only and cannot start a new command.
 
 ## macOS physical verification checklist
 
@@ -97,7 +99,7 @@ The plugin source, manifest, property inspector, and packaged Encoder assets use
 
 ### `NO ITEMS` or `UNAVAILABLE`
 
-For Agents, open Codex and make sure the selected Codex Micro source has at least one occupied task. For Actions, select at least one configured action in the property inspector. For Usage or Reasoning, confirm that the current Codex build exposes the corresponding live state.
+`NO ITEMS` means the current selector is empty. For Agents, open Codex and make sure the selected Codex Micro source has at least one occupied task. For Actions, select at least one configured action in the property inspector. `UNAVAILABLE` applies to live Usage or Reasoning values that the current Codex build did not report.
 
 ### `CONNECTING`
 
@@ -105,7 +107,7 @@ The plugin is waiting for a fresh bridge or relay snapshot. Confirm that Codex i
 
 ### `DEGRADED`
 
-The last snapshot is retained for display, but live state is uncertain or stale. Check the platform launcher diagnostics and, in multi-host mode, the authenticated relay connection. Commands remain blocked when the captured route is not healthy.
+The last snapshot is retained for display, but live state is uncertain or stale. Check the platform launcher diagnostics and, in multi-host mode, the authenticated relay connection. New command starts remain blocked when the captured route is not healthy; a cleanup release may still be attempted for a momentary command that already started.
 
 ### `OFFLINE`
 
