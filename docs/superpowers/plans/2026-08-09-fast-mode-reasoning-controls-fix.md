@@ -505,13 +505,13 @@ Give the reviewer the approved design, this plan, the base SHA before Task 1, an
 Quit Stream Deck cleanly. Create a new timestamped backup under:
 
 ```text
-/Users/TLK3/Documents/Codex/2026-08-09/i-think-there-s-a-plugin/work/backups/
+$REPO_PARENT/backups/
 ```
 
 Back up the installed plugin and the Stream Deck + profile, atomically replace only:
 
 ```text
-/Users/TLK3/Library/Application Support/com.elgato.StreamDeck/Plugins/com.simeo.codex-deck.sdPlugin
+$HOME/Library/Application Support/com.elgato.StreamDeck/Plugins/com.simeo.codex-deck.sdPlugin
 ```
 
 with the verified `dist/com.simeo.codex-deck.sdPlugin`, then relaunch Stream Deck.
