@@ -1513,12 +1513,18 @@ export class DeckController {
     const refreshFastState = act === 1 &&
       this.localSnapshot?.snapshot.layout.slots[slot]?.keycapId === "FAST";
     await this.microBridge.sendAction(slot, act);
-    if (refreshFastState) await this.refresh();
+    if (refreshFastState) await this.refreshAfterFastActivation();
   }
 
   private async runLocalKeycap(keycapId: OfficialKeycapId): Promise<void> {
     await this.microBridge.runKeycap(keycapId);
-    if (keycapId === "FAST") await this.refresh();
+    if (keycapId === "FAST") await this.refreshAfterFastActivation();
+  }
+
+  private async refreshAfterFastActivation(): Promise<void> {
+    const precedingRefresh = this.refreshInFlight;
+    if (precedingRefresh) await precedingRefresh;
+    await this.refresh();
   }
 
   private async setImage(action: KeyAction, image: string): Promise<void> {

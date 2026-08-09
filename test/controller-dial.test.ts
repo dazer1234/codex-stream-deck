@@ -45,6 +45,7 @@ type ControllerProbe = {
   dialRenderErrors: Set<string>;
   dialSuccessErrors: Set<string>;
   refresh(): Promise<void>;
+  refreshInFlight?: Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
   renderAll(): Promise<void>;
 };
@@ -324,6 +325,39 @@ test("local dial touch FAST uses the command path and refreshes its authoritativ
   assert.deepEqual(keycaps, ["FAST"]);
   assert.equal(refreshes, 1);
   assert.equal(state.localSnapshot.snapshot.fastModeEnabled, false);
+});
+
+test("local FAST activation queues a post-command snapshot behind an older refresh", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const keycaps: string[] = [];
+  let postCommandRefreshes = 0;
+  let releaseOlderRefresh!: () => void;
+  const olderRefresh = new Promise<void>((resolve) => { releaseOlderRefresh = resolve; });
+  const trackedOlderRefresh = olderRefresh.finally(() => { state.refreshInFlight = undefined; });
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async runKeycap(keycapId) { keycaps.push(keycapId); }
+  };
+  state.refreshInFlight = trackedOlderRefresh;
+  state.refresh = async () => {
+    if (state.refreshInFlight) return state.refreshInFlight;
+    postCommandRefreshes += 1;
+  };
+
+  const activation = controller.runKeycap("FAST");
+  await settle();
+  assert.deepEqual(keycaps, ["FAST"]);
+  assert.equal(postCommandRefreshes, 0, "the activation first lets the older snapshot finish");
+
+  releaseOlderRefresh();
+  await activation;
+  assert.equal(postCommandRefreshes, 1, "a new authoritative read starts after the command");
 });
 
 test("selector rotation previews only and selector state stays isolated per action", async () => {
