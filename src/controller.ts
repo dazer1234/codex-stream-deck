@@ -1523,7 +1523,10 @@ export class DeckController {
 
   private async refreshAfterFastActivation(): Promise<void> {
     const precedingRefresh = this.refreshInFlight;
-    if (precedingRefresh) await precedingRefresh;
+    if (precedingRefresh) {
+      try { await precedingRefresh; }
+      catch { /* The original refresh owner retains its failure; FAST still needs a newer snapshot. */ }
+    }
     await this.refresh();
   }
 

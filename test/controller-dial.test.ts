@@ -360,6 +360,34 @@ test("local FAST activation queues a post-command snapshot behind an older refre
   assert.equal(postCommandRefreshes, 1, "a new authoritative read starts after the command");
 });
 
+test("local FAST activation refreshes after an older refresh rejects", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  let postCommandRefreshes = 0;
+  let rejectOlderRefresh!: (error: Error) => void;
+  const olderRefresh = new Promise<void>((_resolve, reject) => { rejectOlderRefresh = reject; })
+    .finally(() => { state.refreshInFlight = undefined; });
+  void olderRefresh.catch(() => {});
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = { async sendAgent() {}, async runKeycap() {} };
+  state.refreshInFlight = olderRefresh;
+  state.refresh = async () => {
+    if (state.refreshInFlight) return state.refreshInFlight;
+    postCommandRefreshes += 1;
+  };
+
+  const activation = controller.runKeycap("FAST");
+  await settle();
+  assert.equal(postCommandRefreshes, 0);
+  rejectOlderRefresh(new Error("older render failed"));
+  await assert.doesNotReject(activation);
+  assert.equal(postCommandRefreshes, 1, "the rejected older read cannot suppress the post-command read");
+});
+
 test("selector rotation previews only and selector state stays isolated per action", async () => {
   const controller = new DeckController();
   const first = fakeDial("usage-first");
