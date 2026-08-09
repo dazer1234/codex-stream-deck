@@ -205,9 +205,10 @@ export class CodexRelayServer {
     this.log(`Relay command ${commandLabel} received.`);
     try {
       await executeRelayCommand(this.control, command);
+      if (command.kind === "usage-refresh") await this.publishSnapshot(undefined, true);
       this.sendResult(socket, message.requestId, true);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
-      await this.publishSnapshot();
+      if (command.kind !== "usage-refresh") await this.publishSnapshot();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.log(`Relay command ${commandLabel} failed in ${Date.now() - startedAt} ms: ${errorMessage}`);
@@ -261,8 +262,8 @@ export class CodexRelayServer {
     }
   }
 
-  private async publishSnapshot(only?: WebSocket): Promise<void> {
-    const message = await this.currentSnapshotMessage();
+  private async publishSnapshot(only?: WebSocket, forceFresh = false): Promise<void> {
+    const message = await this.currentSnapshotMessage(forceFresh);
     if (this.consecutiveSnapshotFailures > 0) {
       this.log(`Relay snapshot recovered after ${this.consecutiveSnapshotFailures} transient failure${this.consecutiveSnapshotFailures === 1 ? "" : "s"}.`);
     }
@@ -277,15 +278,22 @@ export class CodexRelayServer {
     }
   }
 
-  private async currentSnapshotMessage(): Promise<RelaySnapshotMessage> {
-    if (this.snapshotInFlight) return this.snapshotInFlight;
-    const pending = this.control.refresh().then((snapshot): RelaySnapshotMessage => ({
-      type: "snapshot",
-      protocol: RELAY_PROTOCOL_VERSION,
-      host: this.host,
-      observedAt: Date.now(),
-      snapshot
-    }));
+  private async currentSnapshotMessage(forceFresh = false): Promise<RelaySnapshotMessage> {
+    const previous = this.snapshotInFlight;
+    if (previous && !forceFresh) return previous;
+    const pending = (async (): Promise<RelaySnapshotMessage> => {
+      if (previous) {
+        try { await previous; } catch {}
+      }
+      const snapshot = await this.control.refresh();
+      return {
+        type: "snapshot",
+        protocol: RELAY_PROTOCOL_VERSION,
+        host: this.host,
+        observedAt: Date.now(),
+        snapshot
+      };
+    })();
     this.snapshotInFlight = pending;
     try { return await pending; }
     finally { if (this.snapshotInFlight === pending) this.snapshotInFlight = undefined; }

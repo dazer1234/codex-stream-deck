@@ -332,7 +332,7 @@ export class DeckController {
   async refreshUsage(): Promise<void> {
     const source = this.accountUsageSource();
     if (source.hostId != null && source.hostId !== this.localHost?.hostId) {
-      if (!this.relayClient?.supportsCapability("usage-refresh")) {
+      if (!this.relayClient?.supportsCapabilityForSnapshot("usage-refresh", source.hostId)) {
         throw new Error("Remote Codex host does not support usage refresh.");
       }
       await this.relayClient.send({ kind: "usage-refresh" });

@@ -68,7 +68,59 @@ export const REASONING_ENCODER_KEYS: Record<ReasoningAdjustment, "ENC_CW" | "ENC
   increase: "ENC_CC"
 };
 
-const SNAPSHOT_EXPRESSION = `(async () => {
+type RendererUsageQuery = {
+  state?: { data?: unknown; dataUpdatedAt?: number };
+  fetch?: () => unknown;
+};
+
+export async function readUsageQueryData(
+  query: RendererUsageQuery | undefined,
+  forceUsageRefresh: boolean,
+  now = Date.now(),
+  refreshState = globalThis as unknown as Record<symbol, unknown>
+): Promise<unknown> {
+  if (!query) return undefined;
+  if (forceUsageRefresh) {
+    if (typeof query.fetch !== "function") throw new Error("Codex usage query cannot be refreshed.");
+    await Promise.resolve(query.fetch());
+  } else {
+    const refreshKey = Symbol.for('codex-deck-rate-limit-refresh-at');
+    const dataUpdatedAt = Number(query.state?.dataUpdatedAt) || 0;
+    const lastRefreshAttempt = Number(refreshState[refreshKey]) || 0;
+    if (typeof query.fetch === "function" && now - dataUpdatedAt >= 15000 && now - lastRefreshAttempt >= 15000) {
+      refreshState[refreshKey] = now;
+      try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
+    }
+  }
+  return query.state?.data;
+}
+
+type ReasoningEffortElement = {
+  isConnected?: boolean;
+  getClientRects?: () => { length: number };
+  getAttribute: (name: string) => string | null;
+};
+
+export function readActiveReasoningEffort(
+  elements: Iterable<ReasoningEffortElement>,
+  isVisible = (element: ReasoningEffortElement): boolean => {
+    if (element.isConnected === false || (element.getClientRects?.().length ?? 0) === 0) return false;
+    const style = getComputedStyle(element as unknown as Element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }
+): string | undefined {
+  for (const element of elements) {
+    if (!isVisible(element)) continue;
+    const value = element.getAttribute("data-selected-reasoning-effort")?.trim();
+    if (value && value.length <= 64) return value;
+  }
+  return undefined;
+}
+
+const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () => {
+  const forceUsageRefresh = ${forceUsageRefresh};
+  const readUsageQueryData = (${readUsageQueryData.toString()});
+  const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
   const urls = [...new Set([
     ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
     ...performance.getEntriesByType('resource').map((entry) => entry.name)
@@ -214,28 +266,14 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   }));
 
   let usage;
-  const forceRefreshKey = Symbol.for('codex-deck-force-rate-limit-refresh');
-  const forceRefresh = globalThis[forceRefreshKey] === true;
-  if (forceRefresh) delete globalThis[forceRefreshKey];
+  let forcedUsageQueryFound = false;
   for (const client of queryClients) {
     try {
       const query = client.getQueryCache().getAll().find((candidate) =>
         JSON.stringify(candidate.queryKey) === '["rate-limit-status"]'
       );
-      const refreshKey = Symbol.for('codex-deck-rate-limit-refresh-at');
-      const now = Date.now();
-      const dataUpdatedAt = Number(query?.state?.dataUpdatedAt) || 0;
-      const lastRefreshAttempt = Number(globalThis[refreshKey]) || 0;
-      if (forceRefresh && query && typeof query.fetch === 'function') {
-        await Promise.resolve(query.fetch());
-      } else if (query && typeof query.fetch === 'function' && now - dataUpdatedAt >= 15000 && now - lastRefreshAttempt >= 15000) {
-        globalThis[refreshKey] = now;
-        // Rate-limit refresh is network-backed and must never hold agent status,
-        // selection, or lighting behind its response. A later snapshot reads
-        // the refreshed query cache once this best-effort request completes.
-        try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
-      }
-      const data = query?.state?.data;
+      if (forceUsageRefresh && query && typeof query.fetch === 'function') forcedUsageQueryFound = true;
+      const data = await readUsageQueryData(query, forceUsageRefresh);
       const rateLimit = data?.rate_limit;
       if (!rateLimit || typeof rateLimit !== 'object') continue;
       const normalizeWindow = (window, role) => {
@@ -272,8 +310,11 @@ const SNAPSHOT_EXPRESSION = `(async () => {
         resetCreditsApplicable: Number.isFinite(applicable) ? Math.max(0, Math.floor(applicable)) : null
       };
       break;
-    } catch {}
+    } catch (error) {
+      if (forceUsageRefresh) throw error;
+    }
   }
+  if (forceUsageRefresh && !forcedUsageQueryFound) throw new Error('Codex usage query is unavailable.');
 
   const html = document.documentElement;
   const body = document.body;
@@ -308,11 +349,9 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const activeThreadTitle = activeThreadElement
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
-  const reasoningEffortValue = document.querySelector('[data-selected-reasoning-effort]')
-    ?.getAttribute('data-selected-reasoning-effort')?.trim();
-  const reasoningEffort = reasoningEffortValue && reasoningEffortValue.length <= 64
-    ? reasoningEffortValue
-    : undefined;
+  const reasoningEffort = readActiveReasoningEffort(document.querySelectorAll(
+    'button[data-selected-reasoning-effort], [role="button"][data-selected-reasoning-effort], [aria-haspopup][data-selected-reasoning-effort]'
+  ));
 
   return {
     slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme,
@@ -334,11 +373,7 @@ export class CodexMicroRendererBridge {
 
   async refresh(): Promise<MicroSnapshot> {
     try {
-      await this.ensureConnected();
-      const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION);
-      const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
-      this.lastSnapshot = snapshot;
-      return snapshot;
+      return await this.readSnapshot(false);
     } catch (error) {
       this.disconnect();
       throw error;
@@ -346,13 +381,24 @@ export class CodexMicroRendererBridge {
   }
 
   async requestUsageRefresh(): Promise<MicroSnapshot> {
-    await this.ensureConnected();
-    await this.evaluate(`globalThis[Symbol.for('codex-deck-force-rate-limit-refresh')] = true`);
-    return this.refresh();
+    try {
+      return await this.readSnapshot(true);
+    } catch (error) {
+      this.disconnect();
+      throw error;
+    }
   }
 
   async refreshUsage(): Promise<void> {
     await this.requestUsageRefresh();
+  }
+
+  private async readSnapshot(forceUsageRefresh: boolean): Promise<MicroSnapshot> {
+    await this.ensureConnected();
+    const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION(forceUsageRefresh));
+    const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
+    this.lastSnapshot = snapshot;
+    return snapshot;
   }
 
   async sendAgent(slot: number, act: 0 | 1, expectedThreadKey?: string): Promise<void> {

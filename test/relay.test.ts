@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { generate } from "selfsigned";
 import { CodexRelayClient, RELAY_SNAPSHOT_STALE_MS, resolveRelayHealth } from "../src/codex-relay-client.js";
 import { isAllowedRelayHost, isPrivateLanHost, privateLanAddresses } from "../src/relay-network.js";
@@ -829,6 +829,62 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
   await server.close();
 });
 
+test("usage refresh publishes a new post-command snapshot before acknowledging success", async (t) => {
+  const port = await freePort();
+  let refreshCall = 0;
+  let usageRefreshes = 0;
+  let releasePreCommand!: (value: MicroSnapshot) => void;
+  const preCommand = new Promise<MicroSnapshot>((resolve) => { releasePreCommand = resolve; });
+  const control = {
+    refresh: async () => {
+      refreshCall += 1;
+      if (refreshCall === 2) return preCommand;
+      return { ...structuredClone(snapshot), reasoningEffort: `snapshot-${refreshCall}` };
+    },
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {},
+    consumeRateLimitReset: async () => {}, refreshUsage: async () => { usageRefreshes += 1; }
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const commandSocket = new WebSocket(`ws://127.0.0.1:${port}`);
+  const commandMessages = messageQueue(commandSocket);
+  await onceOpen(commandSocket);
+  commandSocket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await commandMessages.next()).type, "ready");
+  assert.equal((await commandMessages.next()).type, "snapshot");
+
+  const blockingSocket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => {
+    commandSocket.close();
+    blockingSocket.close();
+    await server.close();
+  });
+  const blockingMessages = messageQueue(blockingSocket);
+  await onceOpen(blockingSocket);
+  blockingSocket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await blockingMessages.next()).type, "ready");
+  await waitUntil(() => refreshCall === 2);
+
+  commandSocket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "fresh-usage",
+    command: { kind: "usage-refresh" }
+  }));
+  await waitUntil(() => usageRefreshes === 1);
+  releasePreCommand({ ...structuredClone(snapshot), reasoningEffort: "pre-command" });
+
+  const fresh = await commandMessages.next();
+  const result = await commandMessages.next();
+  assert.equal(refreshCall, 3, "post-command publication must force a new snapshot");
+  assert.equal(fresh.type, "snapshot");
+  assert.equal((fresh.snapshot as MicroSnapshot).reasoningEffort, "snapshot-3");
+  assert.equal(result.type, "result");
+  assert.equal(result.requestId, "fresh-usage");
+  assert.equal(result.ok, true);
+});
+
 test("running relay publishes refreshed Codex metadata without changing host identity", async () => {
   const port = await freePort();
   const control = {
@@ -945,15 +1001,98 @@ test("relay client preserves last-known tasks but marks their host offline after
   client.close();
 });
 
+test("relay capabilities are valid only for a snapshot from the current connection generation", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let connectionCount = 0;
+  let firstSocket: WebSocket | undefined;
+  let secondSocket: WebSocket | undefined;
+  relay.on("connection", (socket) => {
+    connectionCount += 1;
+    const connection = connectionCount;
+    if (connection === 1) firstSocket = socket;
+    else secondSocket = socket;
+    socket.once("message", () => {
+      socket.send(JSON.stringify({
+        type: "ready", protocol: 1, host, capabilities: ["usage-refresh"], bridge: "native-codex-micro"
+      }));
+      if (connection === 1) socket.send(JSON.stringify({
+        type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot
+      }));
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  const generationGate = client as CodexRelayClient & {
+    supportsCapabilityForSnapshot(capability: string, hostId: string): boolean;
+  };
+  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
+
+  firstSocket!.close();
+  await waitUntil(() => connectionCount === 2, 4_000);
+  await waitUntil(() => client.currentHealth().state === "degraded");
+  assert.equal(client.currentSnapshot()?.host.hostId, host.hostId, "last-known snapshot stays available for display");
+  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), false);
+
+  secondSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot
+  }));
+  await waitUntil(() => generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId));
+  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
+  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", "wrong-host"), false);
+});
+
 test("controller refreshes account usage on its source host instead of the selected function host", async () => {
   const source = await readFile(new URL("../src/controller.ts", import.meta.url), "utf8");
   assert.match(source, /async refreshUsage\(\): Promise<void>/);
   assert.match(source, /refreshUsage[\s\S]*const source = this\.accountUsageSource\(\)/);
   assert.match(source, /refreshUsage[\s\S]*this\.microBridge\.requestUsageRefresh\(\)/);
-  assert.match(source, /refreshUsage[\s\S]*supportsCapability\("usage-refresh"\)/);
+  assert.match(source, /refreshUsage[\s\S]*supportsCapabilityForSnapshot\("usage-refresh", source\.hostId\)/);
   assert.match(source, /refreshUsage[\s\S]*\{ kind: "usage-refresh" \}/);
   assert.match(source, /Remote Codex host does not support usage refresh\./);
   assert.match(source, /refreshUsage: \(\) => runAndInvalidate\(\(\) => this\.microBridge\.requestUsageRefresh\(\)\.then\(\(\) => undefined\)\)/);
+});
+
+test("controller preserves last-known usage and degrades health when forced refresh rejects", async () => {
+  const { DeckController } = await import("../src/controller.js");
+  const controller = new DeckController();
+  const knownSnapshot: HostSnapshot = {
+    host,
+    observedAt: 1_000,
+    snapshot: {
+      ...structuredClone(snapshot),
+      usage: {
+        windows: [], observedAt: 1_000,
+        resetCreditsAvailable: null, resetCreditsApplicable: null
+      }
+    }
+  };
+  const state = controller as unknown as {
+    microBridge: { requestUsageRefresh: () => Promise<MicroSnapshot> };
+    localHost: CodexHost;
+    localSnapshot: HostSnapshot;
+    localHealth: { state: string; changedAt: number; reason?: string };
+    refreshDisplay: () => Promise<void>;
+  };
+  state.microBridge = { requestUsageRefresh: async () => { throw new Error("usage fetch failed"); } };
+  state.localHost = host;
+  state.localSnapshot = knownSnapshot;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.refreshDisplay = async () => {};
+
+  await assert.rejects(controller.refreshUsage(), /usage fetch failed/);
+  assert.equal(state.localSnapshot, knownSnapshot);
+  assert.equal(state.localSnapshot.snapshot.usage?.observedAt, 1_000);
+  assert.equal(state.localHealth.state, "degraded");
+  assert.equal(state.localHealth.reason, "local-bridge-unavailable");
 });
 
 async function freePort(): Promise<number> {

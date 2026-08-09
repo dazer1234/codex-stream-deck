@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   REASONING_ENCODER_KEYS, resolveAgentDispatch, retainEvaluationPromise, selectCodexMainTarget
 } from "../src/codex-micro-renderer-bridge.js";
+import * as microBridgeModule from "../src/codex-micro-renderer-bridge.js";
 import { ADDITIONAL_KEYCAPS, OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 import { visualStatusFromMicro } from "../src/status.js";
 import type { MicroSnapshot } from "../src/types.js";
@@ -48,26 +49,59 @@ test("renderer bridge uses native Micro events and discovers hashed modules at r
   assert.doesNotMatch(source, /D90_rd6W|SFcKxWqG|DJFcGyy5/);
 });
 
-test("renderer snapshots expose only the active composer's bounded reasoning effort", async () => {
-  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
-  assert.match(source, /querySelector\('\[data-selected-reasoning-effort\]'\)/);
-  assert.match(source, /getAttribute\('data-selected-reasoning-effort'\)/);
-  assert.match(source, /reasoningEffortValue[\s\S]*?trim\(\)/);
-  assert.match(source, /reasoningEffortValue\.length <= 64/);
-  assert.match(source, /reasoningEffort \? \{ reasoningEffort \} : \{\}/);
+test("renderer snapshots choose the visible reasoning composer trigger", () => {
+  const readActiveReasoningEffort = Reflect.get(microBridgeModule, "readActiveReasoningEffort") as unknown;
+  assert.equal(typeof readActiveReasoningEffort, "function");
+  const read = readActiveReasoningEffort as (
+    elements: Array<{ getAttribute: (name: string) => string | null; visible: boolean }>,
+    isVisible: (element: { visible: boolean }) => boolean
+  ) => string | undefined;
+  const elements = [
+    { getAttribute: () => "low", visible: false },
+    { getAttribute: () => " high ", visible: true }
+  ];
+  assert.equal(read(elements, (element) => element.visible), "high");
 });
 
-test("usage refresh distinguishes bounded background refreshes from a forced awaited fetch", async () => {
-  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
-  assert.match(source, /Symbol\.for\('codex-deck-force-rate-limit-refresh'\)/);
-  assert.match(source, /delete globalThis\[forceRefreshKey\]/);
-  assert.match(source, /if \(forceRefresh[\s\S]*await Promise\.resolve\(query\.fetch\(\)\)/);
-  assert.match(source, /now - dataUpdatedAt >= 15000/);
-  assert.match(source, /Promise\.resolve\(query\.fetch\(\)\)\.catch\(\(\) => \{\}\)/);
-  assert.match(source, /async requestUsageRefresh\(\): Promise<MicroSnapshot>/);
-  assert.match(source, /requestUsageRefresh[\s\S]*await this\.ensureConnected\(\)/);
-  assert.match(source, /requestUsageRefresh[\s\S]*this\.evaluate[\s\S]*codex-deck-force-rate-limit-refresh/);
-  assert.match(source, /requestUsageRefresh[\s\S]*return this\.refresh\(\)/);
+test("forced and normal bridge snapshots carry independent lexical refresh modes", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const expressions: string[] = [];
+  const nativeSnapshot = snapshotFixture();
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(expression: string) => Promise<T>;
+    sessionOwnership: { annotate: (value: MicroSnapshot) => Promise<MicroSnapshot> };
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(expression: string): Promise<T> => {
+    expressions.push(expression);
+    return structuredClone(nativeSnapshot) as T;
+  };
+  testBridge.sessionOwnership = { annotate: async (value) => value };
+
+  await Promise.all([bridge.requestUsageRefresh(), bridge.refresh()]);
+
+  assert.equal(expressions.length, 2, "forced refresh must not require a separate flag evaluation");
+  assert.match(expressions[0]!, /const forceUsageRefresh = true/);
+  assert.match(expressions[1]!, /const forceUsageRefresh = false/);
+  assert.equal(expressions.some((expression) => expression.includes("codex-deck-force-rate-limit-refresh")), false);
+});
+
+test("forced usage query failures reject while normal background refresh remains best effort", async () => {
+  const readUsageQueryData = Reflect.get(microBridgeModule, "readUsageQueryData") as unknown;
+  assert.equal(typeof readUsageQueryData, "function");
+  const read = readUsageQueryData as (
+    query: { state: { data: unknown; dataUpdatedAt: number }; fetch: () => Promise<unknown> },
+    forceUsageRefresh: boolean,
+    now?: number,
+    refreshState?: Record<symbol, unknown>
+  ) => Promise<unknown>;
+  const failure = new Error("usage fetch failed");
+  const forced = { state: { data: "stale", dataUpdatedAt: 1 }, fetch: async () => { throw failure; } };
+  await assert.rejects(read(forced, true, 20_000, {}), failure);
+
+  const normal = { state: { data: "last-known", dataUpdatedAt: 1 }, fetch: async () => { throw failure; } };
+  assert.equal(await read(normal, false, 20_000, {}), "last-known");
 });
 
 test("renderer bridge prefers the main index document over macOS avatar surfaces", () => {
@@ -197,3 +231,22 @@ test("assigned titleless threads use a new-chat label instead of Not assigned", 
   assert.match(source, /agent\?\.threadKey\s*&&\s*health\.state\s*===\s*"ready"\s*\?\s*"New chat"/);
   assert.match(source, /:\s*"Not assigned"/);
 });
+
+function snapshotFixture(): MicroSnapshot {
+  return {
+    slots: Array.from({ length: 6 }, (_, id) => ({
+      id, threadKey: null, title: null, status: "idle", selected: false
+    })),
+    layout: {
+      version: 1,
+      slots: {
+        ACT06: { keycapId: "FAST" }, ACT07: { keycapId: "APPR" }, ACT08: { keycapId: "REJ" },
+        ACT09: { keycapId: "SPLIT" }, ACT10_ACT11: { keycapId: "CODEX" }, ACT12: { keycapId: "CODEX" }
+      },
+      analogStick: { up: {}, right: {}, down: {}, left: {} }
+    },
+    agentSource: "recent",
+    lightingAutoOff: "3-minutes",
+    theme: "dark"
+  };
+}
