@@ -102,6 +102,51 @@ test("renderer snapshot expression reads only authoritative reasoning triggers",
   assert.match(source, /svg\[class\*="ModelPickerTriggerInlineFastIcon"\]/);
 });
 
+test("serialized Fast state helpers resolve their production dependencies in the renderer scope", async () => {
+  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
+  for (const helper of [
+    "isVisibleReasoningTrigger", "readActiveReasoningEffort", "hasFastModeIndicator", "readActiveFastMode"
+  ]) assert.ok(source.includes(`const ${helper} = (\${${helper}.toString()});`), `${helper} is serialized`);
+
+  const isVisibleReasoningTrigger = Reflect.get(microBridgeModule, "isVisibleReasoningTrigger") as Function;
+  const readActiveReasoningEffort = Reflect.get(microBridgeModule, "readActiveReasoningEffort") as Function;
+  const hasFastModeIndicator = Reflect.get(microBridgeModule, "hasFastModeIndicator") as Function;
+  const readActiveFastMode = Reflect.get(microBridgeModule, "readActiveFastMode") as Function;
+  const evaluate = new Function("document", "getComputedStyle", `
+    const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
+    const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
+    const hasFastModeIndicator = (${hasFastModeIndicator.toString()});
+    const readActiveFastMode = (${readActiveFastMode.toString()});
+    return readActiveFastMode(document.querySelectorAll(
+      '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+    ));
+  `) as (
+    document: { querySelectorAll: (selector: string) => Iterable<unknown> },
+    getComputedStyle: (element: unknown) => { display: string; visibility: string }
+  ) => boolean | undefined;
+  const trigger = (fast: boolean, visible = true, verified = true) => ({
+    isConnected: true,
+    getClientRects: () => ({ length: visible ? 1 : 0 }),
+    getAttribute: (name: string) => name === "data-composer-navigation-target" ? "reasoning" : null,
+    querySelector: (selector: string) => {
+      assert.equal(selector, 'svg[class*="ModelPickerTriggerInlineFastIcon"]');
+      return fast ? {} : null;
+    },
+    verified
+  });
+  const run = (triggers: ReturnType<typeof trigger>[]): boolean | undefined => evaluate({
+    querySelectorAll: (selector) => {
+      assert.equal(selector, '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]');
+      return triggers.filter((candidate) => candidate.verified);
+    }
+  }, () => ({ display: "block", visibility: "visible" }));
+
+  assert.equal(run([trigger(true)]), true);
+  assert.equal(run([trigger(false)]), false);
+  assert.equal(run([trigger(true, false)]), undefined, "hidden trigger is omitted");
+  assert.equal(run([trigger(true, true, false)]), undefined, "no verified trigger is omitted");
+});
+
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
   const predicate = Reflect.get(microBridgeModule, "hasApplicableResetCredit") as unknown;
   assert.equal(typeof predicate, "function");
