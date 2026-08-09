@@ -58,6 +58,39 @@ export function resolveAgentDispatch(
     : { kind: "direct", threadKey };
 }
 
+type CommandRunner = (command: string, source: string) => unknown;
+
+export async function resolveCommandRunner(
+  bridgeSource: string,
+  bridgeUrl: string,
+  importModule: (url: string) => Promise<Record<string, unknown>>
+): Promise<CommandRunner | null> {
+  const guardedCall = /(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*,\s*(?:"codex_micro_hid"|'codex_micro_hid'|`codex_micro_hid`)\s*\)/g;
+  const runnerLocals = new Set<string>();
+  let callMatch: RegExpExecArray | null;
+  while ((callMatch = guardedCall.exec(bridgeSource))) runnerLocals.add(callMatch[1]!);
+  if (runnerLocals.size === 0) return null;
+
+  const importPattern = /import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
+  let importMatch: RegExpExecArray | null;
+  while ((importMatch = importPattern.exec(bridgeSource))) {
+    for (const specifier of importMatch[1]!.split(',')) {
+      const parts = specifier.trim().split(/\s+as\s+/);
+      const exportName = parts[0];
+      const runnerLocal = parts[1] ?? exportName;
+      if (!exportName || !runnerLocal || parts.length > 2 ||
+          !/^[A-Za-z_$][\w$]*$/.test(exportName) || !/^[A-Za-z_$][\w$]*$/.test(runnerLocal) ||
+          !runnerLocals.has(runnerLocal)) continue;
+      try {
+        const namespace = await importModule(new URL(importMatch[2]!, bridgeUrl).href);
+        const candidate = namespace[exportName];
+        if (typeof candidate === "function") return candidate as CommandRunner;
+      } catch {}
+    }
+  }
+  return null;
+}
+
 const execFileAsync = promisify(execFile);
 const PORT_FILE = join(codexDeckStateRoot(), "codex-micro-bridge.json");
 const DEVICE_STATE = {
@@ -597,22 +630,8 @@ export class CodexMicroRendererBridge {
         }
         if (!commandRunner && bridgeUrl) {
           const bridgeSource = await (await fetch(bridgeUrl)).text();
-          const runnerMatch = bridgeSource.match(/([A-Za-z_$][\\w$]*)\\(\\s*[A-Za-z_$][\\w$]*\\??\\.command\\s*,["'\\x60]codex_micro_hid["'\\x60]\\)/);
-          const runnerLocal = runnerMatch?.[1];
-          const importPattern = /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g;
-          let importMatch;
-          while (runnerLocal && (importMatch = importPattern.exec(bridgeSource))) {
-            for (const specifier of importMatch[1].split(',')) {
-              const parts = specifier.trim().split(/\\s+as\\s+/);
-              const exportName = parts[0];
-              const localName = parts[1] ?? parts[0];
-              if (localName !== runnerLocal) continue;
-              const namespace = await import(new URL(importMatch[2], bridgeUrl).href);
-              if (typeof namespace[exportName] === 'function') commandRunner = namespace[exportName];
-              break;
-            }
-            if (commandRunner) break;
-          }
+          const resolveCommandRunner = (${resolveCommandRunner.toString()});
+          commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
         }
         if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
         const handled = commandRunner(action.command, 'codex_micro_hid');

@@ -405,6 +405,55 @@ test("reasoning controls invoke dedicated commands without native encoder dispat
   assert.doesNotMatch(adjustment, /ENC_CW|ENC_CC|this\.dispatch/);
 });
 
+test("command runner discovery resolves imported two-argument guarded calls and rejects contextual branches", async () => {
+  const candidate = Reflect.get(microBridgeModule, "resolveCommandRunner") as unknown;
+  assert.equal(typeof candidate, "function");
+  const resolveCommandRunner = candidate as (
+    bridgeSource: string,
+    bridgeUrl: string,
+    importModule: (url: string) => Promise<Record<string, unknown>>
+  ) => Promise<((command: string, source: string) => unknown) | null>;
+  const calls: Array<[string, string]> = [];
+  const imports: string[] = [];
+  const bridgeUrl = "https://codex.example/assets/codex-micro-bridge-live.js";
+  const modules: Record<string, Record<string, unknown>> = {
+    "https://codex.example/assets/guarded-runner-live.js": {
+      guarded(command: string, source: string) {
+        calls.push([command, source]);
+        return true;
+      }
+    },
+    "https://codex.example/assets/contextual-runner-live.js": {
+      contextual() { throw new Error("three-argument contextual runner must not be selected"); }
+    }
+  };
+  const bridgeSource = [
+    'import{guarded as he}from"./guarded-runner-live.js";',
+    'import{contextual as Zt}from"./contextual-runner-live.js";',
+    "enabled&&he('composer.startVoiceMode','codex_micro_hid');",
+    "Zt(r,p.command,`codex_micro_hid`);"
+  ].join("");
+  const importModule = async (url: string): Promise<Record<string, unknown>> => {
+    imports.push(url);
+    return modules[url] ?? {};
+  };
+
+  const runner = await resolveCommandRunner(bridgeSource, bridgeUrl, importModule);
+
+  assert.equal(typeof runner, "function");
+  assert.equal(runner?.("composer.increaseReasoningEffort", "codex_micro_hid"), true);
+  assert.equal(runner?.("composer.decreaseReasoningEffort", "codex_micro_hid"), true);
+  assert.deepEqual(calls, [
+    ["composer.increaseReasoningEffort", "codex_micro_hid"],
+    ["composer.decreaseReasoningEffort", "codex_micro_hid"]
+  ]);
+  assert.deepEqual(imports, ["https://codex.example/assets/guarded-runner-live.js"]);
+  assert.equal(
+    await resolveCommandRunner("import{contextual as Zt}from'./contextual-runner-live.js';Zt(r,p.command,`codex_micro_hid`);", bridgeUrl, importModule),
+    null
+  );
+});
+
 test("manifest exposes both dedicated reasoning adjustment buttons", async () => {
   const manifest = JSON.parse(await readFile(new URL("../static/manifest.json", import.meta.url), "utf8")) as { Actions: Array<{ UUID: string }>; OS: Array<{ Platform: string }> };
   const actions = new Set(manifest.Actions.map((action) => action.UUID));
@@ -430,9 +479,8 @@ test("standalone keycaps resolve Codex's live registry instead of hardcoding com
   assert.match(source, /codex-micro-layout-/);
   assert.match(source, /keycapGetter/);
   assert.match(source, /codex-micro-bridge-/);
-  assert.match(source, /runnerLocal/);
-  assert.match(source, /\\\\w/);
-  assert.match(source, /import\\\\s/);
+  assert.match(source, /resolveCommandRunner/);
+  assert.match(source, /importModule/);
   assert.match(source, /codex_micro_hid/);
 });
 
