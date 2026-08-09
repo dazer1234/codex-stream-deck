@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,8 +17,11 @@ const canonicalDial = {
   }
 };
 
-function audit(root: string) {
-  return spawnSync(process.execPath, [auditScript, root], { encoding: "utf8" });
+function audit(root: string, env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, [auditScript, root], {
+    encoding: "utf8",
+    env: { ...process.env, ...env }
+  });
 }
 
 async function writeAssets(root: string, paths: string[]): Promise<void> {
@@ -193,6 +196,80 @@ test("release audit rejects duplicate, incomplete, typed-wrong, and unsafe Codex
       assert.equal(result.status, 1, `${name} must fail closed`);
       assert.match(result.stderr, expected, `${name} reports the rejected declaration`);
     }
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("release audit rejects packaged file and intermediate-directory symlinks without following them", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-deck-symlink-audit-"));
+  const link = async (target: string, path: string, type: "file" | "junction") => {
+    try {
+      await symlink(target, path, type);
+      return true;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "unknown";
+      if (["EACCES", "ENOSYS", "EPERM", "UNKNOWN"].includes(code.toUpperCase())) {
+        t.skip(`symlink creation is unavailable on this platform (${code})`);
+        return false;
+      }
+      throw error;
+    }
+  };
+
+  try {
+    const externalFile = join(parent, "external-asset.txt");
+    await writeFile(externalFile, "SYMLINK_EXTERNAL_SENTINEL\n", "utf8");
+    const linkedAssets = join(parent, "linked-assets.sdPlugin");
+    await mkdir(linkedAssets);
+    await writeFile(join(linkedAssets, "manifest.json"), JSON.stringify({ Actions: [canonicalDial] }), "utf8");
+    const declaredAssets = [
+      canonicalDial.PropertyInspectorPath,
+      canonicalDial.Encoder.layout,
+      `${canonicalDial.Encoder.Icon}.svg`,
+      `${canonicalDial.Encoder.Icon}@2x.svg`
+    ];
+    for (const relative of declaredAssets) {
+      const path = join(linkedAssets, relative);
+      await mkdir(join(path, ".."), { recursive: true });
+      if (!await link(externalFile, path, "file")) return;
+    }
+    const linkedAssetsResult = audit(linkedAssets, {
+      CODEX_DECK_PRIVATE_MARKERS: "SYMLINK_EXTERNAL_SENTINEL"
+    });
+    assert.equal(linkedAssetsResult.status, 1, "declared file symlinks must fail closed");
+    assert.match(linkedAssetsResult.stderr, /symlink must not be packaged/);
+    assert.doesNotMatch(linkedAssetsResult.stderr, /contains private setup marker/, "external file is not scanned");
+    for (const relative of declaredAssets) {
+      assert.match(linkedAssetsResult.stderr, new RegExp(relative.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+
+    const externalDirectory = join(parent, "external-directory");
+    await mkdir(externalDirectory);
+    await writeFile(join(externalDirectory, "dial-inspector.html"), "external fixture\n", "utf8");
+    await writeFile(join(externalDirectory, "relay-client.json"), "{}\n", "utf8");
+    const linkedDirectory = join(parent, "linked-directory.sdPlugin");
+    const linkedDirectoryDial = { ...canonicalDial, PropertyInspectorPath: "ui/dial-inspector.html" };
+    await mkdir(linkedDirectory);
+    await writeFile(join(linkedDirectory, "manifest.json"), JSON.stringify({ Actions: [linkedDirectoryDial] }), "utf8");
+    await writeAssets(linkedDirectory, [
+      canonicalDial.Encoder.layout,
+      `${canonicalDial.Encoder.Icon}.svg`,
+      `${canonicalDial.Encoder.Icon}@2x.svg`
+    ]);
+    if (!await link(externalDirectory, join(linkedDirectory, "ui"), "junction")) return;
+    const linkedDirectoryResult = audit(linkedDirectory);
+    assert.equal(linkedDirectoryResult.status, 1, "an intermediate directory symlink must fail closed");
+    assert.match(linkedDirectoryResult.stderr, /ui[^\n]*symlink must not be packaged/);
+    assert.doesNotMatch(linkedDirectoryResult.stderr, /relay-client\.json/, "external directory is not traversed");
+
+    const launcher = join(parent, "launcher");
+    await mkdir(launcher);
+    await writeFile(join(launcher, "README.txt"), "launcher fixture\n", "utf8");
+    if (!await link(externalFile, join(launcher, "linked.txt"), "file")) return;
+    const launcherResult = audit(launcher);
+    assert.equal(launcherResult.status, 1, "unreferenced packaged symlinks must also fail closed");
+    assert.match(launcherResult.stderr, /linked\.txt[^\n]*symlink must not be packaged/);
   } finally {
     await rm(parent, { recursive: true, force: true });
   }

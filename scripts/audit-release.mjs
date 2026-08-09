@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, extname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
 
 const roots = process.argv.slice(2).length
@@ -22,10 +22,17 @@ const codexDialUuid = "com.simeo.codex-deck.codex-dial";
 const failures = [];
 
 async function walk(path) {
-  const info = await stat(path);
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) {
+    failures.push(`${path}: symlink must not be packaged`);
+    return false;
+  }
   if (info.isDirectory()) {
-    for (const entry of await readdir(path)) await walk(resolve(path, entry));
-    return;
+    let safe = true;
+    for (const entry of await readdir(path)) {
+      if (!await walk(resolve(path, entry))) safe = false;
+    }
+    return safe;
   }
   const name = basename(path);
   if (name === ".DS_Store" || name.startsWith("._")) failures.push(`${path}: platform metadata must not be packaged`);
@@ -33,9 +40,10 @@ async function walk(path) {
   if (extname(name).toLowerCase() === ".svg" && protectedKeycaps.has(name.slice(0, -4).toUpperCase())) {
     failures.push(`${path}: protected Codex keycap SVG must not be packaged`);
   }
-  if (!textExtensions.has(extname(name).toLowerCase()) || info.size > 8 * 1024 * 1024) return;
+  if (!textExtensions.has(extname(name).toLowerCase()) || info.size > 8 * 1024 * 1024) return true;
   const contents = await readFile(path, "utf8");
   for (const pattern of forbiddenText) if (pattern.test(contents)) failures.push(`${path}: contains private setup marker ${pattern}`);
+  return true;
 }
 
 async function readPluginManifest(root) {
@@ -119,7 +127,11 @@ function safeDeclaredPath(root, value, field, extensionless = false) {
 
 async function auditDeclaredFile(root, declared, field) {
   try {
-    const info = await stat(declared.absolute);
+    const info = await lstat(declared.absolute);
+    if (info.isSymbolicLink()) {
+      failures.push(`${declared.absolute}: symlink must not be packaged (declared by ${field})`);
+      return;
+    }
     if (!info.isFile()) throw new Error("not a file");
   } catch {
     failures.push(`${root}: missing packaged Codex Dial asset: ${declared.path} (declared by ${field})`);
@@ -128,8 +140,8 @@ async function auditDeclaredFile(root, declared, field) {
 
 for (const root of roots) {
   try {
-    await walk(root);
-    await auditDeclaredCodexDialAssets(root);
+    const symlinkFree = await walk(root);
+    if (symlinkFree) await auditDeclaredCodexDialAssets(root);
   }
   catch (error) { failures.push(`${root}: cannot audit (${String(error)})`); }
 }
