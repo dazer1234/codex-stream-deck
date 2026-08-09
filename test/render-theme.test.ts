@@ -84,6 +84,7 @@ test("imported FAST keycaps expose authoritative green, red, and neutral states"
     assert.match(output, new RegExp(`data-toggle-state="${semantic}"`));
     assert.match(output, new RegExp(`data-toggle-background="${signal}"`, "i"));
     assert.match(output, new RegExp(`fill="${signal}"`, "i"));
+    assert.doesNotMatch(output, /data-toggle-background="[^"]+"[^>]*fill-opacity=/, "signal background is opaque");
     assert.match(output, /data-toggle-glyph="#171C20"/i);
     assert.ok(contrast("#171C20", signal) >= 4.5, `${theme} ${semantic} glyph remains readable`);
     assert.match(output, /stroke-width="2"/, "outer keycap border remains present");
@@ -106,6 +107,7 @@ test("fallback FAST keycaps expose the same authoritative state backgrounds", ()
     assert.match(output, new RegExp(`data-toggle-state="${semantic}"`));
     assert.match(output, new RegExp(`data-toggle-background="${signal}"`, "i"));
     assert.match(output, new RegExp(`fill="${signal}"`, "i"));
+    assert.doesNotMatch(output, /data-toggle-background="[^"]+"[^>]*fill-opacity=/, "signal background is opaque");
     assert.match(output, /data-toggle-glyph="#171C20"/i);
     assert.match(output, />FAST<\/text>/);
   }

@@ -1356,17 +1356,28 @@ export class DeckController {
     if (!keycapId) return;
     const toggleState = keycapId === "FAST" ? snapshot.fastModeEnabled : undefined;
     const image = await this.keycapImage(keycapId, snapshot.theme, toggleState);
+    const current = this.targetSnapshot();
+    const currentKeycapId = current?.layout.slots[slot]?.keycapId;
+    const currentToggleState = currentKeycapId === "FAST" ? current?.fastModeEnabled : undefined;
+    if (currentKeycapId !== keycapId || current?.theme !== snapshot.theme || currentToggleState !== toggleState) return;
     if (image) await this.setImage(action, image);
   }
 
   private async renderFixedAction(registration: FixedIconRegistration): Promise<void> {
-    const theme = this.targetSnapshot()?.theme ?? "dark";
+    const snapshot = this.targetSnapshot();
+    const theme = snapshot?.theme ?? "dark";
     const toggleState = registration.source.kind === "local" && registration.source.keycapId === "FAST"
-      ? this.targetSnapshot()?.fastModeEnabled
+      ? snapshot?.fastModeEnabled
       : undefined;
     const image = registration.source.kind === "builtin"
       ? renderBuiltinKeycap(registration.source.name, theme)
       : await this.keycapImage(registration.source.keycapId, theme, toggleState);
+    const current = this.targetSnapshot();
+    const currentTheme = current?.theme ?? "dark";
+    const currentToggleState = registration.source.kind === "local" && registration.source.keycapId === "FAST"
+      ? current?.fastModeEnabled
+      : undefined;
+    if (currentTheme !== theme || currentToggleState !== toggleState) return;
     if (image) await this.setImage(registration.action, image);
   }
 

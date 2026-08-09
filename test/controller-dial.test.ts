@@ -40,6 +40,7 @@ type ControllerProbe = {
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
   };
+  keycapImages: Map<string, Promise<string | null>>;
   pressedAgents: Map<number, unknown>;
   dialDescriptionErrors: Set<string>;
   dialRenderErrors: Set<string>;
@@ -48,6 +49,11 @@ type ControllerProbe = {
   refreshInFlight?: Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
   renderAll(): Promise<void>;
+  renderMicroAction(registration: { action: KeyAction; slot: "ACT06" }): Promise<void>;
+  renderFixedAction(registration: {
+    action: KeyAction;
+    source: { kind: "local"; keycapId: string };
+  }): Promise<void>;
 };
 
 const HOST: CodexHost = {
@@ -149,6 +155,20 @@ function decodeImage(image: string): string {
   return decodeURIComponent(image.replace(/^data:image\/svg\+xml;charset=utf8,/, ""));
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: Error): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function probe(controller: DeckController): ControllerProbe {
   return controller as unknown as ControllerProbe;
 }
@@ -229,6 +249,51 @@ test("only effective FAST keycaps render live state and state changes replace ca
   await state.renderAll();
   assert.match(decodeImage(microFast.images.at(-1)!), /data-toggle-state="unknown"/);
   assert.match(decodeImage(officialFast.images.at(-1)!), /data-toggle-state="on"/);
+});
+
+test("a delayed Micro FAST render cannot overwrite newer authoritative feedback", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeKey("ordered-micro-fast");
+  const delayedOn = deferred<string | null>();
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(true) };
+  state.keycapImages.set("dark:FAST:on", delayedOn.promise);
+  state.keycapImages.set("dark:FAST:off", Promise.resolve("fast-off"));
+
+  const olderRender = state.renderMicroAction({ action, slot: "ACT06" });
+  state.localSnapshot = { host: HOST, observedAt: 2_000, snapshot: snapshotWithFast(false) };
+  await state.renderMicroAction({ action, slot: "ACT06" });
+  assert.deepEqual(action.images, ["fast-off"]);
+
+  delayedOn.resolve("fast-on");
+  await olderRender;
+  assert.deepEqual(action.images, ["fast-off"], "the obsolete ON render is discarded");
+});
+
+test("a delayed fixed FAST render cannot overwrite newer authoritative feedback", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeKey("ordered-fixed-fast");
+  const delayedOn = deferred<string | null>();
+  const registration = { action, source: { kind: "local" as const, keycapId: "FAST" } };
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(true) };
+  state.keycapImages.set("dark:FAST:on", delayedOn.promise);
+  state.keycapImages.set("dark:FAST:off", Promise.resolve("fast-off"));
+
+  const olderRender = state.renderFixedAction(registration);
+  state.localSnapshot = { host: HOST, observedAt: 2_000, snapshot: snapshotWithFast(false) };
+  await state.renderFixedAction(registration);
+  assert.deepEqual(action.images, ["fast-off"]);
+
+  delayedOn.resolve("fast-on");
+  await olderRender;
+  assert.deepEqual(action.images, ["fast-off"], "the obsolete fixed ON render is discarded");
 });
 
 test("successful local FAST activation refreshes immediately without refreshing releases or other actions", async () => {
