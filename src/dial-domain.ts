@@ -58,8 +58,8 @@ export function selectorItems(
   }
   if (settings.rotation.source === "usage") {
     return [
-      { id: "auto", label: "Automatic" },
-      { id: "five-hour", label: "5 hours" },
+      { id: "auto", label: "Auto" },
+      { id: "five-hour", label: "5h" },
       { id: "weekly", label: "Weekly" }
     ];
   }
@@ -527,7 +527,7 @@ function percentOrDash(value: number | undefined): string {
   return value == null ? "—" : `${Math.round(value)}%`;
 }
 
-function resetCountdown(resetsAt: number | null, now: number): string {
+function resetCountdown(resetsAt: number | null | undefined, now: number): string {
   if (resetsAt == null || !Number.isFinite(resetsAt) || !Number.isFinite(now)) {
     return "RESET UNAVAILABLE";
   }

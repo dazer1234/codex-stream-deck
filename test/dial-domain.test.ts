@@ -112,8 +112,8 @@ test("runtime selectors expose occupied agents, exact usage choices, and ordered
     }
   ]);
   assert.deepEqual(selectorItems(expandDialPreset("usage"), RUNTIME_VIEW), [
-    { id: "auto", label: "Automatic" },
-    { id: "five-hour", label: "5 hours" },
+    { id: "auto", label: "Auto" },
+    { id: "five-hour", label: "5h" },
     { id: "weekly", label: "Weekly" }
   ]);
 
@@ -372,7 +372,7 @@ test("usage feedback reports percent left, reset countdown, and both overview wi
   assert.deepEqual(deriveDialFeedback(
     expandDialPreset("usage"),
     { ...state, selectedId: "weekly", usageMode: "weekly" },
-    { ...view, usage: { ...view.usage!, weeklyRemaining: null } }
+    { ...view, usage: { ...view.usage!, weeklyRemaining: undefined } }
   ), {
     title: "USAGE • WEEKLY",
     value: "UNAVAILABLE",
@@ -380,6 +380,42 @@ test("usage feedback reports percent left, reset countdown, and both overview wi
     indicator: 0,
     accent: "#707B85"
   });
+});
+
+test("partial usage runtime views remain honest and accept a nullable reset time", () => {
+  const partialView: DialRuntimeView = {
+    ...RUNTIME_VIEW,
+    usage: { mode: "weekly" }
+  };
+  assert.deepEqual(deriveDialFeedback(
+    expandDialPreset("usage"),
+    { ...initialDialRuntimeState(), selectedId: "weekly", usageMode: "weekly" },
+    partialView
+  ), {
+    title: "USAGE • WEEKLY",
+    value: "UNAVAILABLE",
+    detail: "LIVE VALUE NOT REPORTED",
+    indicator: 0,
+    accent: "#707B85"
+  });
+
+  const nullableResetView: DialRuntimeView = {
+    ...RUNTIME_VIEW,
+    usage: {
+      mode: "five-hour",
+      remainingPercent: 72,
+      resetsAt: null,
+      fiveHourRemaining: 72
+    }
+  };
+  assert.equal(
+    deriveDialFeedback(
+      expandDialPreset("usage"),
+      { ...initialDialRuntimeState(), selectedId: "five-hour", usageMode: "five-hour" },
+      nullableResetView
+    ).detail,
+    "RESET UNAVAILABLE"
+  );
 });
 
 test("feedback replaces live values with honest offline, connecting, and degraded states", () => {

@@ -77,10 +77,10 @@ export type DialRuntimeAgent = {
 export type DialRuntimeUsage = {
   mode: "auto" | "five-hour" | "weekly";
   remainingPercent?: number;
-  resetsAt: number | null;
-  observedAt: number;
-  fiveHourRemaining: number | null;
-  weeklyRemaining: number | null;
+  resetsAt?: number | null;
+  observedAt?: number;
+  fiveHourRemaining?: number;
+  weeklyRemaining?: number;
 };
 
 export type DialRuntimeView = {
