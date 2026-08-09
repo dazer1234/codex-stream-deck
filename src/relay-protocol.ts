@@ -301,7 +301,8 @@ function isLayout(value: unknown): value is MicroSnapshot["layout"] {
   const actionSlots: readonly MicroActionSlot[] = ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"];
   if (!actionSlots.every((key) => {
     const slot = slots[key];
-    return isRecord(slot) && boundedNonblankString(slot.keycapId, 64) &&
+    return isRecord(slot) && typeof slot.keycapId === "string" &&
+      OFFICIAL_KEYCAP_IDS.includes(slot.keycapId as OfficialKeycapId) &&
       (slot.commandId === undefined || (typeof slot.commandId === "string" && slot.commandId.length <= 128));
   })) return false;
   return (["up", "right", "down", "left"] as const).every((key) =>

@@ -814,6 +814,18 @@ test("malformed settings normalize to a safe preset and reject executable string
   assert.equal(normalized.touchTap, "none", "reset hold cannot be bound to touch tap");
 });
 
+test("runtime normalization matches the property inspector when paired rotation cannot activate a selector", () => {
+  const normalized = normalizeDialSettings({
+    ...expandDialPreset("agents"),
+    customized: true,
+    rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
+    press: "selector.activate"
+  });
+  assert.equal(normalized.rotation.kind, "paired");
+  assert.equal(normalized.press, "none");
+  assert.deepEqual(normalizeDialSettings(normalized), normalized);
+});
+
 test("normalization ignores inherited top-level settings properties", () => {
   const values = {
     version: 1,

@@ -484,7 +484,10 @@ export class DeckController {
       ...(sourceHostId == null ? {} : { sourceHostId })
     });
     const registered = this.rateLimitResetActions.get(action.id);
-    if (registered) void this.renderRateLimitReset(registered);
+    if (registered) {
+      void this.renderRateLimitReset(registered).catch((error) =>
+        streamDeck.logger.error(`Rate-limit reset hold render failed (${action.id}): ${String(error)}`));
+    }
   }
 
   async finishRateLimitReset(
@@ -1531,7 +1534,14 @@ export class DeckController {
     if (this.stopped) return;
     this.animation = setTimeout(async () => {
       this.animationFrame = (this.animationFrame + 1) % 12;
-      try { await Promise.all([this.renderAnimatedAgents(), this.renderResetHolds()]); }
+      try {
+        await Promise.all([
+          this.renderAnimatedAgents().catch((error) =>
+            streamDeck.logger.error(`Agent animation frame failed: ${String(error)}`)),
+          this.renderResetHolds().catch((error) =>
+            streamDeck.logger.error(`Reset hold animation frame failed: ${String(error)}`))
+        ]);
+      }
       finally { this.scheduleAnimation(); }
     }, 200);
   }

@@ -286,6 +286,19 @@ test("relay parser bounds host identity and ready capabilities", () => {
   }), null);
 });
 
+test("relay snapshot layouts accept official keycaps and reject filesystem-shaped identifiers", () => {
+  const packet = {
+    type: "snapshot", protocol: 1, host, observedAt: 2_000, snapshot: structuredClone(snapshot)
+  };
+  packet.snapshot.layout.slots.ACT06.keycapId = "FAST";
+  assert.notEqual(parseRelayServerMessage(packet), null);
+  for (const keycapId of ["../../secret", "/tmp/secret", "nested/FAST", "..\\secret", "C:\\secret"]) {
+    const malicious = structuredClone(packet);
+    malicious.snapshot.layout.slots.ACT06.keycapId = keycapId;
+    assert.equal(parseRelayServerMessage(malicious), null, keycapId);
+  }
+});
+
 test("relay health becomes degraded from local receipt age without trusting remote clocks", () => {
   const ready = { state: "ready", changedAt: 900 } as const;
   assert.equal(resolveRelayHealth(ready, true, 1_000, 1_000 + RELAY_SNAPSHOT_STALE_MS).state, "ready");
@@ -1151,6 +1164,64 @@ test("relay capabilities are valid only for a snapshot from the current connecti
   await waitUntil(() => generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId));
   assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
   assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", "wrong-host"), false);
+});
+
+test("relay commands require the current ready identity but remain available while that host is degraded", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  const received: Array<Array<Record<string, unknown>>> = [];
+  const sockets: WebSocket[] = [];
+  relay.on("connection", (socket) => {
+    const connection = received.length;
+    received.push([]);
+    sockets.push(socket);
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      received[connection]!.push(message);
+      if (message.type === "auth" && connection === 0) {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host, capabilities: ["action"], bridge: "native-codex-micro"
+        }));
+      }
+      if (message.type === "command") {
+        socket.send(JSON.stringify({
+          type: "result", protocol: 1, requestId: message.requestId, ok: true
+        }));
+      }
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.supportsCapability("action"));
+  sockets[0]!.close();
+  await waitUntil(() => client.currentHealth().state === "offline");
+  await (client as unknown as { connect(): Promise<void> }).connect();
+  await waitUntil(() => received[1]?.length === 1);
+
+  await assert.rejects(client.send({ kind: "action", slot: "ACT06", act: 1 }), /offline/);
+  assert.equal(received[1]!.length, 1, "an opened reconnect must send only auth before ready");
+
+  sockets[1]!.send(JSON.stringify({
+    type: "ready", protocol: 1, host, capabilities: ["action"], bridge: "native-codex-micro"
+  }));
+  await waitUntil(() => client.supportsCapability("action"));
+  await client.send({ kind: "action", slot: "ACT06", act: 1 });
+  assert.equal(received[1]!.filter(({ type }) => type === "command").length, 1);
+
+  sockets[1]!.send(JSON.stringify({
+    type: "health", protocol: 1, host, state: "degraded",
+    reason: "native-signals-unavailable", observedAt: Date.now()
+  }));
+  await waitUntil(() => client.currentHealth().reason === "native-signals-unavailable");
+  await client.send({ kind: "action", slot: "ACT06", act: 0 });
+  assert.equal(received[1]!.filter(({ type }) => type === "command").length, 2);
 });
 
 test("relay ready host identity is immutable within one connection generation", async (t) => {

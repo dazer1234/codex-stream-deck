@@ -264,14 +264,16 @@ export function normalizeDialSettings(input: unknown): CodexDialSettings {
   const staticLabel = hasOwn(input, "staticLabel") && typeof input.staticLabel === "string"
     ? input.staticLabel.trim().slice(0, 40)
     : undefined;
+  const rotation = normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation);
+  const requestedPress = hasOwn(input, "press") && isDialBindingId(input.press, "press")
+    ? input.press
+    : fallback.press;
   return {
     version: 1,
     preset: input.preset,
     customized: hasOwn(input, "customized") && input.customized === true,
-    rotation: normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation),
-    press: hasOwn(input, "press") && isDialBindingId(input.press, "press")
-      ? input.press
-      : fallback.press,
+    rotation,
+    press: rotation.kind === "paired" && requestedPress === "selector.activate" ? "none" : requestedPress,
     touchTap: hasOwn(input, "touchTap") && isDialBindingId(input.touchTap, "touch")
       ? input.touchTap
       : "none",

@@ -80,7 +80,11 @@ export class CodexRelayClient {
 
   async send(command: RelayCommand): Promise<void> {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !this.host) throw new Error("Remote Codex host is offline.");
+    if (!socket || socket.readyState !== WebSocket.OPEN ||
+        this.readyGeneration !== this.connectionGeneration || this.readyHostId == null ||
+        this.host?.hostId !== this.readyHostId) {
+      throw new Error("Remote Codex host is offline.");
+    }
     const requestId = randomUUID();
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

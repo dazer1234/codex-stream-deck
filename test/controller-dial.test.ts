@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DialAction } from "@elgato/streamdeck";
+import streamDeck, { type DialAction } from "@elgato/streamdeck";
 import { DeckController } from "../src/controller.js";
 import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
 import type { CodexDialSettings, DialRuntimeState } from "../src/dial-types.js";
@@ -760,6 +760,85 @@ test("keypad and dial reset paths fail closed unless applicability is a positive
   controller.beginRateLimitReset(action, 20_000);
   assert.equal(await controller.finishRateLimitReset(action, 21_200), true);
   assert.equal(resets, 1);
+});
+
+test("beginning a reset hold logs an initial render failure without an unhandled rejection or alert", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reset-render-failure");
+  const state = controller as unknown as {
+    rateLimitResetActions: Map<string, unknown>;
+    renderRateLimitReset(action: unknown): Promise<void>;
+  };
+  state.rateLimitResetActions.set(action.id, action);
+  state.renderRateLimitReset = async () => { throw new Error("initial hold render failed"); };
+
+  const errors: string[] = [];
+  const unhandled: unknown[] = [];
+  const logger = streamDeck.logger as unknown as { error(message: string): void };
+  const originalError = logger.error;
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  logger.error = (message) => { errors.push(message); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    controller.beginRateLimitReset(action, 10_000);
+    await settle();
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    logger.error = originalError;
+  }
+
+  assert.deepEqual(unhandled, []);
+  assert.equal(errors.filter((message) => message.includes("initial hold render failed")).length, 1);
+  assert.equal(action.alerts, 0);
+});
+
+test("animation scheduling logs renderer failures and continues subsequent frames", async () => {
+  const controller = new DeckController();
+  const state = controller as unknown as {
+    stopped: boolean;
+    scheduleAnimation(): void;
+    renderAnimatedAgents(): Promise<void>;
+    renderResetHolds(): Promise<void>;
+  };
+  let agentFrames = 0;
+  let resetFrames = 0;
+  state.renderAnimatedAgents = async () => {
+    agentFrames += 1;
+    if (agentFrames === 1) throw new Error("agent frame failed");
+  };
+  state.renderResetHolds = async () => {
+    resetFrames += 1;
+    if (resetFrames === 2) throw new Error("reset frame failed");
+  };
+
+  const scheduled: Array<() => unknown> = [];
+  const errors: string[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const logger = streamDeck.logger as unknown as { error(message: string): void };
+  const originalError = logger.error;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+    scheduled.push(() => callback());
+    return {} as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  logger.error = (message) => { errors.push(message); };
+  state.stopped = false;
+  try {
+    state.scheduleAnimation();
+    await assert.doesNotReject(async () => (scheduled.shift()!)());
+    await assert.doesNotReject(async () => (scheduled.shift()!)());
+    state.stopped = true;
+    await assert.doesNotReject(async () => (scheduled.shift()!)());
+  } finally {
+    state.stopped = true;
+    globalThis.setTimeout = originalSetTimeout;
+    logger.error = originalError;
+  }
+
+  assert.equal(agentFrames, 3);
+  assert.equal(resetFrames, 3);
+  assert.equal(errors.filter((message) => message.includes("agent frame failed")).length, 1);
+  assert.equal(errors.filter((message) => message.includes("reset frame failed")).length, 1);
+  assert.equal(scheduled.length, 0);
 });
 
 test("two dials pressing the same momentary binding keep independent captured hosts", async () => {

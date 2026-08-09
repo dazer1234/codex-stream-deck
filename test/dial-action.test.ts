@@ -662,7 +662,7 @@ test("custom edits serialize ordering, visibility, limits, and only setSettings 
   assert.equal(decodedMessages(sockets[0]!).slice(1).every(({ event }) => event === "setSettings"), true);
 });
 
-test("build wires every Encoder asset without executing the source-mutating generator", async () => {
+test("build script wiring declares every Encoder asset without running the build", async () => {
   const source = await text("scripts/build.mjs");
   assert.match(source, /mkdir\(resolve\(output, "static\/layouts"\)/);
   for (const filename of ["dial.svg", "dial@2x.svg", "codex-dial.json", "codex-dial.html"]) {
