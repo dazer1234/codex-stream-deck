@@ -42,6 +42,7 @@ type ControllerProbe = {
   };
   pressedAgents: Map<number, unknown>;
   refresh(): Promise<void>;
+  refreshLocalUsage(): Promise<MicroSnapshot>;
 };
 
 const HOST: CodexHost = {
@@ -522,10 +523,7 @@ test("remote dial starts require remote readiness and multi-host agent feedback 
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.targetHostId = REMOTE_HOST.hostId;
   state.targetPlatform = REMOTE_HOST.platform;
-  state.routedSlots = [
-    routedAgent(0, "local-thread", HOST),
-    routedAgent(1, "remote-thread", REMOTE_HOST)
-  ];
+  state.routedSlots = [routedAgent(0, "local-thread", HOST)];
   state.relayClient = {
     currentHost: () => REMOTE_HOST,
     currentHealth: () => remoteHealth,
@@ -547,12 +545,47 @@ test("remote dial starts require remote readiness and multi-host agent feedback 
 
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
+  const configuredOnly = fakeDial("configured-relay-single-host");
+  controller.registerDial(configuredOnly, expandDialPreset("agents"));
+  await settle();
+  assert.equal((configuredOnly.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 1");
+
+  state.routedSlots = [
+    routedAgent(0, "local-thread", HOST),
+    routedAgent(1, "remote-thread", REMOTE_HOST)
+  ];
   controller.registerDial(badged, expandDialPreset("agents"));
   await settle();
   assert.equal((badged.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 1 • M");
   controller.rotateDial(badged, 1);
   await idle(controller, badged.id);
   assert.equal((badged.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 2 • W");
+});
+
+test("local dial usage refresh requires ready health", async () => {
+  for (const health of ["degraded", "offline", "connecting", "ready"] as const) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    const action = fakeDial(`usage-refresh-${health}`);
+    let refreshes = 0;
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localHealth = { state: health, changedAt: 1_000 };
+    state.refreshLocalUsage = async () => {
+      refreshes += 1;
+      return SNAPSHOT;
+    };
+    controller.registerDial(action, {
+      ...expandDialPreset("custom"), press: "usage.refresh"
+    });
+
+    await controller.beginDialPress(action);
+    await controller.finishDialPress(action);
+
+    assert.equal(refreshes, health === "ready" ? 1 : 0, health);
+    assert.equal(action.alerts, health === "ready" ? 0 : 1, health);
+  }
 });
 
 test("dial rate-limit reset requires ready usage-host health", async () => {

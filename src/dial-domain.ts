@@ -176,6 +176,9 @@ export function deriveDialFeedback(
           : mode === "usage"
             ? usageFeedback(state, view)
             : staticFeedback(settings);
+  const emptySelector = (mode === "agent" || mode === "action") &&
+    selectorItems(settings, view).length === 0;
+  if (emptySelector) return live;
   return view.health === "ready" ? live : healthFeedback(live.title, view.health);
 }
 

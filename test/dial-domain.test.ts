@@ -385,30 +385,38 @@ test("agent and action feedback use reconciled selections and bounded live label
 });
 
 test("empty selectors report no items while agent feedback includes an optional host badge", () => {
-  assert.deepEqual(
-    deriveDialFeedback(
-      expandDialPreset("agents"),
-      initialDialRuntimeState(),
-      { ...RUNTIME_VIEW, agents: [] }
-    ),
-    {
-      title: "AGENT",
-      value: "NO ITEMS",
-      detail: "NO ACTIVE AGENTS",
-      indicator: 0,
-      accent: "#707B85"
-    }
-  );
-  assert.deepEqual(
-    deriveDialFeedback(actionSelector([]), initialDialRuntimeState(), RUNTIME_VIEW),
-    {
-      title: "ACTION",
-      value: "NO ITEMS",
-      detail: "NO ACTIONS CONFIGURED",
-      indicator: 0,
-      accent: "#707B85"
-    }
-  );
+  for (const health of ["ready", "degraded", "offline", "connecting"] as const) {
+    assert.deepEqual(
+      deriveDialFeedback(
+        expandDialPreset("agents"),
+        initialDialRuntimeState(),
+        { ...RUNTIME_VIEW, health, agents: [] }
+      ),
+      {
+        title: "AGENT",
+        value: "NO ITEMS",
+        detail: "NO ACTIVE AGENTS",
+        indicator: 0,
+        accent: "#707B85"
+      },
+      `agents ${health}`
+    );
+    assert.deepEqual(
+      deriveDialFeedback(
+        actionSelector([]),
+        initialDialRuntimeState(),
+        { ...RUNTIME_VIEW, health }
+      ),
+      {
+        title: "ACTION",
+        value: "NO ITEMS",
+        detail: "NO ACTIONS CONFIGURED",
+        indicator: 0,
+        accent: "#707B85"
+      },
+      `actions ${health}`
+    );
+  }
   const multiHostView: DialRuntimeView = {
     ...RUNTIME_VIEW,
     agents: [{ ...RUNTIME_VIEW.agents[0]!, hostBadge: "M" }]

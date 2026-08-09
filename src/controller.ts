@@ -757,7 +757,12 @@ export class DeckController {
       (settings.feedback === "auto" && settings.rotation.kind === "selector" &&
         settings.rotation.source === "usage");
     const actionLabels: DialRuntimeView["actionLabels"] = {};
-    const showHostBadges = this.relayClient != null;
+    const occupiedHostIds = new Set(
+      this.routedSlots
+        .filter((slot) => slot.threadKey != null)
+        .map((slot) => slot.host.hostId)
+    );
+    const showHostBadges = occupiedHostIds.size > 1;
     for (const [slot, value] of Object.entries(targetSnapshot?.layout.slots ?? {})) {
       const keycapId = value.keycapId;
       const label = ADDITIONAL_KEYCAPS.find(({ id }) => id === keycapId)?.name ?? keycapId;
@@ -1215,6 +1220,9 @@ export class DeckController {
       ? route.hostId === this.localHost?.hostId
       : route.platform === this.localHost?.platform;
     if (localRequested) {
+      if (this.localHealth.state !== "ready") {
+        throw new Error("The captured Codex usage host is not ready.");
+      }
       await this.refreshLocalUsage();
       return;
     }
