@@ -23,6 +23,7 @@ import {
   type DialPreset,
   type DialRuntimeView
 } from "../src/dial-types.js";
+import { OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 
 function withInheritedProperty(
   values: Record<string, unknown>, inheritedKey: string
@@ -54,7 +55,7 @@ const RUNTIME_VIEW: DialRuntimeView = {
   reasoningEffort: "high",
   agents: [
     {
-      id: 1,
+      id: 0,
       identity: "rollout-alpha",
       threadKey: "thread-alpha",
       title: "Alpha task",
@@ -62,7 +63,7 @@ const RUNTIME_VIEW: DialRuntimeView = {
       contextUsedPercent: 42
     },
     {
-      id: 4,
+      id: 3,
       identity: "rollout-delta",
       threadKey: "thread-delta",
       title: "Delta task",
@@ -100,14 +101,14 @@ test("runtime selectors expose occupied agents, exact usage choices, and ordered
       id: "rollout-alpha",
       label: "Alpha task",
       detail: "thinking",
-      agentSlot: 1,
+      agentSlot: 0,
       threadKey: "thread-alpha"
     },
     {
       id: "rollout-delta",
       label: "Delta task",
       detail: "idle",
-      agentSlot: 4,
+      agentSlot: 3,
       threadKey: "thread-delta"
     }
   ]);
@@ -124,6 +125,25 @@ test("runtime selectors expose occupied agents, exact usage choices, and ordered
     { id: "joystick.left", label: "Joystick Left", binding: "joystick.left" },
     { id: "new-task", label: "New Task", binding: "new-task" }
   ]);
+});
+
+test("action selector normalization removes duplicates before rotation", () => {
+  const settings = actionSelector(["keycap.FAST", "keycap.FAST", "keycap.APPR"]);
+  assert.deepEqual(settings.rotation, {
+    kind: "selector",
+    source: "actions",
+    wrap: true,
+    items: ["keycap.FAST", "keycap.APPR"]
+  });
+  assert.equal(
+    reduceDialRotation(
+      settings,
+      { ...initialDialRuntimeState(), selectedId: "keycap.FAST" },
+      RUNTIME_VIEW,
+      1
+    ).state.selectedId,
+    "keycap.APPR"
+  );
 });
 
 test("selector reconciliation preserves stable identity across reorder and handles disappearance", () => {
@@ -181,6 +201,43 @@ test("paired rotation emits one binding for every physical detent in both direct
     bindings: ["reasoning.increase", "reasoning.increase"]
   });
   assert.equal(reduceDialRotation(settings, state, RUNTIME_VIEW, 1_001).bindings.length, 1_001);
+});
+
+test("rotation accepts the full physical event range and rejects impossible counts", () => {
+  const reasoning = expandDialPreset("reasoning");
+  const state = initialDialRuntimeState();
+  const clockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, 4_096);
+  assert.equal(clockwise.bindings.length, 4_096);
+  assert.equal(clockwise.bindings[0], "reasoning.increase");
+  assert.equal(clockwise.bindings.at(-1), "reasoning.increase");
+  const counterClockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, -4_096);
+  assert.equal(counterClockwise.bindings.length, 4_096);
+  assert.equal(counterClockwise.bindings[0], "reasoning.decrease");
+  assert.equal(counterClockwise.bindings.at(-1), "reasoning.decrease");
+
+  for (const ticks of [
+    4_097,
+    -4_097,
+    Number.MAX_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER + 1
+  ]) {
+    const rejected = reduceDialRotation(reasoning, state, RUNTIME_VIEW, ticks);
+    assert.equal(rejected.state, state, String(ticks));
+    assert.deepEqual(rejected.bindings, [], String(ticks));
+  }
+
+  const usage = expandDialPreset("usage");
+  assert.equal(
+    reduceDialRotation(usage, state, RUNTIME_VIEW, 4_096).state.selectedId,
+    "five-hour"
+  );
+  assert.equal(
+    reduceDialRotation(usage, state, RUNTIME_VIEW, -4_096).state.selectedId,
+    "weekly"
+  );
+  const hugeSelector = reduceDialRotation(usage, state, RUNTIME_VIEW, Number.MAX_SAFE_INTEGER);
+  assert.equal(hugeSelector.state, state);
+  assert.deepEqual(hugeSelector.bindings, []);
 });
 
 test("selector rotation previews without dispatch and wraps or clamps as configured", () => {
@@ -294,6 +351,46 @@ test("agent and action feedback use reconciled selections and bounded live label
   );
   assert.equal(bounded.value, "A VERY LONG LABEL THAT…");
   assert.equal(bounded.value.length <= 24, true);
+});
+
+test("zero-based agents use one-based display numbers and nonblank text fallbacks", () => {
+  const blankAgentView: DialRuntimeView = {
+    ...RUNTIME_VIEW,
+    agents: [{
+      id: 0,
+      identity: "blank-agent",
+      threadKey: "thread-blank",
+      title: "   ",
+      status: "\n\t"
+    }]
+  };
+  assert.deepEqual(selectorItems(expandDialPreset("agents"), blankAgentView), [{
+    id: "blank-agent",
+    label: "Agent 1",
+    detail: "unknown",
+    agentSlot: 0,
+    threadKey: "thread-blank"
+  }]);
+  assert.deepEqual(
+    deriveDialFeedback(expandDialPreset("agents"), initialDialRuntimeState(), blankAgentView),
+    {
+      title: "AGENT 1",
+      value: "AGENT 1",
+      detail: "UNKNOWN",
+      indicator: 0,
+      accent: "#707B85"
+    }
+  );
+});
+
+test("feedback truncation preserves complete Unicode code points before the ellipsis", () => {
+  const settings = normalizeDialSettings({
+    ...expandDialPreset("custom"),
+    staticLabel: `${"a".repeat(22)}😀bc`
+  });
+  const value = deriveDialFeedback(settings, initialDialRuntimeState(), RUNTIME_VIEW).value;
+  assert.equal(value, `${"A".repeat(22)}😀…`);
+  assert.equal(Array.from(value).length, 24);
 });
 
 test("navigation and static feedback are explicit, while auto follows the rotation source", () => {
@@ -659,10 +756,13 @@ test("normalization ignores inherited nested rotation properties", () => {
 });
 
 test("selector normalization validates structure, filters bindings, and caps items", () => {
-  const requestedItems: string[] = Array.from({ length: 35 }, (_, index) =>
-    index % 2 === 0 ? "micro.ACT06" : "keycap.FAST"
-  );
-  requestedItems.splice(2, 0, "shell.rm", "selector.activate", "usage.rate-limit-reset");
+  const requestedItems: string[] = [
+    ...OFFICIAL_KEYCAP_IDS.map((id) => `keycap.${id}`),
+    ...MICRO_SLOTS.map((slot) => `micro.${slot}`),
+    "shell.rm",
+    "selector.activate",
+    "usage.rate-limit-reset"
+  ];
   const normalized = normalizeDialSettings({
     version: 1,
     preset: "actions",

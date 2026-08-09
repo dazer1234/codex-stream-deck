@@ -29,6 +29,9 @@ const SELECTOR_SOURCE_IDS = new Set<string>(DIAL_SELECTOR_SOURCES);
 const MICRO_SLOT_IDS = new Set<string>(MICRO_SLOTS);
 const JOYSTICK_DIRECTION_IDS = new Set<string>(JOYSTICK_DIRECTIONS);
 const OFFICIAL_KEYCAP_ID_SET = new Set<string>(OFFICIAL_KEYCAP_IDS);
+// Stream Deck dial events are far smaller; this rejects corrupted counts while preserving every
+// detent from any physically plausible SDK event.
+const MAX_DIAL_TICKS_PER_EVENT = 4_096;
 const DIAL_ACCENTS = Object.freeze({
   blue: "#1683FF",
   green: "#35D86B",
@@ -48,13 +51,16 @@ export function selectorItems(
 ): DialSelectorItem[] {
   if (settings.rotation.kind !== "selector") return [];
   if (settings.rotation.source === "agents") {
-    return view.agents.map((agent) => ({
-      id: agent.identity,
-      label: agent.title,
-      detail: agent.status,
-      agentSlot: agent.id,
-      threadKey: agent.threadKey
-    }));
+    return view.agents.map((agent) => {
+      const displayNumber = agentDisplayNumber(agent.id);
+      return {
+        id: agent.identity,
+        label: cleanDisplaySource(agent.title) ?? `Agent ${displayNumber}`,
+        detail: cleanDisplaySource(agent.status) ?? "unknown",
+        agentSlot: agent.id,
+        threadKey: agent.threadKey
+      };
+    });
   }
   if (settings.rotation.source === "usage") {
     return [
@@ -90,7 +96,7 @@ export function reduceDialRotation(
   view: DialRuntimeView,
   ticks: number
 ): { state: DialRuntimeState; bindings: DialBindingId[] } {
-  if (!Number.isFinite(ticks) || !Number.isInteger(ticks) || ticks === 0) {
+  if (!Number.isSafeInteger(ticks) || ticks === 0 || Math.abs(ticks) > MAX_DIAL_TICKS_PER_EVENT) {
     return { state, bindings: [] };
   }
   if (settings.rotation.kind === "paired") {
@@ -107,7 +113,7 @@ export function reduceDialRotation(
   if (items.length === 0) return { state: reconciled, bindings: [] };
   const currentIndex = Math.max(0, items.findIndex((item) => item.id === reconciled.selectedId));
   const nextIndex = settings.rotation.wrap
-    ? modulo(currentIndex + ticks, items.length)
+    ? modulo(currentIndex + (ticks % items.length), items.length)
     : Math.min(items.length - 1, Math.max(0, currentIndex + ticks));
   const selectedId = items[nextIndex]!.id;
   return {
@@ -303,7 +309,9 @@ function normalizeRotation(value: unknown, fallback: DialRotation): DialRotation
       wrap: value.wrap,
       items: value.source === "actions"
         ? value.items.filter((item): item is DialBindingId =>
-          isDialBindingId(item, "selector")).slice(0, 30)
+          isDialBindingId(item, "selector"))
+          .filter((item, index, items) => items.indexOf(item) === index)
+          .slice(0, 30)
         : []
     };
   }
@@ -339,6 +347,10 @@ function humanBindingLabel(binding: DialBindingId): string {
 function titleCase(value: string): string {
   return value.replace(/(^|[-_ ])([a-z])/g, (_match, separator: string, letter: string) =>
     `${separator === "-" || separator === "_" ? " " : separator}${letter.toUpperCase()}`);
+}
+
+function agentDisplayNumber(id: number): number {
+  return Number.isSafeInteger(id) && id >= 0 ? id + 1 : 1;
 }
 
 function modulo(value: number, divisor: number): number {
@@ -407,15 +419,16 @@ function agentFeedback(
     return feedback("AGENT", "UNAVAILABLE", "NO ACTIVE AGENTS", 0, DIAL_ACCENTS.muted);
   }
   const context = finitePercent(agent.contextUsedPercent);
+  const status = item.detail ?? "unknown";
   const detail = context == null
-    ? agent.status
-    : `${agent.status} • ${Math.round(context)}% context`;
+    ? status
+    : `${status} • ${Math.round(context)}% context`;
   return feedback(
-    `AGENT ${agent.id}`,
-    agent.title,
+    `AGENT ${agentDisplayNumber(agent.id)}`,
+    item.label,
     detail,
     context ?? 0,
-    agentAccent(agent.status)
+    agentAccent(status)
   );
 }
 
@@ -582,6 +595,7 @@ function feedback(
 
 function displayText(value: string, maximum: number): string {
   const uppercase = value.replace(/\s+/g, " ").trim().toUpperCase();
-  if (uppercase.length <= maximum) return uppercase;
-  return `${uppercase.slice(0, maximum - 1).trimEnd()}…`;
+  const codePoints = Array.from(uppercase);
+  if (codePoints.length <= maximum) return uppercase;
+  return `${codePoints.slice(0, maximum - 1).join("").trimEnd()}…`;
 }
