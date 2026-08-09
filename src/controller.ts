@@ -58,9 +58,13 @@ type CodexDialAction = DialAction<CodexDialSettings>;
 type DialHostRoute = { kind: "host"; hostId?: string; platform: ControlTarget };
 type DialAgentRoute = {
   kind: "agent";
-  globalSlot: number;
   assignment: RoutedAgentSlot;
   identity: string;
+};
+type AgentSendOutcome = { ok: true } | { ok: false; error: unknown };
+type KeypadAgentGesture = {
+  assignment: RoutedAgentSlot;
+  outcome: Promise<AgentSendOutcome>;
 };
 type DialInvalidAgentRoute = { kind: "invalid-agent" };
 type DialRoute = DialHostRoute | DialAgentRoute | DialInvalidAgentRoute;
@@ -109,8 +113,10 @@ export class DeckController {
   private readonly resetHolds = new Map<string, ResetHold>();
   private readonly dialDescriptionErrors = new Set<string>();
   private readonly dialRenderErrors = new Set<string>();
+  private readonly dialSuccessErrors = new Set<string>();
   private readonly activityIndex = new HostActivityIndex();
-  private readonly pressedAgents = new Map<number, RoutedAgentSlot>();
+  private readonly pressedAgents = new Map<number, KeypadAgentGesture>();
+  private readonly failedAgentUps = new Map<number, string>();
   private readonly pressedControlTargets = new Map<string, string>();
   private relayClient?: CodexRelayClient;
   private mobileRelayServer?: CodexRelayServer;
@@ -318,7 +324,7 @@ export class DeckController {
 
   unregisterDial(action: ActionIdentity): void {
     const registration = this.dials.get(action.id);
-    if (!registration || registration.action !== action) return;
+    if (!registration) return;
     this.disposeDialRegistration(registration);
   }
 
@@ -504,26 +510,68 @@ export class DeckController {
   }
 
   async sendAgent(slot: number, act: 0 | 1, expectedThreadKey?: string): Promise<void> {
-    const assignment = act === 0 ? this.pressedAgents.get(slot) : this.routedSlots[slot];
-    if (!assignment) throw new Error(`No Codex task is assigned to global agent slot ${slot + 1}.`);
-    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
-    if (expectedThreadKey != null && assignment.threadKey !== expectedThreadKey) {
+    if (act === 1) {
+      const current = this.routedSlots[slot];
+      if (!current) throw new Error(`No Codex task is assigned to global agent slot ${slot + 1}.`);
+      const threadKey = current.threadKey;
+      if (!threadKey) throw new Error("The selected Codex task has no stable thread identity.");
+      if (expectedThreadKey != null && threadKey !== expectedThreadKey) {
+        throw new Error("The selected Codex task no longer matches the highlighted task.");
+      }
+      this.failedAgentUps.delete(slot);
+      const assignment = { ...current, host: { ...current.host } };
+      const outcome = this.sendAgentAssignment(assignment, 1).then<AgentSendOutcome, AgentSendOutcome>(
+        () => ({ ok: true }),
+        (error: unknown) => ({ ok: false, error })
+      );
+      const gesture = { assignment, outcome };
+      this.pressedAgents.set(slot, gesture);
+      const result = await outcome;
+      if (!result.ok) {
+        if (this.pressedAgents.get(slot) === gesture) {
+          this.pressedAgents.delete(slot);
+          this.failedAgentUps.set(slot, threadKey);
+        }
+        throw result.error;
+      }
+      return;
+    }
+
+    const gesture = this.pressedAgents.get(slot);
+    if (!gesture) {
+      const failedThreadKey = this.failedAgentUps.get(slot);
+      if (failedThreadKey == null) {
+        throw new Error(`No Codex task is assigned to global agent slot ${slot + 1}.`);
+      }
+      if (expectedThreadKey != null && failedThreadKey !== expectedThreadKey) {
+        throw new Error("The selected Codex task no longer matches the highlighted task.");
+      }
+      this.failedAgentUps.delete(slot);
+      return;
+    }
+    if (expectedThreadKey != null && gesture.assignment.threadKey !== expectedThreadKey) {
       throw new Error("The selected Codex task no longer matches the highlighted task.");
     }
-    if (act === 1) this.pressedAgents.delete(slot);
-    try {
-      if (assignment.host.hostId === this.localHost?.hostId) {
-        await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
-      } else {
-        await this.sendRemote({
-          kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act
-        });
-      }
-      if (act === 1) this.pressedAgents.set(slot, assignment);
-    } finally {
-      if (act === 0) this.pressedAgents.delete(slot);
+    this.pressedAgents.delete(slot);
+    const result = await gesture.outcome;
+    if (!result.ok) return;
+    await this.sendAgentAssignment(gesture.assignment, 0);
+    void this.refresh();
+  }
+
+  private async sendAgentAssignment(assignment: RoutedAgentSlot, act: 0 | 1): Promise<void> {
+    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
+    if (assignment.host.hostId === this.localHost?.hostId) {
+      await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
+      return;
     }
-    if (act === 0) void this.refresh();
+    const remote = this.relayClient?.currentHost();
+    if (remote?.hostId !== assignment.host.hostId) {
+      throw new Error("The captured Codex agent host is no longer connected.");
+    }
+    await this.sendRemote({
+      kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act
+    });
   }
 
   async sendMicroAction(slot: MicroActionSlot, act: 0 | 1): Promise<void> {
@@ -826,7 +874,14 @@ export class DeckController {
       });
     } catch (error) {
       registration.successActive = false;
-      throw error;
+      const message = String(error);
+      if (!this.dialSuccessErrors.has(message)) {
+        this.dialSuccessErrors.add(message);
+        streamDeck.logger.warn(`Codex dial success feedback unavailable: ${message}`);
+      }
+      registration.lastFeedback = undefined;
+      await this.renderDialSafely(registration);
+      return;
     }
     if (!this.isCurrentDialRegistration(registration)) return;
     registration.successTimer = setTimeout(() => {
@@ -868,7 +923,6 @@ export class DeckController {
         route = assignment && identity === item.id
           ? {
               kind: "agent",
-              globalSlot: item.agentSlot,
               assignment: {
                 ...assignment,
                 host: { ...assignment.host }
@@ -946,22 +1000,23 @@ export class DeckController {
       if (gesture.phase !== "active") return;
       if (gesture.lifecycle === "hold") {
         gesture.phase = "releasing";
+        let reset = false;
         try {
           const sourceHostId = gesture.route.kind === "host" ? gesture.route.hostId : undefined;
-          const reset = await this.finishRateLimitReset(
+          reset = await this.finishRateLimitReset(
             registration.action,
             gesture.endedAt ?? gesture.startedAt,
             sourceHostId
           );
           gesture.phase = "released";
-          if (reset && this.isCurrentDialRegistration(registration)) {
-            await this.showDialSuccess(registration);
-          }
         } catch (error) {
           gesture.phase = "released";
           if (this.isCurrentDialRegistration(registration)) {
             await this.reportDialCommandError(registration, error);
           }
+        }
+        if (reset && this.isCurrentDialRegistration(registration)) {
+          await this.showDialSuccess(registration);
         }
         return;
       }
@@ -1102,30 +1157,14 @@ export class DeckController {
 
   private async sendDialAgent(route: DialAgentRoute, act: 0 | 1): Promise<void> {
     if (act === 1) {
-      const current = this.routedSlots[route.globalSlot];
-      const currentIdentity = current?.threadKey
-        ? `${current.host.hostId}:${current.threadKey}`
-        : undefined;
-      if (currentIdentity !== route.identity || current?.sourceSlot !== route.assignment.sourceSlot) {
+      const current = this.routedSlots.find((candidate) => candidate.threadKey != null &&
+        `${candidate.host.hostId}:${candidate.threadKey}` === route.identity);
+      if (!current || current.sourceSlot !== route.assignment.sourceSlot) {
         throw new Error("The selected Codex task no longer matches the highlighted host and task.");
       }
+      route.assignment = { ...current, host: { ...current.host } };
     }
-    const { assignment } = route;
-    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
-    if (assignment.host.hostId === this.localHost?.hostId) {
-      await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
-      return;
-    }
-    const remote = this.relayClient?.currentHost();
-    if (remote?.hostId !== assignment.host.hostId) {
-      throw new Error("The captured Codex agent host is no longer connected.");
-    }
-    await this.sendRemote({
-      kind: "agent",
-      slot: assignment.sourceSlot,
-      threadKey: assignment.threadKey,
-      act
-    });
+    await this.sendAgentAssignment(route.assignment, act);
   }
 
   private async sendDialToHost(

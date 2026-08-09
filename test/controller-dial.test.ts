@@ -39,7 +39,7 @@ type ControllerProbe = {
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
   };
-  pressedAgents: Map<number, RoutedAgentSlot>;
+  pressedAgents: Map<number, unknown>;
   refresh(): Promise<void>;
 };
 
@@ -80,13 +80,21 @@ const SNAPSHOT: MicroSnapshot = {
   }
 };
 
-function fakeDial(id: string, options: { rejectDescriptions?: boolean } = {}): FakeDial {
+function fakeDial(
+  id: string,
+  options: { rejectDescriptions?: boolean; rejectSuccessFeedback?: boolean } = {}
+): FakeDial {
   const dial = {
     id,
     feedbackCalls: [] as unknown[],
     triggerCalls: [] as unknown[],
     alerts: 0,
-    async setFeedback(payload: unknown) { this.feedbackCalls.push(payload); },
+    async setFeedback(payload: unknown) {
+      this.feedbackCalls.push(payload);
+      if (options.rejectSuccessFeedback && JSON.stringify(payload).includes("RESET COMPLETE")) {
+        throw new Error("success feedback unavailable");
+      }
+    },
     async setTriggerDescription(payload: unknown) {
       this.triggerCalls.push(payload);
       if (options.rejectDescriptions) throw new Error("description unavailable");
@@ -184,6 +192,35 @@ test("agent selector release uses the identity resolved on dial down", async () 
   ]);
 });
 
+test("agent selector accepts merged-list reorder while retaining its captured owner", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("agent-reorder");
+  const calls: Array<[number, 0 | 1, string | undefined]> = [];
+  let releaseBacklog!: () => void;
+  const backlog = new Promise<void>((resolve) => { releaseBacklog = resolve; });
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.routedSlots = [routedAgent(0, "thread-a"), routedAgent(1, "thread-b")];
+  state.microBridge = {
+    async sendAgent(slot, act, threadKey) { calls.push([slot, act, threadKey]); }
+  };
+  controller.registerDial(action, expandDialPreset("agents"));
+  probe(controller).dials.get(action.id)!.queue.enqueue(() => backlog);
+  const down = controller.beginDialPress(action);
+  const second = routedAgent(0, "thread-b");
+  const first = routedAgent(1, "thread-a");
+  first.sourceSlot = 0;
+  state.routedSlots = [second, first];
+  releaseBacklog();
+  await down;
+  await controller.finishDialPress(action);
+
+  assert.deepEqual(calls, [[0, 1, "thread-a"], [0, 0, "thread-a"]]);
+  assert.equal(action.alerts, 0);
+});
+
 test("paired detents continue after a dispatch failure and alert only the failing command", async () => {
   const controller = new DeckController();
   const action = fakeDial("reasoning-errors");
@@ -268,7 +305,58 @@ test("agent dispatch validates expected identity before down and releases the sa
     async sendAgent() { throw new Error("bridge down failed"); }
   };
   await assert.rejects(controller.sendAgent(0, 1, "thread-c"), /bridge down failed/);
-  assert.equal(state.pressedAgents.size, 0, "failed agent down leaves no saved keypad route");
+  assert.equal(state.pressedAgents.size, 0, "failed agent down leaves no pressed keypad route");
+  await controller.sendAgent(0, 0, "thread-c");
+  assert.equal(state.pressedAgents.size, 0, "failed agent gesture is consumed without a stale route");
+});
+
+test("keypad agent up waits for a slow down and releases the captured assignment exactly once", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  let releaseDown!: () => void;
+  const downGate = new Promise<void>((resolve) => { releaseDown = resolve; });
+  const events: Array<[number, 0 | 1, string | undefined]> = [];
+  state.localHost = HOST;
+  state.routedSlots = [routedAgent(0, "slow-thread")];
+  state.microBridge = {
+    async sendAgent(slot, act, threadKey) {
+      events.push([slot, act, threadKey]);
+      if (act === 1) await downGate;
+    }
+  };
+
+  const down = controller.sendAgent(0, 1, "slow-thread");
+  const up = controller.sendAgent(0, 0, "slow-thread");
+  releaseDown();
+  await Promise.all([down, up]);
+
+  assert.deepEqual(events, [[0, 1, "slow-thread"], [0, 0, "slow-thread"]]);
+  assert.equal(state.pressedAgents.size, 0);
+});
+
+test("keypad agent up suppresses release when its deferred down fails", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  let failDown!: (error: Error) => void;
+  const downGate = new Promise<void>((_resolve, reject) => { failDown = reject; });
+  const events: Array<[number, 0 | 1]> = [];
+  state.localHost = HOST;
+  state.routedSlots = [routedAgent(0, "failed-thread")];
+  state.microBridge = {
+    async sendAgent(slot, act) {
+      events.push([slot, act]);
+      if (act === 1) await downGate;
+    }
+  };
+
+  const down = controller.sendAgent(0, 1, "failed-thread");
+  const up = controller.sendAgent(0, 0, "failed-thread");
+  failDown(new Error("relay down failed"));
+  await assert.rejects(down, /relay down failed/);
+  await up;
+
+  assert.deepEqual(events, [[0, 1]]);
+  assert.equal(state.pressedAgents.size, 0);
 });
 
 test("action selector rotation does not execute until press", async () => {
@@ -411,6 +499,32 @@ test("agent down rejects an owner change with the same thread key and leaves no 
   assert.equal(action.alerts, 1);
 });
 
+test("agent down rejects a source-slot identity change on the captured owner", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("agent-source-change");
+  let releaseBacklog!: () => void;
+  const backlog = new Promise<void>((resolve) => { releaseBacklog = resolve; });
+  state.localHost = HOST;
+  state.routedSlots = [routedAgent(0, "same-thread", HOST)];
+  const events: unknown[] = [];
+  state.microBridge = {
+    async sendAgent(...args) { events.push(args); }
+  };
+  controller.registerDial(action, expandDialPreset("agents"));
+  probe(controller).dials.get(action.id)!.queue.enqueue(() => backlog);
+  const down = controller.beginDialPress(action);
+  const changed = routedAgent(0, "same-thread", HOST);
+  changed.sourceSlot = 4;
+  state.routedSlots = [changed];
+  releaseBacklog();
+  await down;
+  await controller.finishDialPress(action);
+
+  assert.deepEqual(events, []);
+  assert.equal(action.alerts, 1);
+});
+
 test("failed momentary down suppresses unmatched up and a duplicate alert", async () => {
   const controller = new DeckController();
   const state = probe(controller);
@@ -511,8 +625,53 @@ test("unregister cancels pending work, releases active gestures, and isolates re
 
   assert.deepEqual(events, [["ACT06", 1], ["ACT06", 0]], "old queued work is canceled");
   assert.equal(probe(controller).dials.get(newAction.id)!.settings.press, "micro.ACT06");
-  controller.unregisterDial(oldAction);
-  assert.equal(probe(controller).dials.has(newAction.id), true, "an old disappear cannot remove the new instance");
+  controller.unregisterDial({ id: newAction.id } as unknown as DialAction<CodexDialSettings>);
+  assert.equal(
+    probe(controller).dials.has(newAction.id),
+    false,
+    "WillDisappear may supply a fresh ActionContext object for the current id"
+  );
+});
+
+test("successful reset stays successful when Encoder acknowledgement feedback fails", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("reset-feedback-failure", { rejectSuccessFeedback: true });
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: SNAPSHOT };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  let resets = 0;
+  state.microBridge = {
+    async sendAgent() {},
+    async consumeRateLimitReset() { resets += 1; }
+  };
+  state.refresh = async () => {};
+  controller.registerDial(action, {
+    ...expandDialPreset("custom"),
+    press: "usage.rate-limit-reset"
+  });
+  await settle();
+
+  const realNow = Date.now;
+  try {
+    Date.now = () => 40_000;
+    await controller.beginDialPress(action);
+    Date.now = () => 41_200;
+    await controller.finishDialPress(action);
+  } finally {
+    Date.now = realNow;
+  }
+  await settle();
+
+  assert.equal(resets, 1);
+  assert.equal(action.alerts, 0, "display acknowledgement failure is not a command failure");
+  assert.equal(
+    action.feedbackCalls.filter((call) => JSON.stringify(call).includes("RESET COMPLETE")).length,
+    1
+  );
+  assert.doesNotMatch(JSON.stringify(action.feedbackCalls.at(-1)), /RESET COMPLETE/);
 });
 
 test("rotation detents use the host captured before their queue backlog", async () => {
