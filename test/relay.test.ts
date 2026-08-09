@@ -1141,6 +1141,42 @@ test("forced controller usage wins over a pre-command refresh in flight", async 
   assert.equal(state.localHealth.state, "ready");
 });
 
+test("a render failure does not degrade a committed usage refresh", async () => {
+  const { DeckController } = await import("../src/controller.js");
+  const controller = new DeckController();
+  const forcedSnapshot: MicroSnapshot = {
+    ...structuredClone(snapshot),
+    reasoningEffort: "committed-before-render",
+    usage: {
+      windows: [{
+        id: "five-hour", kind: "five-hour", usedPercent: 20, remainingPercent: 80,
+        windowDurationMins: 300, resetsAt: 30_000
+      }],
+      observedAt: 20_000, resetCreditsAvailable: 1, resetCreditsApplicable: 1
+    }
+  };
+  let renders = 0;
+  const renderFailure = new Error("render failed");
+  const state = controller as unknown as {
+    microBridge: { requestUsageRefresh: () => Promise<MicroSnapshot> };
+    localHost: CodexHost;
+    localSnapshot?: HostSnapshot;
+    localHealth: { state: string; changedAt: number; reason?: string };
+    refreshDisplay: () => Promise<void>;
+  };
+  state.microBridge = { requestUsageRefresh: async () => structuredClone(forcedSnapshot) };
+  state.localHost = host;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.refreshDisplay = async () => { renders += 1; throw renderFailure; };
+
+  await assert.rejects(controller.refreshUsage(), renderFailure);
+  assert.equal(renders, 1);
+  assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "committed-before-render");
+  assert.equal(state.localSnapshot?.snapshot.usage?.observedAt, 20_000);
+  assert.equal(state.localHealth.state, "ready");
+  assert.equal(state.localHealth.reason, undefined);
+});
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

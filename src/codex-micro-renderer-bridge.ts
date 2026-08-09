@@ -120,21 +120,25 @@ export function normalizeRendererUsage(
   const normalizeWindow = (value: unknown, role: string): UsageWindow | null => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const window = value as Record<string, unknown>;
-    const used = Number(window.used_percent);
-    if (!Number.isFinite(used)) return null;
-    const seconds = Number(window.limit_window_seconds);
-    const minutes = Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : null;
+    const used = window.used_percent;
+    if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return null;
+    const hasSeconds = Object.prototype.hasOwnProperty.call(window, "limit_window_seconds");
+    const seconds = window.limit_window_seconds;
+    if (hasSeconds && (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0)) return null;
+    const minutes = typeof seconds === "number" ? seconds / 60 : null;
+    const resetValue = window.reset_at;
+    const resetsAt = resetValue == null ? null : toEpoch(resetValue);
+    if (resetValue != null && resetsAt == null) return null;
     const kind: UsageWindow["kind"] = minutes != null && Math.abs(minutes - 300) <= 1 ? "five-hour"
       : minutes != null && Math.abs(minutes - 10080) <= 1 ? "weekly"
         : "other";
-    const usedPercent = Math.min(100, Math.max(0, used));
     return {
       id: kind === "other" ? `${role}-${String(minutes ?? "unknown")}` : kind,
       kind,
-      usedPercent,
-      remainingPercent: 100 - usedPercent,
+      usedPercent: used,
+      remainingPercent: 100 - used,
       windowDurationMins: minutes,
-      resetsAt: toEpoch(window.reset_at) ?? null
+      resetsAt: resetsAt ?? null
     };
   };
   const windows = [
@@ -146,13 +150,23 @@ export function normalizeRendererUsage(
   const creditRecord = credits && typeof credits === "object" && !Array.isArray(credits)
     ? credits as Record<string, unknown>
     : {};
-  const available = Number(creditRecord.available_count);
-  const applicable = Number(creditRecord.applicable_available_count);
+  const normalizeCredit = (key: string): { valid: boolean; value: number | null } => {
+    if (!Object.prototype.hasOwnProperty.call(creditRecord, key)) return { valid: true, value: null };
+    const value = creditRecord[key];
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? { valid: true, value }
+      : { valid: false, value: null };
+  };
+  const available = normalizeCredit("available_count");
+  const applicable = normalizeCredit("applicable_available_count");
+  if (!available.valid || !applicable.valid) return undefined;
   return {
     windows,
-    observedAt: Number.isFinite(dataUpdatedAt) && Number(dataUpdatedAt) > 0 ? Number(dataUpdatedAt) : now,
-    resetCreditsAvailable: Number.isFinite(available) ? Math.max(0, Math.floor(available)) : null,
-    resetCreditsApplicable: Number.isFinite(applicable) ? Math.max(0, Math.floor(applicable)) : null
+    observedAt: typeof dataUpdatedAt === "number" && Number.isFinite(dataUpdatedAt) && dataUpdatedAt > 0
+      ? dataUpdatedAt
+      : now,
+    resetCreditsAvailable: available.value,
+    resetCreditsApplicable: applicable.value
   };
 }
 

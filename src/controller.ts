@@ -345,9 +345,10 @@ export class DeckController {
 
   private async refreshLocalUsage(): Promise<MicroSnapshot> {
     const generation = ++this.localSnapshotGeneration;
+    let snapshot: MicroSnapshot;
     try {
       const host = this.localHost ?? await getOrCreateHostIdentity();
-      const snapshot = await this.microBridge.requestUsageRefresh();
+      snapshot = await this.microBridge.requestUsageRefresh();
       if (generation !== this.localSnapshotGeneration) {
         throw new Error("Codex usage refresh was superseded by a newer refresh.");
       }
@@ -358,8 +359,6 @@ export class DeckController {
       this.localSnapshot = { host, snapshot, observedAt };
       this.localHealth = { state: "ready", changedAt: observedAt };
       this.lastError = "";
-      await this.refreshDisplay();
-      return snapshot;
     } catch (error) {
       if (generation !== this.localSnapshotGeneration) throw error;
       this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
@@ -371,6 +370,8 @@ export class DeckController {
       await this.refreshDisplay();
       throw error;
     }
+    await this.refreshDisplay();
+    return snapshot;
   }
 
   private async refresh(): Promise<void> {

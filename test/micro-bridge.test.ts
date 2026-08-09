@@ -145,6 +145,39 @@ test("forced usage accepts only a normalized rate-limit window after fetch", asy
   assert.equal(valid?.windows[0]?.remainingPercent, 75);
 });
 
+test("usage normalization rejects coercible and out-of-domain numeric scalars", () => {
+  const normalize = Reflect.get(microBridgeModule, "normalizeRendererUsage") as (
+    data: unknown, dataUpdatedAt?: number, now?: number
+  ) => MicroSnapshot["usage"];
+  const malformedPercentages: unknown[] = [null, "", "   ", "25", false, true, [], {}, -1, 101];
+  for (const usedPercent of malformedPercentages) {
+    assert.equal(normalize({
+      rate_limit: { primary_window: { used_percent: usedPercent, limit_window_seconds: 18_000 } }
+    }, 10_000, 20_000), undefined, `used_percent=${String(usedPercent)} must not be coerced`);
+  }
+
+  const malformedCredits: unknown[] = [null, "", "   ", "2", false, true, [], {}, -1, 1.5, Infinity];
+  for (const credit of malformedCredits) {
+    const rate_limit = { primary_window: { used_percent: 25, limit_window_seconds: 18_000 } };
+    assert.equal(normalize({
+      rate_limit,
+      rate_limit_reset_credits: { available_count: credit, applicable_available_count: 1 }
+    }, 10_000, 20_000), undefined, `available_count=${String(credit)} must not be coerced`);
+    assert.equal(normalize({
+      rate_limit,
+      rate_limit_reset_credits: { available_count: 1, applicable_available_count: credit }
+    }, 10_000, 20_000), undefined, `applicable_available_count=${String(credit)} must not be coerced`);
+  }
+
+  const valid = normalize({
+    rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 18_000 } },
+    rate_limit_reset_credits: { available_count: 0, applicable_available_count: 2 }
+  }, 10_000, 20_000);
+  assert.equal(valid?.windows[0]?.usedPercent, 0);
+  assert.equal(valid?.resetCreditsAvailable, 0);
+  assert.equal(valid?.resetCreditsApplicable, 2);
+});
+
 test("forced bridge snapshots reject absent or empty normalized usage", async () => {
   for (const nativeSnapshot of [
     snapshotFixture(),
