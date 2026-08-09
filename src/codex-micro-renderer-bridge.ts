@@ -185,19 +185,22 @@ function hasValidNormalizedUsage(usage: UsageSnapshot | undefined): usage is Usa
   );
 }
 
-type ReasoningEffortElement = {
+type ReasoningTriggerElement = {
   isConnected?: boolean;
   getClientRects?: () => { length: number };
   getAttribute: (name: string) => string | null;
+  querySelector?: (selectors: string) => unknown;
 };
 
+export function isVisibleReasoningTrigger(element: ReasoningTriggerElement): boolean {
+  if (element.isConnected === false || (element.getClientRects?.().length ?? 0) === 0) return false;
+  const style = getComputedStyle(element as unknown as Element);
+  return style.display !== "none" && style.visibility !== "hidden";
+}
+
 export function readActiveReasoningEffort(
-  elements: Iterable<ReasoningEffortElement>,
-  isVisible = (element: ReasoningEffortElement): boolean => {
-    if (element.isConnected === false || (element.getClientRects?.().length ?? 0) === 0) return false;
-    const style = getComputedStyle(element as unknown as Element);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }
+  elements: Iterable<ReasoningTriggerElement>,
+  isVisible = isVisibleReasoningTrigger
 ): string | undefined {
   const candidates = new Set<string>();
   for (const element of elements) {
@@ -205,6 +208,24 @@ export function readActiveReasoningEffort(
     if (element.getAttribute("data-composer-navigation-target") !== "reasoning") continue;
     const value = element.getAttribute("data-selected-reasoning-effort")?.trim();
     if (value && value.length <= 64) candidates.add(value);
+  }
+  return candidates.size === 1 ? candidates.values().next().value : undefined;
+}
+
+export function hasFastModeIndicator(element: ReasoningTriggerElement): boolean {
+  return Boolean(element.querySelector?.('svg[class*="ModelPickerTriggerInlineFastIcon"]'));
+}
+
+export function readActiveFastMode(
+  elements: Iterable<ReasoningTriggerElement>,
+  isVisible = isVisibleReasoningTrigger,
+  hasFastIndicator = hasFastModeIndicator
+): boolean | undefined {
+  const candidates = new Set<boolean>();
+  for (const element of elements) {
+    if (!isVisible(element)) continue;
+    if (element.getAttribute("data-composer-navigation-target") !== "reasoning") continue;
+    candidates.add(hasFastIndicator(element));
   }
   return candidates.size === 1 ? candidates.values().next().value : undefined;
 }
@@ -217,7 +238,10 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   const forceUsageRefresh = ${forceUsageRefresh};
   const readUsageQueryData = (${readUsageQueryData.toString()});
   const normalizeRendererUsage = (${normalizeRendererUsage.toString()});
+  const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
   const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
+  const hasFastModeIndicator = (${hasFastModeIndicator.toString()});
+  const readActiveFastMode = (${readActiveFastMode.toString()});
   const urls = [...new Set([
     ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
     ...performance.getEntriesByType('resource').map((entry) => entry.name)
@@ -415,12 +439,16 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
   const reasoningEffort = readActiveReasoningEffort(document.querySelectorAll(
-    '[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]'
+    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+  ));
+  const fastModeEnabled = readActiveFastMode(document.querySelectorAll(
+    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
   ));
 
   return {
     slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme,
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(typeof fastModeEnabled === 'boolean' ? { fastModeEnabled } : {}),
     ...(usage ? { usage } : {})
   };
 })()`;

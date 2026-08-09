@@ -138,6 +138,19 @@ test("relay snapshots accept an optional bounded reasoning effort", async () => 
   assert.equal(parseRelayServerMessage(message), null);
 });
 
+test("relay snapshots accept only an optional boolean Fast mode state", async () => {
+  const message = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
+  assert.notEqual(parseRelayServerMessage(message), null, "older peers may omit the optional field");
+  for (const fastModeEnabled of [true, false]) {
+    message.snapshot.fastModeEnabled = fastModeEnabled;
+    assert.notEqual(parseRelayServerMessage(message), null, `boolean ${fastModeEnabled} is valid`);
+  }
+  for (const fastModeEnabled of [null, 0, 1, "true", [], {}]) {
+    message.snapshot.fastModeEnabled = fastModeEnabled as never;
+    assert.equal(parseRelayServerMessage(message), null, `${JSON.stringify(fastModeEnabled)} must be rejected`);
+  }
+});
+
 test("relay snapshot parser bounds and validates host session catalogs", async () => {
   const valid = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
   valid.snapshot.hostSessions = [{ threadId: "00000000-0000-4000-8000-000000000000", activityAt: 1, status: "working", completionRevision: 42 }];
@@ -215,6 +228,7 @@ test("relay parser rejects malformed snapshot fields before activity merge", () 
   add((packet) => { packet.snapshot.activeThreadKey = null as unknown as string; });
   add((packet) => { packet.snapshot.activeThreadTitle = null as unknown as string; });
   add((packet) => { packet.snapshot.reasoningEffort = null as unknown as string; });
+  add((packet) => { packet.snapshot.fastModeEnabled = null as unknown as boolean; });
   add((packet) => { packet.snapshot.usage = null as unknown as NonNullable<MicroSnapshot["usage"]>; });
   add((packet) => { packet.snapshot.hostSessions = null as unknown as NonNullable<MicroSnapshot["hostSessions"]>; });
   add((packet) => { packet.snapshot.usage = {

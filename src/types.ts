@@ -63,6 +63,8 @@ export type MicroSnapshot = {
   slots: MicroAgentSlot[];
   /** Current reasoning effort selected in the active renderer composer. */
   reasoningEffort?: string;
+  /** Whether the active visible Codex reasoning trigger authoritatively reports Fast mode. */
+  fastModeEnabled?: boolean;
   /** Task currently open in the Codex renderer, even when it is outside the six native Micro slots. */
   activeThreadKey?: string;
   /** User-visible title for the active task, including tasks outside the six Micro slots. */

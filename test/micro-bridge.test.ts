@@ -69,6 +69,39 @@ test("renderer snapshots require one unique visible semantic reasoning target", 
   ], (element) => element.visible), undefined, "conflicting visible reasoning targets are unavailable");
 });
 
+test("renderer snapshots expose Fast mode only from agreeing visible reasoning triggers", () => {
+  const readActiveFastMode = Reflect.get(microBridgeModule, "readActiveFastMode") as unknown;
+  assert.equal(typeof readActiveFastMode, "function");
+  const read = readActiveFastMode as (
+    elements: Array<{ getAttribute: (name: string) => string | null; visible: boolean; fast: boolean }>,
+    isVisible: (element: { visible: boolean }) => boolean,
+    hasFastIndicator: (element: { fast: boolean }) => boolean
+  ) => boolean | undefined;
+  const trigger = (visible: boolean, fast: boolean, target = "reasoning") => ({
+    getAttribute: (name: string) => name === "data-composer-navigation-target" ? target : null,
+    visible,
+    fast
+  });
+  const visible = (element: { visible: boolean }) => element.visible;
+  const hasFastIndicator = (element: { fast: boolean }) => element.fast;
+
+  assert.equal(read([trigger(true, true)], visible, hasFastIndicator), true, "Fast icon means enabled");
+  assert.equal(read([trigger(true, false)], visible, hasFastIndicator), false, "no Fast icon means disabled");
+  assert.equal(read([trigger(false, true)], visible, hasFastIndicator), undefined, "hidden triggers are ignored");
+  assert.equal(read([trigger(true, true, "model")], visible, hasFastIndicator), undefined, "only reasoning triggers count");
+  assert.equal(read([trigger(true, true), trigger(true, false)], visible, hasFastIndicator), undefined,
+    "conflicting visible reasoning triggers are unavailable");
+});
+
+test("renderer snapshot expression reads only authoritative reasoning triggers", async () => {
+  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
+  const triggerSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]';
+  const escapedTriggerSelector = triggerSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(source, new RegExp(`readActiveReasoningEffort\\(document\\.querySelectorAll\\(\\s*'${escapedTriggerSelector}'`));
+  assert.match(source, new RegExp(`readActiveFastMode\\(document\\.querySelectorAll\\(\\s*'${escapedTriggerSelector}'`));
+  assert.match(source, /svg\[class\*="ModelPickerTriggerInlineFastIcon"\]/);
+});
+
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
   const predicate = Reflect.get(microBridgeModule, "hasApplicableResetCredit") as unknown;
   assert.equal(typeof predicate, "function");

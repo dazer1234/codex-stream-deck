@@ -285,6 +285,7 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   if (value.activeThreadTitle !== undefined && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
   if (value.reasoningEffort !== undefined &&
       (typeof value.reasoningEffort !== "string" || value.reasoningEffort.trim().length === 0 || value.reasoningEffort.length > 64)) return false;
+  if (value.fastModeEnabled !== undefined && typeof value.fastModeEnabled !== "boolean") return false;
   if (value.usage !== undefined && !isUsageSnapshot(value.usage)) return false;
   if (value.hostSessions === undefined) return true;
   return Array.isArray(value.hostSessions) && value.hostSessions.length <= 128 && value.hostSessions.every((session) =>
