@@ -21,7 +21,9 @@ The recommended layout uses four separate `Codex Dial` instances:
 | Actions | Select Fast, Approve, Reject, Fork, Dictation, or Send in that order | Run the highlighted action | Settings | Selected action and activation hint |
 | Usage | Select Auto, 5h, or Weekly | Toggle the selected single-window view and two-window overview | Refresh usage now | Remaining capacity, reset time, health, and view mode |
 
-Reasoning changes apply once per detent. They do not require a press or confirmation.
+The Fast key uses authoritative composer state: green means Fast Mode is enabled, red means it is disabled, and the normal neutral surface means the live state is unknown or unavailable.
+
+Reasoning changes apply once per detent through Codex's dedicated increase and decrease commands. Rotation does not move keyboard focus through composer controls and does not require a press or confirmation.
 
 The six action names are the default slot labels for the six configured Codex Micro action slots. Feedback labels follow the current Codex Micro assignments, so a customized slot is identified by its current assignment rather than a hardcoded default name.
 
