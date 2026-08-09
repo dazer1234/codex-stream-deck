@@ -41,6 +41,9 @@ type ControllerProbe = {
     consumeRateLimitReset?(): Promise<void>;
   };
   pressedAgents: Map<number, unknown>;
+  dialDescriptionErrors: Set<string>;
+  dialRenderErrors: Set<string>;
+  dialSuccessErrors: Set<string>;
   refresh(): Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
 };
@@ -84,7 +87,11 @@ const SNAPSHOT: MicroSnapshot = {
 
 function fakeDial(
   id: string,
-  options: { rejectDescriptions?: boolean; rejectSuccessFeedback?: boolean } = {}
+  options: {
+    rejectDescriptions?: boolean;
+    rejectSuccessFeedback?: boolean;
+    descriptionError?: string;
+  } = {}
 ): FakeDial {
   const dial = {
     id,
@@ -99,6 +106,7 @@ function fakeDial(
     },
     async setTriggerDescription(payload: unknown) {
       this.triggerCalls.push(payload);
+      if (options.descriptionError) throw new Error(options.descriptionError);
       if (options.rejectDescriptions) throw new Error("description unavailable");
     },
     async showAlert() { this.alerts += 1; }
@@ -248,6 +256,54 @@ test("paired detents continue after a dispatch failure and alert only the failin
 
   assert.deepEqual(attempts, ["attempt-1", "attempt-2"]);
   assert.equal(action.alerts, 1);
+});
+
+test("rotation rejects malformed or oversized events and atomically bounds one-shot backlog", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const action = fakeDial("bounded-rotation");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const sends: string[] = [];
+  let first = true;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async runKeycap(keycapId) {
+      sends.push(keycapId);
+      if (first) {
+        first = false;
+        await gate;
+      }
+    }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("custom"),
+    rotation: {
+      kind: "paired", counterClockwise: "keycap.FAST", clockwise: "keycap.FAST"
+    }
+  });
+
+  controller.rotateDial(action, 65);
+  controller.rotateDial(action, Number.NaN);
+  await settle();
+  assert.deepEqual(sends, []);
+  assert.equal(action.alerts, 2, "each rejected physical event alerts once");
+
+  controller.rotateDial(action, 64);
+  controller.rotateDial(action, 64);
+  controller.rotateDial(action, 1);
+  await settle();
+  assert.equal(sends.length, 1, "the accepted backlog starts in order");
+  assert.equal(action.alerts, 3, "the overflowing event alerts once without partial admission");
+  assert.equal(probe(controller).dials.get(action.id)!.queue.pendingCount, 128);
+  release();
+  await idle(controller, action.id);
+  assert.equal(sends.length, 128);
+  assert.equal(probe(controller).dials.get(action.id)!.queue.pendingCount, 0);
 });
 
 test("rate-limit reset remains press-only and uses Encoder feedback for completed holds", async () => {
@@ -560,6 +616,42 @@ test("remote dial starts require remote readiness and multi-host agent feedback 
   controller.rotateDial(badged, 1);
   await idle(controller, badged.id);
   assert.equal((badged.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 2 • W");
+});
+
+test("agent feedback health follows the highlighted owner instead of the function target", async () => {
+  const remoteHealth: HostHealth = { state: "offline", changedAt: 1_000 };
+  const relay = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => remoteHealth,
+    currentSnapshot: () => undefined,
+    async send() {}
+  };
+
+  const localTarget = new DeckController();
+  const localState = probe(localTarget);
+  const remoteAgent = fakeDial("remote-owner-offline");
+  localState.localHost = HOST;
+  localState.localHealth = { state: "ready", changedAt: 1_000 };
+  localState.targetHostId = HOST.hostId;
+  localState.targetPlatform = HOST.platform;
+  localState.routedSlots = [routedAgent(0, "remote-owner", REMOTE_HOST)];
+  localState.relayClient = relay;
+  localTarget.registerDial(remoteAgent, expandDialPreset("agents"));
+  await settle();
+  assert.equal((remoteAgent.feedbackCalls.at(-1) as { value?: string }).value, "OFFLINE");
+
+  const remoteTarget = new DeckController();
+  const remoteState = probe(remoteTarget);
+  const localAgent = fakeDial("local-owner-ready");
+  remoteState.localHost = HOST;
+  remoteState.localHealth = { state: "ready", changedAt: 1_000 };
+  remoteState.targetHostId = REMOTE_HOST.hostId;
+  remoteState.targetPlatform = REMOTE_HOST.platform;
+  remoteState.routedSlots = [routedAgent(0, "local-owner", HOST)];
+  remoteState.relayClient = relay;
+  remoteTarget.registerDial(localAgent, expandDialPreset("agents"));
+  await settle();
+  assert.equal((localAgent.feedbackCalls.at(-1) as { value?: string }).value, "TASK LOCAL-OWNER");
 });
 
 test("local dial usage refresh requires ready health", async () => {
@@ -908,6 +1000,21 @@ test("successful reset stays successful when Encoder acknowledgement feedback fa
     1
   );
   assert.doesNotMatch(JSON.stringify(action.feedbackCalls.at(-1)), /RESET COMPLETE/);
+});
+
+test("dial feedback error dedupe storage stays bounded", async () => {
+  const controller = new DeckController();
+  for (let index = 0; index < 105; index += 1) {
+    controller.registerDial(
+      fakeDial(`description-error-${index}`, { descriptionError: `description-${index}` }),
+      expandDialPreset("reasoning")
+    );
+  }
+  await settle();
+  const state = probe(controller);
+  assert.equal(state.dialDescriptionErrors.size, 100);
+  assert.equal(state.dialRenderErrors.size <= 100, true);
+  assert.equal(state.dialSuccessErrors.size <= 100, true);
 });
 
 test("rotation detents use the host captured before their queue backlog", async () => {

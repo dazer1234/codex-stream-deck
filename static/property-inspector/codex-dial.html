@@ -338,11 +338,14 @@
       return true;
     }
 
-    function populateBindingSelect(id, gesture) {
+    function populateBindingSelect(id, gesture, preferredValue) {
       const select = element(id);
+      const selected = preferredValue ?? select.value;
       select.replaceChildren();
       for (const group of BINDING_GROUPS) {
-        const values = group.values.filter(([value]) => bindingAllowed(value, gesture));
+        const values = group.values.filter(([value]) => bindingAllowed(value, gesture) &&
+          !(id === "press" && value === "selector.activate" &&
+            element("rotation-kind").value !== "selector"));
         if (values.length === 0) continue;
         const optionGroup = document.createElement("optgroup");
         optionGroup.label = group.label;
@@ -354,6 +357,8 @@
         }
         select.appendChild(optionGroup);
       }
+      const available = Array.from(select.options, ({ value }) => value);
+      select.value = available.includes(selected) ? selected : "none";
     }
 
     function clone(value) {
@@ -437,7 +442,8 @@
         element("selector-source").value = settings.rotation.source;
         element("wrap").checked = settings.rotation.wrap;
       }
-      element("press").value = settings.press;
+      populateBindingSelect("press", "press", settings.press);
+      settings.press = element("press").value || "none";
       element("touch-tap").value = settings.touchTap;
       element("feedback").value = settings.feedback;
       element("static-label").value = settings.staticLabel ?? "";
@@ -564,7 +570,16 @@
         applySettings(PRESETS[element("preset").value] ?? PRESETS.reasoning);
         persistAndQueue(false);
       });
-      for (const id of ["rotation-kind", "selector-source", "feedback"]) {
+      element("rotation-kind").addEventListener("change", () => {
+        if (element("rotation-kind").value === "paired") {
+          element("counter-clockwise").value = "none";
+          element("clockwise").value = "none";
+        }
+        populateBindingSelect("press", "press");
+        updateConditionalViews();
+        persistAndQueue(true);
+      });
+      for (const id of ["selector-source", "feedback"]) {
         element(id).addEventListener("change", () => {
           updateConditionalViews();
           persistAndQueue(true);

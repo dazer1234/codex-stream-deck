@@ -1,5 +1,5 @@
 import type { OfficialKeycapId } from "./keycaps.js";
-import type { MicroActionSlot, MicroDirection } from "./types.js";
+import type { HostHealthState, MicroActionSlot, MicroDirection } from "./types.js";
 
 export type JsonValue = boolean | number | string | null | undefined | JsonObject | JsonValue[];
 export interface JsonObject { [key: string]: JsonValue }
@@ -61,6 +61,7 @@ export type DialSelectorItem = {
 
 export type DialRuntimeState = {
   selectedId?: string;
+  selectedIndex?: number;
   usageMode: "auto" | "five-hour" | "weekly";
   usageOverview: boolean;
 };
@@ -71,6 +72,7 @@ export type DialRuntimeAgent = {
   threadKey: string;
   title: string;
   status: string;
+  health: HostHealthState;
   hostBadge?: "M" | "W";
   contextUsedPercent?: number;
 };
@@ -85,7 +87,7 @@ export type DialRuntimeUsage = {
 };
 
 export type DialRuntimeView = {
-  health: "ready" | "degraded" | "offline" | "connecting";
+  health: HostHealthState;
   reasoningEffort?: string;
   agents: DialRuntimeAgent[];
   actionLabels: Partial<Record<DialBindingId, string>>;

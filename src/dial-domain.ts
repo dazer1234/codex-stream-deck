@@ -22,6 +22,8 @@ export const JOYSTICK_DIRECTIONS = Object.freeze(["up", "right", "down", "left"]
 export const DEFAULT_ACTION_SELECTOR_ITEMS: readonly DialBindingId[] = Object.freeze(
   MICRO_SLOTS.map((slot): DialBindingId => `micro.${slot}`)
 );
+export const MAX_DIAL_TICKS_PER_EVENT = 64;
+export const MAX_DIAL_QUEUE_PENDING = 128;
 
 export function bindingLifecycle(
   binding: DialBindingId
@@ -34,8 +36,29 @@ export function bindingLifecycle(
 
 export class DialCommandQueue {
   private tail: Promise<void> = Promise.resolve();
+  private pending = 0;
 
-  enqueue(operation: () => Promise<void>): void {
+  get pendingCount(): number {
+    return this.pending;
+  }
+
+  canEnqueue(count = 1): boolean {
+    return Number.isSafeInteger(count) && count >= 0 &&
+      this.pending + count <= MAX_DIAL_QUEUE_PENDING;
+  }
+
+  enqueue(operation: () => Promise<void>): boolean {
+    if (!this.canEnqueue()) return false;
+    this.pending += 1;
+    const run = async (): Promise<void> => {
+      try { await operation(); }
+      finally { this.pending -= 1; }
+    };
+    this.tail = this.tail.then(run, run).catch(() => undefined);
+    return true;
+  }
+
+  enqueueCleanup(operation: () => Promise<void>): void {
     this.tail = this.tail.then(operation, operation).catch(() => undefined);
   }
 
@@ -50,9 +73,6 @@ const SELECTOR_SOURCE_IDS = new Set<string>(DIAL_SELECTOR_SOURCES);
 const MICRO_SLOT_IDS = new Set<string>(MICRO_SLOTS);
 const JOYSTICK_DIRECTION_IDS = new Set<string>(JOYSTICK_DIRECTIONS);
 const OFFICIAL_KEYCAP_ID_SET = new Set<string>(OFFICIAL_KEYCAP_IDS);
-// Stream Deck dial events are far smaller; this rejects corrupted counts while preserving every
-// detent from any physically plausible SDK event.
-const MAX_DIAL_TICKS_PER_EVENT = 4_096;
 const DIAL_ACCENTS = Object.freeze({
   blue: "#1683FF",
   green: "#35D86B",
@@ -105,10 +125,18 @@ export function reconcileSelector(
     const { selectedId: _selectedId, ...cleared } = state;
     return { ...cleared };
   }
-  const selectedId = items.some((item) => item.id === state.selectedId)
-    ? state.selectedId
-    : items[0]!.id;
-  return { ...state, selectedId };
+  const stableIndex = items.findIndex((item) => item.id === state.selectedId);
+  const priorIndex = Number.isSafeInteger(state.selectedIndex) && state.selectedIndex != null
+    ? state.selectedIndex
+    : 0;
+  const selectedIndex = stableIndex >= 0
+    ? stableIndex
+    : Math.min(items.length - 1, Math.max(0, priorIndex));
+  return { ...state, selectedId: items[selectedIndex]!.id, selectedIndex };
+}
+
+export function isDialTickCount(ticks: number): boolean {
+  return Number.isSafeInteger(ticks) && Math.abs(ticks) <= MAX_DIAL_TICKS_PER_EVENT;
 }
 
 export function reduceDialRotation(
@@ -117,7 +145,7 @@ export function reduceDialRotation(
   view: DialRuntimeView,
   ticks: number
 ): { state: DialRuntimeState; bindings: DialBindingId[] } {
-  if (!Number.isSafeInteger(ticks) || ticks === 0 || Math.abs(ticks) > MAX_DIAL_TICKS_PER_EVENT) {
+  if (!isDialTickCount(ticks) || ticks === 0) {
     return { state, bindings: [] };
   }
   if (settings.rotation.kind === "paired") {
@@ -132,7 +160,7 @@ export function reduceDialRotation(
   const items = selectorItems(settings, view);
   const reconciled = reconcileSelector(state, items);
   if (items.length === 0) return { state: reconciled, bindings: [] };
-  const currentIndex = Math.max(0, items.findIndex((item) => item.id === reconciled.selectedId));
+  const currentIndex = reconciled.selectedIndex ?? 0;
   const nextIndex = settings.rotation.wrap
     ? modulo(currentIndex + (ticks % items.length), items.length)
     : Math.min(items.length - 1, Math.max(0, currentIndex + ticks));
@@ -141,6 +169,7 @@ export function reduceDialRotation(
     state: {
       ...reconciled,
       selectedId,
+      selectedIndex: nextIndex,
       ...(settings.rotation.source === "usage"
         ? { usageMode: usageModeFromId(selectedId) }
         : {})
@@ -178,7 +207,7 @@ export function deriveDialFeedback(
             : staticFeedback(settings);
   const emptySelector = (mode === "agent" || mode === "action") &&
     selectorItems(settings, view).length === 0;
-  if (emptySelector) return live;
+  if (mode === "agent" || emptySelector) return live;
   return view.health === "ready" ? live : healthFeedback(live.title, view.health);
 }
 
@@ -452,13 +481,14 @@ function agentFeedback(
   const detail = context == null
     ? status
     : `${status} • ${Math.round(context)}% context`;
-  return feedback(
+  const live = feedback(
     `AGENT ${agentDisplayNumber(agent.id)}${agent.hostBadge ? ` • ${agent.hostBadge}` : ""}`,
     item.label,
     detail,
     context ?? 0,
     agentAccent(status)
   );
+  return agent.health === "ready" ? live : healthFeedback(live.title, agent.health);
 }
 
 function actionFeedback(

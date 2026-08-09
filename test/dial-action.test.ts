@@ -481,14 +481,49 @@ test("gesture catalogs contain only runtime-valid values and keep reset press-on
     const values = field(document, id).options.map(({ value }) => value);
     assert.ok(values.length > 0, `${id} has options`);
     assert.equal(new Set(values).size, values.length, `${id} has no duplicate values`);
-    assert.deepEqual([...values].sort(), runtimeBindings(gesture), `${id} covers the runtime catalog exactly`);
+    const expected = gesture === "press"
+      ? runtimeBindings(gesture).filter((value) => value !== "selector.activate")
+      : runtimeBindings(gesture);
+    assert.deepEqual([...values].sort(), expected, `${id} covers the applicable runtime catalog exactly`);
     assert.equal(values.includes("usage.rate-limit-reset"), gesture === "press");
-    assert.equal(values.includes("selector.activate"), gesture === "press");
+    assert.equal(values.includes("selector.activate"), false);
   }
   const actionValues = actionCheckboxes(document)
     .map(({ dataset }) => dataset.binding ?? "");
   assert.ok(actionValues.length > 6);
   assert.deepEqual([...actionValues].sort(), runtimeBindings("selector"));
+});
+
+test("property inspector offers selector activation only in selector mode and safely clears it for paired", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-mode-switch", payload: { settings: expandDialPreset("agents") } })
+  );
+  sockets[0]?.open();
+  const press = field(document, "press");
+  assert.equal(press.value, "selector.activate");
+  assert.equal(press.options.some(({ value }) => value === "selector.activate"), true);
+
+  const rotationKind = field(document, "rotation-kind");
+  rotationKind.value = "paired";
+  rotationKind.dispatch("change");
+
+  assert.equal(press.options.some(({ value }) => value === "selector.activate"), false);
+  assert.equal(press.value, "none");
+  const payload = decodedMessages(sockets[0]!).at(-1)?.payload;
+  assert.deepEqual(payload, {
+    ...expandDialPreset("agents"),
+    customized: true,
+    rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
+    press: "none"
+  });
+  assert.deepEqual(normalizeDialSettings(payload), payload);
+
+  rotationKind.value = "selector";
+  rotationKind.dispatch("change");
+  assert.equal(press.options.some(({ value }) => value === "selector.activate"), true);
+  assert.equal(press.value, "none");
 });
 
 test("action selection cap is visible, reversible, and accessible", async () => {

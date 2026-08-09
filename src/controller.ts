@@ -17,6 +17,7 @@ import {
   deriveDialFeedback,
   dialBindingLabel,
   initialDialRuntimeState,
+  isDialTickCount,
   isDialBindingId,
   normalizeDialSettings,
   reconcileSelector,
@@ -97,6 +98,17 @@ const USER_ICON_ROOT = join(codexDeckStateRoot(), "icons");
 const LOCAL_MOBILE_CONFIG = "mobile-local-relay-server.json";
 const RESET_HOLD_MS = 1_200;
 const DIAL_SUCCESS_MS = 350;
+const MAX_DIAL_ERROR_DEDUPE = 100;
+
+function rememberDialError(errors: Set<string>, message: string): boolean {
+  if (errors.has(message)) return false;
+  if (errors.size >= MAX_DIAL_ERROR_DEDUPE) {
+    const oldest = errors.values().next().value as string | undefined;
+    if (oldest != null) errors.delete(oldest);
+  }
+  errors.add(message);
+  return true;
+}
 
 export class DeckController {
   private readonly microBridge = new CodexMicroRendererBridge((message) => streamDeck.logger.info(message));
@@ -344,7 +356,8 @@ export class DeckController {
     registration.pressed = undefined;
     if (!pressed) return;
     if (pressed.phase === "active" && pressed.lifecycle === "momentary") {
-      registration.queue.enqueue(() => this.releaseDialGesture(registration, pressed, false));
+      const release = () => this.releaseDialGesture(registration, pressed, false);
+      if (!registration.queue.enqueue(release)) registration.queue.enqueueCleanup(release);
     } else if (pressed.lifecycle === "hold") {
       pressed.phase = "canceled";
     }
@@ -358,6 +371,13 @@ export class DeckController {
   rotateDial(action: CodexDialAction, ticks: number): void {
     const registration = this.dials.get(action.id);
     if (!registration) return;
+    if (!isDialTickCount(ticks)) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial rotation ignored: invalid or excessive tick count.")
+      );
+      return;
+    }
     registration.settings = normalizeDialSettings(registration.settings);
     const reduced = reduceDialRotation(
       registration.settings,
@@ -368,6 +388,13 @@ export class DeckController {
     registration.state = reduced.state;
     if (registration.settings.rotation.kind === "selector") {
       void this.renderDialSafely(registration);
+    }
+    if (!registration.queue.canEnqueue(reduced.bindings.length)) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial rotation ignored: command queue is full.")
+      );
+      return;
     }
     const startedAt = Date.now();
     for (const binding of reduced.bindings) {
@@ -781,6 +808,7 @@ export class DeckController {
           threadKey: slot.threadKey,
           title: slot.title ?? `Agent ${slot.id + 1}`,
           status: slot.status,
+          health: this.healthForHost(slot.host).state,
           ...(showHostBadges
             ? { hostBadge: slot.host.platform === "darwin" ? "M" as const : "W" as const }
             : {}),
@@ -841,8 +869,7 @@ export class DeckController {
           await this.renderDial(registration);
         } catch (error) {
           const message = String(error);
-          if (!this.dialRenderErrors.has(message)) {
-            this.dialRenderErrors.add(message);
+          if (rememberDialError(this.dialRenderErrors, message)) {
             streamDeck.logger.error(`Codex dial feedback unavailable: ${message}`);
           }
         }
@@ -867,9 +894,9 @@ export class DeckController {
     const touch = dialBindingLabel(settings.touchTap);
     void action.setTriggerDescription({ rotate, push, touch }).catch((error) => {
       const message = String(error);
-      if (this.dialDescriptionErrors.has(message)) return;
-      this.dialDescriptionErrors.add(message);
-      streamDeck.logger.warn(`Codex dial trigger descriptions unavailable: ${message}`);
+      if (rememberDialError(this.dialDescriptionErrors, message)) {
+        streamDeck.logger.warn(`Codex dial trigger descriptions unavailable: ${message}`);
+      }
     });
   }
 
@@ -888,8 +915,7 @@ export class DeckController {
     } catch (error) {
       registration.successActive = false;
       const message = String(error);
-      if (!this.dialSuccessErrors.has(message)) {
-        this.dialSuccessErrors.add(message);
+      if (rememberDialError(this.dialSuccessErrors, message)) {
         streamDeck.logger.warn(`Codex dial success feedback unavailable: ${message}`);
       }
       registration.lastFeedback = undefined;
@@ -974,7 +1000,7 @@ export class DeckController {
   }
 
   private enqueueDialDown(registration: DialRegistration, gesture: DialGesture): void {
-    registration.queue.enqueue(async () => {
+    const accepted = registration.queue.enqueue(async () => {
       if (!this.isCurrentDialRegistration(registration)) {
         gesture.phase = "canceled";
         return;
@@ -1006,10 +1032,19 @@ export class DeckController {
         }
       }
     });
+    if (!accepted) {
+      gesture.phase = "failed";
+      if (this.isCurrentDialRegistration(registration)) {
+        void this.reportDialCommandError(
+          registration,
+          new Error("Dial press ignored: command queue is full.")
+        );
+      }
+    }
   }
 
   private enqueueDialUp(registration: DialRegistration, gesture: DialGesture): void {
-    registration.queue.enqueue(async () => {
+    const release = async (): Promise<void> => {
       if (gesture.phase !== "active") return;
       if (gesture.lifecycle === "hold") {
         gesture.phase = "releasing";
@@ -1039,11 +1074,25 @@ export class DeckController {
         gesture,
         this.isCurrentDialRegistration(registration)
       );
-    });
+    };
+    if (!registration.queue.enqueue(release)) {
+      if (gesture.lifecycle === "momentary") {
+        registration.queue.enqueueCleanup(release);
+      } else {
+        gesture.phase = "failed";
+        if (gesture.lifecycle === "hold") this.resetHolds.delete(registration.action.id);
+        if (this.isCurrentDialRegistration(registration)) {
+          void this.reportDialCommandError(
+            registration,
+            new Error("Dial release ignored: command queue is full.")
+          );
+        }
+      }
+    }
   }
 
   private enqueueDialTap(registration: DialRegistration, gesture: DialGesture): void {
-    registration.queue.enqueue(async () => {
+    const accepted = registration.queue.enqueue(async () => {
       if (!this.isCurrentDialRegistration(registration)) {
         gesture.phase = "canceled";
         return;
@@ -1075,6 +1124,15 @@ export class DeckController {
         }
       }
     });
+    if (!accepted) {
+      gesture.phase = "failed";
+      if (this.isCurrentDialRegistration(registration)) {
+        void this.reportDialCommandError(
+          registration,
+          new Error("Dial gesture ignored: command queue is full.")
+        );
+      }
+    }
   }
 
   private async releaseDialGesture(

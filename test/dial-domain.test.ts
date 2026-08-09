@@ -62,6 +62,7 @@ const RUNTIME_VIEW: DialRuntimeView = {
       threadKey: "thread-alpha",
       title: "Alpha task",
       status: "thinking",
+      health: "ready",
       contextUsedPercent: 42
     },
     {
@@ -69,7 +70,8 @@ const RUNTIME_VIEW: DialRuntimeView = {
       identity: "rollout-delta",
       threadKey: "thread-delta",
       title: "Delta task",
-      status: "idle"
+      status: "idle",
+      health: "ready"
     }
   ],
   actionLabels: {
@@ -114,6 +116,7 @@ test("serialized queue preserves every detent after async work", async () => {
   });
   await queue.idle();
   assert.deepEqual(seen, [1, 2, 3]);
+  assert.equal(queue.pendingCount, 0);
 });
 
 test("serialized queue recovers after a rejected operation", async () => {
@@ -123,6 +126,25 @@ test("serialized queue recovers after a rejected operation", async () => {
   queue.enqueue(async () => { seen.push("recovered"); });
   await queue.idle();
   assert.deepEqual(seen, ["failed", "recovered"]);
+  assert.equal(queue.pendingCount, 0);
+});
+
+test("serialized queue rejects backlog beyond its bounded pending capacity", async () => {
+  const queue = new DialCommandQueue();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  assert.equal(queue.enqueue(() => gate), true);
+  for (let index = 1; index < 128; index += 1) {
+    assert.equal(queue.enqueue(async () => {}), true, String(index));
+  }
+  assert.equal(queue.pendingCount, 128);
+  assert.equal(queue.enqueue(async () => {}), false);
+  release();
+  await queue.idle();
+  assert.equal(queue.pendingCount, 0);
+  assert.equal(queue.enqueue(async () => {}), true, "capacity recovers after the backlog drains");
+  await queue.idle();
+  assert.equal(queue.pendingCount, 0);
 });
 
 test("runtime selectors expose occupied agents, exact usage choices, and ordered safe actions", () => {
@@ -182,22 +204,45 @@ test("selector reconciliation preserves stable identity across reorder and handl
   assert.deepEqual(reconcileSelector(initialDialRuntimeState(), original), {
     usageMode: "auto",
     usageOverview: false,
-    selectedId: "rollout-alpha"
+    selectedId: "rollout-alpha",
+    selectedIndex: 0
   });
 
   const selectedDelta = {
     ...initialDialRuntimeState(),
-    selectedId: "rollout-delta"
+    selectedId: "rollout-delta",
+    selectedIndex: 1
   };
   const reordered = selectorItems(expandDialPreset("agents"), {
     ...RUNTIME_VIEW,
     agents: [...RUNTIME_VIEW.agents].reverse()
   });
-  assert.equal(reconcileSelector(selectedDelta, reordered).selectedId, "rollout-delta");
-  assert.equal(reconcileSelector(selectedDelta, original.slice(0, 1)).selectedId, "rollout-alpha");
+  assert.deepEqual(reconcileSelector(selectedDelta, reordered), {
+    ...selectedDelta,
+    selectedIndex: 0
+  });
+  assert.deepEqual(reconcileSelector(selectedDelta, original.slice(0, 1)), {
+    ...selectedDelta,
+    selectedId: "rollout-alpha",
+    selectedIndex: 0
+  });
   assert.deepEqual(reconcileSelector(selectedDelta, []), {
     usageMode: "auto",
-    usageOverview: false
+    usageOverview: false,
+    selectedIndex: 1
+  });
+
+  const three = [
+    { id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C" }
+  ];
+  const selectedMiddle = reconcileSelector(
+    { ...initialDialRuntimeState(), selectedId: "b" }, three
+  );
+  assert.equal(selectedMiddle.selectedIndex, 1);
+  assert.deepEqual(reconcileSelector(selectedMiddle, [three[0]!, three[2]!]), {
+    ...selectedMiddle,
+    selectedId: "c",
+    selectedIndex: 1
   });
 });
 
@@ -231,24 +276,24 @@ test("paired rotation emits one binding for every physical detent in both direct
     state,
     bindings: ["reasoning.increase", "reasoning.increase"]
   });
-  assert.equal(reduceDialRotation(settings, state, RUNTIME_VIEW, 1_001).bindings.length, 1_001);
+  assert.deepEqual(reduceDialRotation(settings, state, RUNTIME_VIEW, 65).bindings, []);
 });
 
 test("rotation accepts the full physical event range and rejects impossible counts", () => {
   const reasoning = expandDialPreset("reasoning");
   const state = initialDialRuntimeState();
-  const clockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, 4_096);
-  assert.equal(clockwise.bindings.length, 4_096);
+  const clockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, 64);
+  assert.equal(clockwise.bindings.length, 64);
   assert.equal(clockwise.bindings[0], "reasoning.increase");
   assert.equal(clockwise.bindings.at(-1), "reasoning.increase");
-  const counterClockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, -4_096);
-  assert.equal(counterClockwise.bindings.length, 4_096);
+  const counterClockwise = reduceDialRotation(reasoning, state, RUNTIME_VIEW, -64);
+  assert.equal(counterClockwise.bindings.length, 64);
   assert.equal(counterClockwise.bindings[0], "reasoning.decrease");
   assert.equal(counterClockwise.bindings.at(-1), "reasoning.decrease");
 
   for (const ticks of [
-    4_097,
-    -4_097,
+    65,
+    -65,
     Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER + 1
   ]) {
@@ -259,11 +304,11 @@ test("rotation accepts the full physical event range and rejects impossible coun
 
   const usage = expandDialPreset("usage");
   assert.equal(
-    reduceDialRotation(usage, state, RUNTIME_VIEW, 4_096).state.selectedId,
+    reduceDialRotation(usage, state, RUNTIME_VIEW, 64).state.selectedId,
     "five-hour"
   );
   assert.equal(
-    reduceDialRotation(usage, state, RUNTIME_VIEW, -4_096).state.selectedId,
+    reduceDialRotation(usage, state, RUNTIME_VIEW, -64).state.selectedId,
     "weekly"
   );
   const hugeSelector = reduceDialRotation(usage, state, RUNTIME_VIEW, Number.MAX_SAFE_INTEGER);
@@ -282,6 +327,7 @@ test("selector rotation previews without dispatch and wraps or clamps as configu
   assert.deepEqual(wrapped.bindings, []);
   assert.deepEqual(wrapped.state, {
     selectedId: "auto",
+    selectedIndex: 0,
     usageMode: "auto",
     usageOverview: false
   });
@@ -291,7 +337,7 @@ test("selector rotation previews without dispatch and wraps or clamps as configu
     rotation: { kind: "selector", source: "usage", wrap: false, items: [] }
   });
   assert.deepEqual(reduceDialRotation(clampedSettings, weekly, RUNTIME_VIEW, 3), {
-    state: weekly,
+    state: { ...weekly, selectedIndex: 2 },
     bindings: []
   });
   assert.equal(
@@ -363,6 +409,26 @@ test("agent and action feedback use reconciled selections and bounded live label
     indicator: 42,
     accent: "#1683FF"
   });
+  assert.deepEqual(deriveDialFeedback(
+    expandDialPreset("agents"),
+    agentState,
+    {
+      ...RUNTIME_VIEW,
+      health: "ready",
+      agents: [{ ...RUNTIME_VIEW.agents[0]!, health: "offline" }]
+    }
+  ), {
+    title: "AGENT 1",
+    value: "OFFLINE",
+    detail: "LIVE DATA UNAVAILABLE",
+    indicator: 0,
+    accent: "#FF4B61"
+  });
+  assert.equal(deriveDialFeedback(
+    expandDialPreset("agents"),
+    agentState,
+    { ...RUNTIME_VIEW, health: "offline" }
+  ).value, "ALPHA TASK");
 
   const settings = actionSelector(["keycap.FAST", "micro.ACT06"]);
   assert.deepEqual(deriveDialFeedback(settings, initialDialRuntimeState(), RUNTIME_VIEW), {
@@ -439,7 +505,8 @@ test("zero-based agents use one-based display numbers and nonblank text fallback
       identity: "blank-agent",
       threadKey: "thread-blank",
       title: "   ",
-      status: "\n\t"
+      status: "\n\t",
+      health: "ready"
     }]
   };
   assert.deepEqual(selectorItems(expandDialPreset("agents"), blankAgentView), [{
