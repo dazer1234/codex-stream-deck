@@ -55,20 +55,44 @@ type UsageLimitRegistration = { action: KeyAction; mode: UsageLimitMode };
 type ActionIdentity = { id: string };
 type ContextRingSettings = { showContextRings?: boolean };
 type CodexDialAction = DialAction<CodexDialSettings>;
+type DialHostRoute = { kind: "host"; hostId?: string; platform: ControlTarget };
+type DialAgentRoute = {
+  kind: "agent";
+  globalSlot: number;
+  assignment: RoutedAgentSlot;
+  identity: string;
+};
+type DialInvalidAgentRoute = { kind: "invalid-agent" };
+type DialRoute = DialHostRoute | DialAgentRoute | DialInvalidAgentRoute;
+type DialGesturePhase = "pending" | "active" | "completed" | "failed" | "releasing" | "released" | "canceled";
+type DialGesture = {
+  binding: DialBindingId;
+  route: DialRoute;
+  lifecycle: ReturnType<typeof bindingLifecycle>;
+  startedAt: number;
+  endedAt?: number;
+  phase: DialGesturePhase;
+};
 type DialRegistration = {
   action: CodexDialAction;
   settings: CodexDialSettings;
   state: DialRuntimeState;
   queue: DialCommandQueue;
-  pressed?: { binding: DialBindingId; item?: DialSelectorItem };
+  generation: number;
+  disposed: boolean;
+  pressed?: DialGesture;
   lastFeedback?: string;
   renderAgain?: boolean;
   rendering?: Promise<void>;
+  successActive?: boolean;
+  successTimer?: NodeJS.Timeout;
 };
+type ResetHold = { startedAt: number; sourceHostId?: string };
 
 const USER_ICON_ROOT = join(codexDeckStateRoot(), "icons");
 const LOCAL_MOBILE_CONFIG = "mobile-local-relay-server.json";
 const RESET_HOLD_MS = 1_200;
+const DIAL_SUCCESS_MS = 350;
 
 export class DeckController {
   private readonly microBridge = new CodexMicroRendererBridge((message) => streamDeck.logger.info(message));
@@ -82,7 +106,7 @@ export class DeckController {
   private readonly usageOverviewActions = new Map<string, KeyAction>();
   private readonly rateLimitResetActions = new Map<string, KeyAction>();
   private readonly dials = new Map<string, DialRegistration>();
-  private readonly resetHolds = new Map<string, number>();
+  private readonly resetHolds = new Map<string, ResetHold>();
   private readonly dialDescriptionErrors = new Set<string>();
   private readonly dialRenderErrors = new Set<string>();
   private readonly activityIndex = new HostActivityIndex();
@@ -110,6 +134,7 @@ export class DeckController {
   private lastAgentSourceSignature = "";
   private lastHostHealthSignature = "";
   private showContextRings = true;
+  private nextDialGeneration = 0;
 
   async start(): Promise<void> {
     this.stopped = false;
@@ -254,11 +279,15 @@ export class DeckController {
   }
 
   registerDial(action: CodexDialAction, input: unknown): void {
+    const prior = this.dials.get(action.id);
+    if (prior) this.disposeDialRegistration(prior);
     const registration: DialRegistration = {
       action,
       settings: normalizeDialSettings(input),
       state: initialDialRuntimeState(),
-      queue: new DialCommandQueue()
+      queue: new DialCommandQueue(),
+      generation: ++this.nextDialGeneration,
+      disposed: false
     };
     this.dials.set(action.id, registration);
     this.updateDialDescription(registration);
@@ -267,12 +296,18 @@ export class DeckController {
 
   updateDialSettings(action: CodexDialAction, input: unknown): void {
     const settings = normalizeDialSettings(input);
-    const existing = this.dials.get(action.id);
+    let existing = this.dials.get(action.id);
+    if (existing && existing.action !== action) {
+      this.disposeDialRegistration(existing);
+      existing = undefined;
+    }
     const registration: DialRegistration = existing ?? {
       action,
       settings,
       state: initialDialRuntimeState(),
-      queue: new DialCommandQueue()
+      queue: new DialCommandQueue(),
+      generation: ++this.nextDialGeneration,
+      disposed: false
     };
     registration.action = action;
     registration.settings = settings;
@@ -282,8 +317,36 @@ export class DeckController {
   }
 
   unregisterDial(action: ActionIdentity): void {
-    this.dials.delete(action.id);
-    this.resetHolds.delete(action.id);
+    const registration = this.dials.get(action.id);
+    if (!registration || registration.action !== action) return;
+    this.disposeDialRegistration(registration);
+  }
+
+  private disposeDialRegistration(registration: DialRegistration): void {
+    if (registration.disposed) return;
+    registration.disposed = true;
+    registration.generation = -Math.abs(registration.generation);
+    registration.renderAgain = false;
+    if (registration.successTimer) clearTimeout(registration.successTimer);
+    registration.successActive = false;
+    registration.successTimer = undefined;
+    this.resetHolds.delete(registration.action.id);
+    if (this.dials.get(registration.action.id) === registration) {
+      this.dials.delete(registration.action.id);
+    }
+    const pressed = registration.pressed;
+    registration.pressed = undefined;
+    if (!pressed) return;
+    if (pressed.phase === "active" && pressed.lifecycle === "momentary") {
+      registration.queue.enqueue(() => this.releaseDialGesture(registration, pressed, false));
+    } else if (pressed.lifecycle === "hold") {
+      pressed.phase = "canceled";
+    }
+  }
+
+  private isCurrentDialRegistration(registration: DialRegistration): boolean {
+    return !registration.disposed && registration.generation > 0 &&
+      this.dials.get(registration.action.id) === registration;
   }
 
   rotateDial(action: CodexDialAction, ticks: number): void {
@@ -300,8 +363,10 @@ export class DeckController {
     if (registration.settings.rotation.kind === "selector") {
       void this.renderDialSafely(registration);
     }
+    const startedAt = Date.now();
     for (const binding of reduced.bindings) {
-      this.enqueueDialCommand(registration, () => this.dispatchDialTap(registration, binding));
+      const gesture = this.captureDialGesture(registration, binding, undefined, startedAt);
+      this.enqueueDialTap(registration, gesture);
     }
   }
 
@@ -310,12 +375,9 @@ export class DeckController {
     if (!registration) return Promise.resolve();
     if (registration.pressed) return registration.queue.idle();
     registration.settings = normalizeDialSettings(registration.settings);
-    const pressed = this.resolveDialPress(registration);
+    const pressed = this.resolveDialPress(registration, Date.now());
     registration.pressed = pressed;
-    this.enqueueDialCommand(
-      registration,
-      () => this.dispatchDialDown(registration, pressed.binding, pressed.item)
-    );
+    this.enqueueDialDown(registration, pressed);
     return registration.queue.idle();
   }
 
@@ -325,10 +387,8 @@ export class DeckController {
     const pressed = registration.pressed;
     registration.pressed = undefined;
     if (!pressed) return registration.queue.idle();
-    this.enqueueDialCommand(
-      registration,
-      () => this.dispatchDialUp(registration, pressed.binding, pressed.item)
-    );
+    pressed.endedAt = Date.now();
+    this.enqueueDialUp(registration, pressed);
     return registration.queue.idle();
   }
 
@@ -336,8 +396,13 @@ export class DeckController {
     const registration = this.dials.get(action.id);
     if (!registration) return Promise.resolve();
     registration.settings = normalizeDialSettings(registration.settings);
-    const binding = registration.settings.touchTap;
-    this.enqueueDialCommand(registration, () => this.dispatchDialTap(registration, binding));
+    const gesture = this.captureDialGesture(
+      registration,
+      registration.settings.touchTap,
+      undefined,
+      Date.now()
+    );
+    this.enqueueDialTap(registration, gesture);
     return registration.queue.idle();
   }
 
@@ -376,23 +441,49 @@ export class DeckController {
     this.unregister(action, this.rateLimitResetActions);
   }
 
-  beginRateLimitReset(action: ActionIdentity): void {
-    this.resetHolds.set(action.id, Date.now());
+  beginRateLimitReset(
+    action: ActionIdentity,
+    startedAt = Date.now(),
+    sourceHostId?: string
+  ): void {
+    this.resetHolds.set(action.id, {
+      startedAt,
+      ...(sourceHostId == null ? {} : { sourceHostId })
+    });
     const registered = this.rateLimitResetActions.get(action.id);
     if (registered) void this.renderRateLimitReset(registered);
   }
 
-  async finishRateLimitReset(action: ActionIdentity): Promise<boolean> {
-    const startedAt = this.resetHolds.get(action.id);
+  async finishRateLimitReset(
+    action: ActionIdentity,
+    endedAt = Date.now(),
+    sourceHostId?: string
+  ): Promise<boolean> {
+    const hold = this.resetHolds.get(action.id);
     this.resetHolds.delete(action.id);
     const registered = this.rateLimitResetActions.get(action.id);
     if (registered) await this.renderRateLimitReset(registered);
-    if (startedAt == null || Date.now() - startedAt < RESET_HOLD_MS) return false;
-    const source = this.accountUsageSource();
+    if (hold == null || endedAt - hold.startedAt < RESET_HOLD_MS) return false;
+    const capturedHostId = sourceHostId ?? hold.sourceHostId;
+    const source = capturedHostId == null
+      ? this.accountUsageSource()
+      : this.accountUsageSourceForHost(capturedHostId);
     const usage = source.snapshot?.usage;
     if ((usage?.resetCreditsAvailable ?? 0) <= 0) throw new Error("No rate-limit reset credit is available.");
     if (usage?.resetCreditsApplicable === 0) throw new Error("No rate-limit reset credit is currently applicable.");
-    await this.sendToHost(source.hostId, { kind: "rate-limit-reset" }, () => this.microBridge.consumeRateLimitReset());
+    if (capturedHostId == null) {
+      await this.sendToHost(
+        source.hostId,
+        { kind: "rate-limit-reset" },
+        () => this.microBridge.consumeRateLimitReset()
+      );
+    } else {
+      await this.sendDialToHost(
+        this.hostRoute(capturedHostId),
+        { kind: "rate-limit-reset" },
+        () => this.microBridge.consumeRateLimitReset()
+      );
+    }
     await this.refresh();
     return true;
   }
@@ -419,11 +510,19 @@ export class DeckController {
     if (expectedThreadKey != null && assignment.threadKey !== expectedThreadKey) {
       throw new Error("The selected Codex task no longer matches the highlighted task.");
     }
-    if (act === 1) this.pressedAgents.set(slot, assignment);
-    else this.pressedAgents.delete(slot);
-    if (assignment.host.hostId === this.localHost?.hostId) {
-      await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
-    } else await this.sendRemote({ kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act });
+    if (act === 1) this.pressedAgents.delete(slot);
+    try {
+      if (assignment.host.hostId === this.localHost?.hostId) {
+        await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
+      } else {
+        await this.sendRemote({
+          kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act
+        });
+      }
+      if (act === 1) this.pressedAgents.set(slot, assignment);
+    } finally {
+      if (act === 0) this.pressedAgents.delete(slot);
+    }
     if (act === 0) void this.refresh();
   }
 
@@ -644,6 +743,7 @@ export class DeckController {
   }
 
   private async renderDial(registration: DialRegistration): Promise<void> {
+    if (!this.isCurrentDialRegistration(registration) || registration.successActive) return;
     registration.settings = normalizeDialSettings(registration.settings);
     const view = this.dialRuntimeView(registration.settings, registration.state);
     if (registration.settings.rotation.kind === "selector") {
@@ -655,6 +755,7 @@ export class DeckController {
     const feedback = deriveDialFeedback(registration.settings, registration.state, view);
     const signature = JSON.stringify(feedback);
     if (registration.lastFeedback === signature) return;
+    if (!this.isCurrentDialRegistration(registration)) return;
     await registration.action.setFeedback({
       title: feedback.title,
       value: feedback.value,
@@ -662,10 +763,11 @@ export class DeckController {
       indicator: feedback.indicator,
       accent: { value: 100, bar_fill_c: feedback.accent }
     });
-    registration.lastFeedback = signature;
+    if (this.isCurrentDialRegistration(registration)) registration.lastFeedback = signature;
   }
 
   private async renderDialSafely(registration: DialRegistration): Promise<void> {
+    if (!this.isCurrentDialRegistration(registration)) return;
     if (registration.rendering) {
       registration.renderAgain = true;
       await registration.rendering;
@@ -683,16 +785,21 @@ export class DeckController {
             streamDeck.logger.error(`Codex dial feedback unavailable: ${message}`);
           }
         }
-      } while (registration.renderAgain);
+      } while (registration.renderAgain && this.isCurrentDialRegistration(registration));
     })();
     registration.rendering = rendering;
     try { await rendering; }
     finally {
       if (registration.rendering === rendering) registration.rendering = undefined;
+      if (registration.disposed) {
+        const current = this.dials.get(registration.action.id);
+        if (current && current !== registration) void this.renderDialSafely(current);
+      }
     }
   }
 
   private updateDialDescription(registration: DialRegistration): void {
+    if (!this.isCurrentDialRegistration(registration)) return;
     const { settings, action } = registration;
     const rotate = settings.rotation.kind === "paired" ? "Adjust" : "Select";
     const push = dialBindingLabel(settings.press);
@@ -705,109 +812,256 @@ export class DeckController {
     });
   }
 
-  private resolveDialPress(
-    registration: DialRegistration
-  ): { binding: DialBindingId; item?: DialSelectorItem } {
+  private async showDialSuccess(registration: DialRegistration): Promise<void> {
+    if (!this.isCurrentDialRegistration(registration)) return;
+    if (registration.successTimer) clearTimeout(registration.successTimer);
+    registration.successActive = true;
+    try {
+      await registration.action.setFeedback({
+        title: "RATE LIMIT",
+        value: "RESET COMPLETE",
+        detail: "CREDIT APPLIED",
+        indicator: 100,
+        accent: { value: 100, bar_fill_c: "#35D86B" }
+      });
+    } catch (error) {
+      registration.successActive = false;
+      throw error;
+    }
+    if (!this.isCurrentDialRegistration(registration)) return;
+    registration.successTimer = setTimeout(() => {
+      if (!this.isCurrentDialRegistration(registration)) return;
+      registration.successTimer = undefined;
+      registration.successActive = false;
+      registration.lastFeedback = undefined;
+      void this.renderDialSafely(registration);
+    }, DIAL_SUCCESS_MS);
+  }
+
+  private resolveDialPress(registration: DialRegistration, startedAt: number): DialGesture {
     const binding = registration.settings.press;
-    if (binding !== "selector.activate") return { binding };
+    if (binding !== "selector.activate") {
+      return this.captureDialGesture(registration, binding, undefined, startedAt);
+    }
     const item = selectedItem(
       registration.settings,
       registration.state,
       this.dialRuntimeView(registration.settings, registration.state)
     );
-    return item ? { binding, item } : { binding };
+    return this.captureDialGesture(registration, binding, item, startedAt);
   }
 
-  private enqueueDialCommand(
+  private captureDialGesture(
     registration: DialRegistration,
-    operation: () => Promise<void>
-  ): void {
+    requestedBinding: DialBindingId,
+    item: DialSelectorItem | undefined,
+    startedAt: number
+  ): DialGesture {
+    let binding = requestedBinding;
+    let route: DialRoute;
+    if (binding === "selector.activate") {
+      if (item?.agentSlot != null && item.threadKey) {
+        const assignment = this.routedSlots[item.agentSlot];
+        const identity = assignment?.threadKey
+          ? `${assignment.host.hostId}:${assignment.threadKey}`
+          : undefined;
+        route = assignment && identity === item.id
+          ? {
+              kind: "agent",
+              globalSlot: item.agentSlot,
+              assignment: {
+                ...assignment,
+                host: { ...assignment.host }
+              },
+              identity
+            }
+          : { kind: "invalid-agent" };
+      } else if (item?.binding && isDialBindingId(item.binding, "selector")) {
+        binding = item.binding;
+        route = this.captureDialHostRoute(binding);
+      } else {
+        route = { kind: "invalid-agent" };
+      }
+    } else {
+      route = this.captureDialHostRoute(binding);
+    }
+    return {
+      binding,
+      route,
+      lifecycle: route.kind === "agent" ? "momentary" : bindingLifecycle(binding),
+      startedAt,
+      phase: "pending"
+    };
+  }
+
+  private captureDialHostRoute(binding: DialBindingId): DialHostRoute {
+    if (binding === "usage.refresh" || binding === "usage.rate-limit-reset") {
+      const source = this.accountUsageSource();
+      return this.hostRoute(source.hostId);
+    }
+    return {
+      kind: "host",
+      hostId: this.targetHostId,
+      platform: this.targetPlatform
+    };
+  }
+
+  private enqueueDialDown(registration: DialRegistration, gesture: DialGesture): void {
     registration.queue.enqueue(async () => {
+      if (!this.isCurrentDialRegistration(registration)) {
+        gesture.phase = "canceled";
+        return;
+      }
       try {
-        await operation();
+        if (gesture.lifecycle === "hold") {
+          const sourceHostId = gesture.route.kind === "host" ? gesture.route.hostId : undefined;
+          this.beginRateLimitReset(registration.action, gesture.startedAt, sourceHostId);
+          gesture.phase = "active";
+          return;
+        }
+        await this.dispatchDialGesture(registration, gesture, 1);
+        if (gesture.lifecycle !== "momentary") {
+          gesture.phase = "completed";
+          return;
+        }
+        gesture.phase = "active";
+        if (!this.isCurrentDialRegistration(registration)) {
+          await this.releaseDialGesture(
+            registration,
+            gesture,
+            this.isCurrentDialRegistration(registration)
+          );
+        }
       } catch (error) {
-        streamDeck.logger.error(`Codex dial command failed (${registration.action.id}): ${String(error)}`);
-        try { await registration.action.showAlert(); }
-        catch (alertError) {
-          streamDeck.logger.error(`Codex dial alert failed (${registration.action.id}): ${String(alertError)}`);
+        gesture.phase = "failed";
+        if (this.isCurrentDialRegistration(registration)) {
+          await this.reportDialCommandError(registration, error);
         }
       }
     });
   }
 
-  private async dispatchDialTap(
-    registration: DialRegistration,
-    binding: DialBindingId,
-    item?: DialSelectorItem
-  ): Promise<void> {
-    const lifecycle = bindingLifecycle(binding);
-    if (lifecycle === "momentary" || binding === "selector.activate") {
-      await this.dispatchDialBinding(registration, binding, 1, item);
-      await this.dispatchDialBinding(registration, binding, 0, item);
-      return;
-    }
-    if (lifecycle === "hold") throw new Error("Rate-limit reset requires a dial press and hold.");
-    await this.dispatchDialBinding(registration, binding, 1, item);
-  }
-
-  private async dispatchDialDown(
-    registration: DialRegistration,
-    binding: DialBindingId,
-    item?: DialSelectorItem
-  ): Promise<void> {
-    if (bindingLifecycle(binding) === "hold") {
-      this.beginRateLimitReset(registration.action);
-      return;
-    }
-    await this.dispatchDialBinding(registration, binding, 1, item);
-  }
-
-  private async dispatchDialUp(
-    registration: DialRegistration,
-    binding: DialBindingId,
-    item?: DialSelectorItem
-  ): Promise<void> {
-    if (bindingLifecycle(binding) === "hold") {
-      const reset = await this.finishRateLimitReset(registration.action);
-      if (reset) {
-        const action = registration.action as CodexDialAction & {
-          showOk?: () => Promise<void>;
-        };
-        await action.showOk?.();
+  private enqueueDialUp(registration: DialRegistration, gesture: DialGesture): void {
+    registration.queue.enqueue(async () => {
+      if (gesture.phase !== "active") return;
+      if (gesture.lifecycle === "hold") {
+        gesture.phase = "releasing";
+        try {
+          const sourceHostId = gesture.route.kind === "host" ? gesture.route.hostId : undefined;
+          const reset = await this.finishRateLimitReset(
+            registration.action,
+            gesture.endedAt ?? gesture.startedAt,
+            sourceHostId
+          );
+          gesture.phase = "released";
+          if (reset && this.isCurrentDialRegistration(registration)) {
+            await this.showDialSuccess(registration);
+          }
+        } catch (error) {
+          gesture.phase = "released";
+          if (this.isCurrentDialRegistration(registration)) {
+            await this.reportDialCommandError(registration, error);
+          }
+        }
+        return;
       }
-      return;
-    }
-    if (bindingLifecycle(binding) === "momentary" || binding === "selector.activate") {
-      await this.dispatchDialBinding(registration, binding, 0, item);
+      await this.releaseDialGesture(
+        registration,
+        gesture,
+        this.isCurrentDialRegistration(registration)
+      );
+    });
+  }
+
+  private enqueueDialTap(registration: DialRegistration, gesture: DialGesture): void {
+    registration.queue.enqueue(async () => {
+      if (!this.isCurrentDialRegistration(registration)) {
+        gesture.phase = "canceled";
+        return;
+      }
+      if (gesture.lifecycle === "hold") {
+        gesture.phase = "failed";
+        await this.reportDialCommandError(
+          registration,
+          new Error("Rate-limit reset requires a dial press and hold.")
+        );
+        return;
+      }
+      try {
+        await this.dispatchDialGesture(registration, gesture, 1);
+        if (gesture.lifecycle === "momentary") {
+          gesture.phase = "active";
+          await this.releaseDialGesture(
+            registration,
+            gesture,
+            this.isCurrentDialRegistration(registration)
+          );
+        } else {
+          gesture.phase = "completed";
+        }
+      } catch (error) {
+        if (gesture.phase !== "released") gesture.phase = "failed";
+        if (this.isCurrentDialRegistration(registration)) {
+          await this.reportDialCommandError(registration, error);
+        }
+      }
+    });
+  }
+
+  private async releaseDialGesture(
+    registration: DialRegistration,
+    gesture: DialGesture,
+    reportFailure: boolean
+  ): Promise<void> {
+    if (gesture.phase !== "active") return;
+    gesture.phase = "releasing";
+    try {
+      await this.dispatchDialGesture(registration, gesture, 0);
+    } catch (error) {
+      if (reportFailure) await this.reportDialCommandError(registration, error);
+    } finally {
+      gesture.phase = "released";
     }
   }
 
-  private async dispatchDialBinding(
+  private async dispatchDialGesture(
     registration: DialRegistration,
-    binding: DialBindingId,
-    act: 0 | 1,
-    item?: DialSelectorItem
+    gesture: DialGesture,
+    act: 0 | 1
   ): Promise<void> {
+    const { binding, route } = gesture;
     if (!isDialBindingId(binding, "press")) throw new Error("Unsupported Codex dial binding.");
     if (binding === "none") return;
-    if (binding === "selector.activate") {
-      if (item?.agentSlot != null && item.threadKey) {
-        await this.sendAgent(item.agentSlot, act, item.threadKey);
-        return;
-      }
-      if (item?.binding && isDialBindingId(item.binding, "selector")) {
-        await this.dispatchDialBinding(registration, item.binding, act);
-        return;
-      }
-      throw new Error("No Codex dial selection is available.");
+    if (route.kind === "invalid-agent") throw new Error("No Codex dial selection is available.");
+    if (route.kind === "agent") {
+      await this.sendDialAgent(route, act);
+      return;
     }
     const lifecycle = bindingLifecycle(binding);
     if (act === 0 && lifecycle !== "momentary") return;
-    if (binding === "reasoning.decrease") return this.adjustReasoning("decrease");
-    if (binding === "reasoning.increase") return this.adjustReasoning("increase");
-    if (binding === "new-task") return this.createTask();
+    if (binding === "reasoning.decrease") {
+      return this.sendDialToHost(
+        route,
+        { kind: "reasoning", direction: "decrease" },
+        () => this.microBridge.adjustReasoning("decrease")
+      );
+    }
+    if (binding === "reasoning.increase") {
+      return this.sendDialToHost(
+        route,
+        { kind: "reasoning", direction: "increase" },
+        () => this.microBridge.adjustReasoning("increase")
+      );
+    }
+    if (binding === "new-task") {
+      return this.sendDialToHost(
+        route,
+        { kind: "keycap", keycapId: "NEW" },
+        () => openCodexThread("new")
+      );
+    }
     if (binding === "host.toggle") return this.toggleTargetHost();
-    if (binding === "usage.refresh") return this.refreshUsage();
+    if (binding === "usage.refresh") return this.refreshDialUsage(route);
     if (binding === "usage.toggle-overview") {
       registration.state = {
         ...registration.state,
@@ -820,15 +1074,111 @@ export class DeckController {
       throw new Error("Rate-limit reset requires a dial press and hold.");
     }
     if (binding.startsWith("micro.")) {
-      return this.sendMicroAction(binding.slice(6) as MicroActionSlot, act);
+      const slot = binding.slice(6) as MicroActionSlot;
+      return this.sendDialToHost(
+        route,
+        { kind: "action", slot, act },
+        () => this.microBridge.sendAction(slot, act)
+      );
     }
     if (binding.startsWith("joystick.")) {
-      return this.sendJoystick(binding.slice(9) as MicroDirection, act);
+      const direction = binding.slice(9) as MicroDirection;
+      return this.sendDialToHost(
+        route,
+        { kind: "joystick", direction, distance: act },
+        () => this.microBridge.sendJoystick(direction, act)
+      );
     }
     if (binding.startsWith("keycap.") && act === 1) {
-      return this.runKeycap(binding.slice(7) as OfficialKeycapId);
+      const keycapId = binding.slice(7) as OfficialKeycapId;
+      return this.sendDialToHost(
+        route,
+        { kind: "keycap", keycapId },
+        () => this.microBridge.runKeycap(keycapId)
+      );
     }
     throw new Error("Unsupported Codex dial binding.");
+  }
+
+  private async sendDialAgent(route: DialAgentRoute, act: 0 | 1): Promise<void> {
+    if (act === 1) {
+      const current = this.routedSlots[route.globalSlot];
+      const currentIdentity = current?.threadKey
+        ? `${current.host.hostId}:${current.threadKey}`
+        : undefined;
+      if (currentIdentity !== route.identity || current?.sourceSlot !== route.assignment.sourceSlot) {
+        throw new Error("The selected Codex task no longer matches the highlighted host and task.");
+      }
+    }
+    const { assignment } = route;
+    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
+    if (assignment.host.hostId === this.localHost?.hostId) {
+      await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
+      return;
+    }
+    const remote = this.relayClient?.currentHost();
+    if (remote?.hostId !== assignment.host.hostId) {
+      throw new Error("The captured Codex agent host is no longer connected.");
+    }
+    await this.sendRemote({
+      kind: "agent",
+      slot: assignment.sourceSlot,
+      threadKey: assignment.threadKey,
+      act
+    });
+  }
+
+  private async sendDialToHost(
+    route: DialHostRoute,
+    command: RelayCommand,
+    local: () => Promise<void>
+  ): Promise<void> {
+    const localHost = this.localHost;
+    const localRequested = route.hostId != null
+      ? route.hostId === localHost?.hostId
+      : route.platform === localHost?.platform;
+    if (localRequested) {
+      await local();
+      return;
+    }
+    const remote = this.relayClient?.currentHost();
+    if (!remote || (route.hostId != null
+      ? remote.hostId !== route.hostId
+      : remote.platform !== route.platform)) {
+      throw new Error("The captured Codex host is no longer connected.");
+    }
+    await this.sendRemote(command);
+  }
+
+  private async refreshDialUsage(route: DialHostRoute): Promise<void> {
+    const localRequested = route.hostId != null
+      ? route.hostId === this.localHost?.hostId
+      : route.platform === this.localHost?.platform;
+    if (localRequested) {
+      await this.refreshLocalUsage();
+      return;
+    }
+    const remote = this.relayClient?.currentHost();
+    if (!remote || (route.hostId != null
+      ? remote.hostId !== route.hostId
+      : remote.platform !== route.platform)) {
+      throw new Error("The captured Codex usage host is no longer connected.");
+    }
+    if (!this.relayClient?.supportsCapabilityForSnapshot("usage-refresh", remote.hostId)) {
+      throw new Error("Remote Codex host does not support usage refresh.");
+    }
+    await this.relayClient.send({ kind: "usage-refresh" });
+  }
+
+  private async reportDialCommandError(
+    registration: DialRegistration,
+    error: unknown
+  ): Promise<void> {
+    streamDeck.logger.error(`Codex dial command failed (${registration.action.id}): ${String(error)}`);
+    try { await registration.action.showAlert(); }
+    catch (alertError) {
+      streamDeck.logger.error(`Codex dial alert failed (${registration.action.id}): ${String(alertError)}`);
+    }
   }
 
   private async renderAgent({ action, slot }: AgentRegistration): Promise<void> {
@@ -896,8 +1246,10 @@ export class DeckController {
   private async renderRateLimitReset(action: KeyAction): Promise<void> {
     const source = this.accountUsageSource();
     const snapshot = source.snapshot;
-    const startedAt = this.resetHolds.get(action.id);
-    const progress = startedAt == null ? 0 : Math.min(1, (Date.now() - startedAt) / RESET_HOLD_MS);
+    const hold = this.resetHolds.get(action.id);
+    const progress = hold == null
+      ? 0
+      : Math.min(1, (Date.now() - hold.startedAt) / RESET_HOLD_MS);
     await this.setImage(action, renderRateLimitResetKey(
       snapshot?.usage?.resetCreditsAvailable ?? null,
       progress,
@@ -943,6 +1295,41 @@ export class DeckController {
       snapshot: remoteSnapshot.snapshot
     } : undefined;
     return selectAccountUsageSource(local, remote);
+  }
+
+  private accountUsageSourceForHost(hostId: string): AccountUsageSource {
+    if (hostId === this.localHost?.hostId) {
+      return {
+        health: this.localHealth,
+        hostId,
+        snapshot: this.localSnapshot?.snapshot
+      };
+    }
+    const remoteSnapshot = this.relayClient?.currentSnapshot();
+    if (remoteSnapshot?.host.hostId === hostId) {
+      return {
+        health: this.relayClient?.currentHealth() ?? {
+          state: "offline", reason: "relay-disconnected", changedAt: Date.now()
+        },
+        hostId,
+        snapshot: remoteSnapshot.snapshot
+      };
+    }
+    return {
+      health: { state: "offline", reason: "relay-disconnected", changedAt: Date.now() },
+      hostId
+    };
+  }
+
+  private hostRoute(hostId: string | undefined): DialHostRoute {
+    if (hostId != null && hostId === this.localHost?.hostId) {
+      return { kind: "host", hostId, platform: this.localHost.platform };
+    }
+    const remote = this.relayClient?.currentHost();
+    if (hostId != null && hostId === remote?.hostId) {
+      return { kind: "host", hostId, platform: remote.platform };
+    }
+    return { kind: "host", hostId, platform: this.targetPlatform };
   }
 
   private isRemoteTarget(): boolean {
