@@ -71,6 +71,7 @@ export type DialRuntimeAgent = {
   threadKey: string;
   title: string;
   status: string;
+  hostBadge?: "M" | "W";
   contextUsedPercent?: number;
 };
 

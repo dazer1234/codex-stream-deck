@@ -463,7 +463,8 @@ export class DeckController {
   async finishRateLimitReset(
     action: ActionIdentity,
     endedAt = Date.now(),
-    sourceHostId?: string
+    sourceHostId?: string,
+    requireReady = false
   ): Promise<boolean> {
     const hold = this.resetHolds.get(action.id);
     this.resetHolds.delete(action.id);
@@ -474,6 +475,9 @@ export class DeckController {
     const source = capturedHostId == null
       ? this.accountUsageSource()
       : this.accountUsageSourceForHost(capturedHostId);
+    if (requireReady && source.health.state !== "ready") {
+      throw new Error("The captured Codex usage host is not ready.");
+    }
     const usage = source.snapshot?.usage;
     if ((usage?.resetCreditsAvailable ?? 0) <= 0) throw new Error("No rate-limit reset credit is available.");
     if (usage?.resetCreditsApplicable === 0) throw new Error("No rate-limit reset credit is currently applicable.");
@@ -753,6 +757,7 @@ export class DeckController {
       (settings.feedback === "auto" && settings.rotation.kind === "selector" &&
         settings.rotation.source === "usage");
     const actionLabels: DialRuntimeView["actionLabels"] = {};
+    const showHostBadges = this.relayClient != null;
     for (const [slot, value] of Object.entries(targetSnapshot?.layout.slots ?? {})) {
       const keycapId = value.keycapId;
       const label = ADDITIONAL_KEYCAPS.find(({ id }) => id === keycapId)?.name ?? keycapId;
@@ -771,6 +776,9 @@ export class DeckController {
           threadKey: slot.threadKey,
           title: slot.title ?? `Agent ${slot.id + 1}`,
           status: slot.status,
+          ...(showHostBadges
+            ? { hostBadge: slot.host.platform === "darwin" ? "M" as const : "W" as const }
+            : {}),
           ...(slot.contextUsedPercent == null ? {} : { contextUsedPercent: slot.contextUsedPercent })
         })),
       actionLabels,
@@ -1006,7 +1014,8 @@ export class DeckController {
           reset = await this.finishRateLimitReset(
             registration.action,
             gesture.endedAt ?? gesture.startedAt,
-            sourceHostId
+            sourceHostId,
+            true
           );
           gesture.phase = "released";
         } catch (error) {
@@ -1133,7 +1142,8 @@ export class DeckController {
       return this.sendDialToHost(
         route,
         { kind: "action", slot, act },
-        () => this.microBridge.sendAction(slot, act)
+        () => this.microBridge.sendAction(slot, act),
+        act === 1
       );
     }
     if (binding.startsWith("joystick.")) {
@@ -1141,7 +1151,8 @@ export class DeckController {
       return this.sendDialToHost(
         route,
         { kind: "joystick", direction, distance: act },
-        () => this.microBridge.sendJoystick(direction, act)
+        () => this.microBridge.sendJoystick(direction, act),
+        act === 1
       );
     }
     if (binding.startsWith("keycap.") && act === 1) {
@@ -1162,6 +1173,9 @@ export class DeckController {
       if (!current || current.sourceSlot !== route.assignment.sourceSlot) {
         throw new Error("The selected Codex task no longer matches the highlighted host and task.");
       }
+      if (this.healthForHost(current.host).state !== "ready") {
+        throw new Error("The captured Codex agent host is not ready.");
+      }
       route.assignment = { ...current, host: { ...current.host } };
     }
     await this.sendAgentAssignment(route.assignment, act);
@@ -1170,13 +1184,17 @@ export class DeckController {
   private async sendDialToHost(
     route: DialHostRoute,
     command: RelayCommand,
-    local: () => Promise<void>
+    local: () => Promise<void>,
+    requireReady = true
   ): Promise<void> {
     const localHost = this.localHost;
     const localRequested = route.hostId != null
       ? route.hostId === localHost?.hostId
       : route.platform === localHost?.platform;
     if (localRequested) {
+      if (requireReady && this.localHealth.state !== "ready") {
+        throw new Error("The captured Codex host is not ready.");
+      }
       await local();
       return;
     }
@@ -1185,6 +1203,9 @@ export class DeckController {
       ? remote.hostId !== route.hostId
       : remote.platform !== route.platform)) {
       throw new Error("The captured Codex host is no longer connected.");
+    }
+    if (requireReady && this.relayClient?.currentHealth().state !== "ready") {
+      throw new Error("The captured Codex host is not ready.");
     }
     await this.sendRemote(command);
   }

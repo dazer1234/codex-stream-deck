@@ -35,6 +35,7 @@ type ControllerProbe = {
   microBridge: {
     sendAgent(slot: number, act: 0 | 1, threadKey?: string): Promise<void>;
     sendAction?(slot: string, act: 0 | 1): Promise<void>;
+    sendJoystick?(direction: string, distance: 0 | 1): Promise<void>;
     adjustReasoning?(direction: string): Promise<void>;
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
@@ -175,6 +176,7 @@ test("agent selector release uses the identity resolved on dial down", async () 
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.routedSlots = [routedAgent(0, "thread-a"), routedAgent(1, "thread-b")];
   state.microBridge = {
     async sendAgent(slot, act, threadKey) { calls.push([slot, act, threadKey]); }
@@ -202,6 +204,7 @@ test("agent selector accepts merged-list reorder while retaining its captured ow
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.routedSlots = [routedAgent(0, "thread-a"), routedAgent(1, "thread-b")];
   state.microBridge = {
     async sendAgent(slot, act, threadKey) { calls.push([slot, act, threadKey]); }
@@ -229,6 +232,7 @@ test("paired detents continue after a dispatch failure and alert only the failin
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async adjustReasoning() {
@@ -376,6 +380,7 @@ test("action selector rotation does not execute until press", async () => {
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async runKeycap(keycapId) { keycaps.push(keycapId); }
@@ -389,6 +394,201 @@ test("action selector rotation does not execute until press", async () => {
   assert.deepEqual(keycaps, ["APPR"]);
 });
 
+test("empty agent and action selectors render no items and pressing still alerts", async () => {
+  for (const [id, settings] of [
+    ["empty-agents", expandDialPreset("agents")],
+    ["empty-actions", {
+      ...expandDialPreset("actions"),
+      rotation: { kind: "selector" as const, source: "actions" as const, wrap: true, items: [] }
+    }]
+  ] as const) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    const action = fakeDial(id);
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.routedSlots = [];
+    controller.registerDial(action, settings);
+    await settle();
+
+    assert.equal(
+      (action.feedbackCalls.at(-1) as { value?: string }).value,
+      "NO ITEMS"
+    );
+    await controller.beginDialPress(action);
+    await controller.finishDialPress(action);
+    assert.equal(action.alerts, 1);
+  }
+});
+
+test("dial host commands require ready health for starts but execute when ready", async () => {
+  const bindings = [
+    "reasoning.increase", "keycap.FAST", "micro.ACT06", "joystick.up"
+  ] as const;
+  for (const health of ["degraded", "offline", "connecting"] as const) {
+    for (const binding of bindings) {
+      const controller = new DeckController();
+      const state = probe(controller);
+      const action = fakeDial(`${health}-${binding}`);
+      const sends: string[] = [];
+      state.localHost = HOST;
+      state.targetHostId = HOST.hostId;
+      state.targetPlatform = HOST.platform;
+      state.localHealth = { state: health, changedAt: 1_000 };
+      state.microBridge = {
+        async sendAgent() {},
+        async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); },
+        async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
+        async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
+        async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }
+      };
+      controller.registerDial(action, { ...expandDialPreset("custom"), press: binding });
+
+      await controller.beginDialPress(action);
+      await controller.finishDialPress(action);
+
+      assert.deepEqual(sends, [], `${health} ${binding}`);
+      assert.equal(action.alerts, 1, `${health} ${binding}`);
+    }
+  }
+
+  for (const binding of bindings) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    const action = fakeDial(`ready-${binding}`);
+    const sends: string[] = [];
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.microBridge = {
+      async sendAgent() {},
+      async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); },
+      async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
+      async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
+      async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }
+    };
+    controller.registerDial(action, { ...expandDialPreset("custom"), press: binding });
+
+    await controller.beginDialPress(action);
+    await controller.finishDialPress(action);
+
+    assert.equal(sends.length, binding.startsWith("micro.") || binding.startsWith("joystick.") ? 2 : 1);
+    assert.equal(action.alerts, 0, binding);
+  }
+});
+
+test("dial agent starts require their owner health and active releases survive degradation", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const blocked = fakeDial("agent-health-blocked");
+  const released = fakeDial("release-after-degradation");
+  const agentEvents: Array<[number, 0 | 1]> = [];
+  const actionEvents: Array<[string, 0 | 1]> = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.routedSlots = [routedAgent(0, "health-thread")];
+  state.localHealth = { state: "degraded", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent(slot, act) { agentEvents.push([slot, act]); },
+    async sendAction(slot, act) { actionEvents.push([slot, act]); }
+  };
+  controller.registerDial(blocked, expandDialPreset("agents"));
+  await controller.beginDialPress(blocked);
+  await controller.finishDialPress(blocked);
+  assert.deepEqual(agentEvents, []);
+  assert.equal(blocked.alerts, 1);
+
+  state.localHealth = { state: "ready", changedAt: 2_000 };
+  controller.registerDial(released, { ...expandDialPreset("custom"), press: "micro.ACT06" });
+  await controller.beginDialPress(released);
+  state.localHealth = { state: "offline", changedAt: 3_000 };
+  await controller.finishDialPress(released);
+  assert.deepEqual(actionEvents, [["ACT06", 1], ["ACT06", 0]]);
+  assert.equal(released.alerts, 0);
+});
+
+test("remote dial starts require remote readiness and multi-host agent feedback shows a badge", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const blocked = fakeDial("remote-health-blocked");
+  const badged = fakeDial("multi-host-badge");
+  const commands: unknown[] = [];
+  let remoteHealth: HostHealth = { state: "degraded", changedAt: 1_000 };
+  state.localHost = HOST;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.routedSlots = [
+    routedAgent(0, "local-thread", HOST),
+    routedAgent(1, "remote-thread", REMOTE_HOST)
+  ];
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => remoteHealth,
+    currentSnapshot: () => undefined,
+    async send(command) { commands.push(command); }
+  };
+  controller.registerDial(blocked, { ...expandDialPreset("custom"), press: "keycap.FAST" });
+  await controller.beginDialPress(blocked);
+  await controller.finishDialPress(blocked);
+  assert.deepEqual(commands, []);
+  assert.equal(blocked.alerts, 1);
+
+  remoteHealth = { state: "ready", changedAt: 2_000 };
+  const ready = fakeDial("remote-health-ready");
+  controller.registerDial(ready, { ...expandDialPreset("custom"), press: "keycap.FAST" });
+  await controller.beginDialPress(ready);
+  assert.equal(commands.length, 1);
+  assert.equal(ready.alerts, 0);
+
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  controller.registerDial(badged, expandDialPreset("agents"));
+  await settle();
+  assert.equal((badged.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 1 • M");
+  controller.rotateDial(badged, 1);
+  await idle(controller, badged.id);
+  assert.equal((badged.feedbackCalls.at(-1) as { title?: string }).title, "AGENT 2 • W");
+});
+
+test("dial rate-limit reset requires ready usage-host health", async () => {
+  for (const health of ["degraded", "ready"] as const) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    const action = fakeDial(`reset-${health}`);
+    let resets = 0;
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: SNAPSHOT };
+    state.localHealth = { state: health, changedAt: 1_000 };
+    state.microBridge = {
+      async sendAgent() {},
+      async consumeRateLimitReset() { resets += 1; }
+    };
+    state.refresh = async () => {};
+    controller.registerDial(action, {
+      ...expandDialPreset("custom"), press: "usage.rate-limit-reset"
+    });
+    const realNow = Date.now;
+    try {
+      Date.now = () => 50_000;
+      await controller.beginDialPress(action);
+      Date.now = () => 51_200;
+      await controller.finishDialPress(action);
+    } finally {
+      Date.now = realNow;
+    }
+    assert.equal(resets, health === "ready" ? 1 : 0);
+    assert.equal(action.alerts, health === "ready" ? 0 : 1);
+    controller.unregisterDial(action);
+  }
+});
+
 test("two dials pressing the same momentary binding keep independent captured hosts", async () => {
   const controller = new DeckController();
   const state = probe(controller);
@@ -397,6 +597,7 @@ test("two dials pressing the same momentary binding keep independent captured ho
   state.localHost = HOST;
   state.targetPlatform = HOST.platform;
   state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async sendAction(slot, act) { localEvents.push([slot, act]); }
@@ -533,6 +734,7 @@ test("failed momentary down suppresses unmatched up and a duplicate alert", asyn
   state.localHost = HOST;
   state.targetPlatform = HOST.platform;
   state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async sendAction(slot, act) {
@@ -598,6 +800,7 @@ test("unregister cancels pending work, releases active gestures, and isolates re
   state.localHost = HOST;
   state.targetPlatform = HOST.platform;
   state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async sendAction(slot, act) { events.push([slot, act]); }
@@ -685,6 +888,7 @@ test("rotation detents use the host captured before their queue backlog", async 
   state.localHost = HOST;
   state.targetPlatform = HOST.platform;
   state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
     async sendAction(slot, act) { localEvents.push([slot, act]); }

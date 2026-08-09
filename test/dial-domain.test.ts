@@ -384,6 +384,45 @@ test("agent and action feedback use reconciled selections and bounded live label
   assert.equal(bounded.value.length <= 24, true);
 });
 
+test("empty selectors report no items while agent feedback includes an optional host badge", () => {
+  assert.deepEqual(
+    deriveDialFeedback(
+      expandDialPreset("agents"),
+      initialDialRuntimeState(),
+      { ...RUNTIME_VIEW, agents: [] }
+    ),
+    {
+      title: "AGENT",
+      value: "NO ITEMS",
+      detail: "NO ACTIVE AGENTS",
+      indicator: 0,
+      accent: "#707B85"
+    }
+  );
+  assert.deepEqual(
+    deriveDialFeedback(actionSelector([]), initialDialRuntimeState(), RUNTIME_VIEW),
+    {
+      title: "ACTION",
+      value: "NO ITEMS",
+      detail: "NO ACTIONS CONFIGURED",
+      indicator: 0,
+      accent: "#707B85"
+    }
+  );
+  const multiHostView: DialRuntimeView = {
+    ...RUNTIME_VIEW,
+    agents: [{ ...RUNTIME_VIEW.agents[0]!, hostBadge: "M" }]
+  };
+  assert.equal(
+    deriveDialFeedback(expandDialPreset("agents"), initialDialRuntimeState(), multiHostView).title,
+    "AGENT 1 • M"
+  );
+  assert.equal(
+    deriveDialFeedback(expandDialPreset("agents"), initialDialRuntimeState(), RUNTIME_VIEW).title,
+    "AGENT 1"
+  );
+});
+
 test("zero-based agents use one-based display numbers and nonblank text fallbacks", () => {
   const blankAgentView: DialRuntimeView = {
     ...RUNTIME_VIEW,

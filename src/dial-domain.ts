@@ -431,13 +431,18 @@ function agentFeedback(
   state: DialRuntimeState,
   view: DialRuntimeView
 ): DialFeedback {
-  const item = selectedItem(settings, state, view);
+  const items = selectorItems(settings, view);
+  if (items.length === 0) {
+    return feedback("AGENT", "NO ITEMS", "NO ACTIVE AGENTS", 0, DIAL_ACCENTS.muted);
+  }
+  const reconciled = reconcileSelector(state, items);
+  const item = items.find((candidate) => candidate.id === reconciled.selectedId);
   if (!item) {
-    return feedback("AGENT", "UNAVAILABLE", "NO ACTIVE AGENTS", 0, DIAL_ACCENTS.muted);
+    return feedback("AGENT", "UNAVAILABLE", "SELECTION UNAVAILABLE", 0, DIAL_ACCENTS.muted);
   }
   const agent = view.agents.find((candidate) => candidate.identity === item.id);
   if (!agent) {
-    return feedback("AGENT", "UNAVAILABLE", "NO ACTIVE AGENTS", 0, DIAL_ACCENTS.muted);
+    return feedback("AGENT", "UNAVAILABLE", "SELECTION UNAVAILABLE", 0, DIAL_ACCENTS.muted);
   }
   const context = finitePercent(agent.contextUsedPercent);
   const status = item.detail ?? "unknown";
@@ -445,7 +450,7 @@ function agentFeedback(
     ? status
     : `${status} • ${Math.round(context)}% context`;
   return feedback(
-    `AGENT ${agentDisplayNumber(agent.id)}`,
+    `AGENT ${agentDisplayNumber(agent.id)}${agent.hostBadge ? ` • ${agent.hostBadge}` : ""}`,
     item.label,
     detail,
     context ?? 0,
@@ -462,8 +467,11 @@ function actionFeedback(
   const reconciled = reconcileSelector(state, items);
   const index = items.findIndex((item) => item.id === reconciled.selectedId);
   const item = index >= 0 ? items[index] : undefined;
+  if (items.length === 0) {
+    return feedback("ACTION", "NO ITEMS", "NO ACTIONS CONFIGURED", 0, DIAL_ACCENTS.muted);
+  }
   if (!item) {
-    return feedback("ACTION", "UNAVAILABLE", "NO ACTIONS CONFIGURED", 0, DIAL_ACCENTS.muted);
+    return feedback("ACTION", "UNAVAILABLE", "SELECTION UNAVAILABLE", 0, DIAL_ACCENTS.muted);
   }
   return feedback(
     `ACTION ${index + 1}/${items.length}`,
