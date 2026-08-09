@@ -11,12 +11,13 @@ export type RelayCommand =
   | { kind: "joystick"; direction: MicroDirection; distance: 0 | 1 }
   | { kind: "encoder"; act: 0 | 1 }
   | { kind: "reasoning"; direction: ReasoningAdjustment }
+  | { kind: "usage-refresh" }
   | { kind: "rate-limit-reset" }
   | { kind: "keycap"; keycapId: OfficialKeycapId };
 
 export type RelayAuthMessage = { type: "auth"; protocol: 1; token: string };
 export const RELAY_CAPABILITIES = [
-  "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "rate-limit-reset"
+  "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "usage-refresh", "rate-limit-reset"
 ] as const;
 export type RelayReadyMessage = {
   type: "ready";
@@ -236,7 +237,10 @@ function emptyRoutedPosition(input: HostSnapshot, id: number): RoutedAgentSlot {
 
 export function parseRelayServerMessage(value: unknown): RelayServerMessage | null {
   if (!isRecord(value) || value.protocol !== RELAY_PROTOCOL_VERSION || typeof value.type !== "string") return null;
-  if (value.type === "ready" && isHost(value.host)) return value as RelayReadyMessage;
+  if (value.type === "ready" && isHost(value.host) &&
+      (value.capabilities == null || (Array.isArray(value.capabilities) && value.capabilities.every((item) => typeof item === "string")))) {
+    return value as RelayReadyMessage;
+  }
   if (value.type === "snapshot" && isHost(value.host) && Number.isFinite(value.observedAt) && isSnapshot(value.snapshot)) {
     return value as RelaySnapshotMessage;
   }
@@ -257,6 +261,7 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
   if (value.kind === "joystick" && ["up", "right", "down", "left"].includes(String(value.direction)) && binary(value.distance)) return value as RelayCommand;
   if (value.kind === "encoder" && binary(value.act)) return value as RelayCommand;
   if (value.kind === "reasoning" && ["decrease", "increase"].includes(String(value.direction))) return value as RelayCommand;
+  if (value.kind === "usage-refresh" && Object.keys(value).length === 1) return value as RelayCommand;
   if (value.kind === "rate-limit-reset") return value as RelayCommand;
   if (value.kind === "keycap" && typeof value.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(value.keycapId as OfficialKeycapId)) return value as RelayCommand;
   return null;
@@ -268,6 +273,8 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
     (slot.contextUsedPercent == null || finitePercent(slot.contextUsedPercent)))) return false;
   if (value.activeThreadKey != null && !isThreadKey(value.activeThreadKey)) return false;
   if (value.activeThreadTitle != null && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
+  if (value.reasoningEffort != null &&
+      (typeof value.reasoningEffort !== "string" || value.reasoningEffort.trim().length === 0 || value.reasoningEffort.length > 64)) return false;
   if (value.usage != null && !isUsageSnapshot(value.usage)) return false;
   if (value.hostSessions == null) return true;
   return Array.isArray(value.hostSessions) && value.hostSessions.length <= 128 && value.hostSessions.every((session) =>

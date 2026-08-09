@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { X509Certificate } from "node:crypto";
 import { createServer } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -112,6 +112,8 @@ test("relay command parser permits only the narrow native command surface", () =
   assert.deepEqual(parseRelayCommand({ kind: "agent", slot: 5, threadKey, act: 1 }), { kind: "agent", slot: 5, threadKey, act: 1 });
   assert.deepEqual(parseRelayCommand({ kind: "reasoning", direction: "increase" }), { kind: "reasoning", direction: "increase" });
   assert.deepEqual(parseRelayCommand({ kind: "rate-limit-reset" }), { kind: "rate-limit-reset" });
+  assert.deepEqual(parseRelayCommand({ kind: "usage-refresh" }), { kind: "usage-refresh" });
+  assert.equal(parseRelayCommand({ kind: "usage-refresh", expression: "process.exit()" }), null);
   assert.equal(parseRelayCommand({ kind: "agent", slot: 6, threadKey, act: 1 }), null);
   assert.equal(parseRelayCommand({ kind: "evaluate", expression: "process.exit()" }), null);
   assert.equal(parseRelayCommand({ kind: "keycap", keycapId: "NOT_REAL" }), null);
@@ -119,6 +121,20 @@ test("relay command parser permits only the narrow native command surface", () =
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "local:client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.equal(parseRelayCommand({ kind: "agent", slot: 1, threadKey: "local:../../secret", act: 1 }), null);
+});
+
+test("relay snapshots accept an optional bounded reasoning effort", async () => {
+  const { parseRelayServerMessage } = await import("../src/relay-protocol.js");
+  const message = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
+  assert.notEqual(parseRelayServerMessage(message), null, "older peers may omit the optional field");
+  message.snapshot.reasoningEffort = "high";
+  assert.notEqual(parseRelayServerMessage(message), null);
+  message.snapshot.reasoningEffort = "";
+  assert.equal(parseRelayServerMessage(message), null);
+  message.snapshot.reasoningEffort = "   ";
+  assert.equal(parseRelayServerMessage(message), null);
+  message.snapshot.reasoningEffort = "x".repeat(65);
+  assert.equal(parseRelayServerMessage(message), null);
 });
 
 test("relay snapshot parser bounds and validates host session catalogs", async () => {
@@ -771,7 +787,8 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
     refresh: async () => snapshot,
     sendAgent: async (slot: number, act: 0 | 1) => { calls.push(["agent", slot, act]); },
     sendAction: async () => {}, sendJoystick: async () => {}, sendEncoder: async () => {},
-    adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {}
+    adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    refreshUsage: async () => { calls.push(["usage-refresh"]); }
   };
   const server = new CodexRelayServer(
     { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
@@ -785,7 +802,7 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
   assert.equal(first.type, "ready");
   assert.equal(first.bridge, "native-codex-micro");
   assert.deepEqual(first.capabilities, [
-    "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "rate-limit-reset"
+    "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "usage-refresh", "rate-limit-reset"
   ]);
   const second = await messages.next();
   assert.equal(second.type, "snapshot");
@@ -797,6 +814,17 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
   assert.deepEqual(calls, [["agent", 2, 1]]);
   assert.equal(result.type, "result");
   assert.equal(result.ok, true);
+  socket.send(JSON.stringify({
+    type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId: "request-2",
+    command: { kind: "usage-refresh" }
+  }));
+  let refreshResult = await messages.next();
+  while (refreshResult.type !== "result" || refreshResult.requestId !== "request-2") {
+    refreshResult = await messages.next();
+  }
+  assert.deepEqual(calls, [["agent", 2, 1], ["usage-refresh"]]);
+  assert.equal(refreshResult.type, "result");
+  assert.equal(refreshResult.ok, true);
   socket.close();
   await server.close();
 });
@@ -806,7 +834,8 @@ test("running relay publishes refreshed Codex metadata without changing host ide
   const control = {
     refresh: async () => snapshot,
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {}
+    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
     { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) },
@@ -838,7 +867,8 @@ test("relay rejects a client with the wrong token before publishing state", asyn
   const control = {
     refresh: async () => { refreshes += 1; return snapshot; },
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {}
+    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
     { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
@@ -859,7 +889,8 @@ test("authenticated relay survives an unavailable Codex snapshot", async () => {
   const control = {
     refresh: async (): Promise<MicroSnapshot> => { throw new Error("bridge offline"); },
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {}
+    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
     { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control,
@@ -886,7 +917,8 @@ test("relay client preserves last-known tasks but marks their host offline after
   const control = {
     refresh: async () => snapshot,
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {}
+    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
     { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
@@ -899,6 +931,8 @@ test("relay client preserves last-known tasks but marks their host offline after
   );
   client.start();
   await waitUntil(() => client.currentHealth().state === "ready");
+  assert.equal(client.supportsCapability("usage-refresh"), true);
+  assert.equal(client.supportsCapability("arbitrary-evaluate"), false);
   assert.equal(deliveredSnapshots.length, 1);
   const lastKnown = client.currentSnapshot();
   assert.equal(lastKnown?.snapshot.slots[0]?.title, "Task 1");
@@ -907,7 +941,19 @@ test("relay client preserves last-known tasks but marks their host offline after
   assert.equal(deliveredSnapshots.length, 1, "health-only transitions must not call the snapshot callback");
   assert.equal(client.currentSnapshot(), lastKnown);
   assert.equal(client.isConnected(), false);
+  assert.equal(client.supportsCapability("usage-refresh"), false);
   client.close();
+});
+
+test("controller refreshes account usage on its source host instead of the selected function host", async () => {
+  const source = await readFile(new URL("../src/controller.ts", import.meta.url), "utf8");
+  assert.match(source, /async refreshUsage\(\): Promise<void>/);
+  assert.match(source, /refreshUsage[\s\S]*const source = this\.accountUsageSource\(\)/);
+  assert.match(source, /refreshUsage[\s\S]*this\.microBridge\.requestUsageRefresh\(\)/);
+  assert.match(source, /refreshUsage[\s\S]*supportsCapability\("usage-refresh"\)/);
+  assert.match(source, /refreshUsage[\s\S]*\{ kind: "usage-refresh" \}/);
+  assert.match(source, /Remote Codex host does not support usage refresh\./);
+  assert.match(source, /refreshUsage: \(\) => runAndInvalidate\(\(\) => this\.microBridge\.requestUsageRefresh\(\)\.then\(\(\) => undefined\)\)/);
 });
 
 async function freePort(): Promise<number> {

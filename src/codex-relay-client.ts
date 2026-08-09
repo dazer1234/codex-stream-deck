@@ -31,6 +31,7 @@ export class CodexRelayClient {
   private host?: CodexHost;
   private snapshot?: HostSnapshot;
   private lastSnapshotReceivedAt = 0;
+  private capabilities = new Set<string>();
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
   private readonly pending = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
 
@@ -48,6 +49,7 @@ export class CodexRelayClient {
     this.reconnect = undefined;
     this.socket?.close(1000, "client stopping");
     this.socket = undefined;
+    this.capabilities.clear();
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
   }
@@ -58,6 +60,7 @@ export class CodexRelayClient {
     return resolveRelayHealth(this.health, this.snapshot != null, this.lastSnapshotReceivedAt, now);
   }
   isConnected(): boolean { return this.socket?.readyState === WebSocket.OPEN && this.host != null; }
+  supportsCapability(capability: string): boolean { return this.capabilities.has(capability); }
 
   async send(command: RelayCommand): Promise<void> {
     const socket = this.socket;
@@ -99,6 +102,7 @@ export class CodexRelayClient {
     if (!message) return;
     if (message.type === "ready") {
       this.host = message.host;
+      this.capabilities = new Set(message.capabilities ?? []);
       this.health = { state: "degraded", reason: "awaiting-snapshot", changedAt: Date.now() };
       this.log(`Remote Codex host connected: ${message.host.hostName} (${message.host.platform}).`);
     } else if (message.type === "snapshot") {
@@ -129,6 +133,7 @@ export class CodexRelayClient {
   private disconnected(expected: WebSocket): void {
     if (this.socket !== expected) return;
     this.socket = undefined;
+    this.capabilities.clear();
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
     this.scheduleReconnect();

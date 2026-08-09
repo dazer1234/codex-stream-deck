@@ -48,6 +48,28 @@ test("renderer bridge uses native Micro events and discovers hashed modules at r
   assert.doesNotMatch(source, /D90_rd6W|SFcKxWqG|DJFcGyy5/);
 });
 
+test("renderer snapshots expose only the active composer's bounded reasoning effort", async () => {
+  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
+  assert.match(source, /querySelector\('\[data-selected-reasoning-effort\]'\)/);
+  assert.match(source, /getAttribute\('data-selected-reasoning-effort'\)/);
+  assert.match(source, /reasoningEffortValue[\s\S]*?trim\(\)/);
+  assert.match(source, /reasoningEffortValue\.length <= 64/);
+  assert.match(source, /reasoningEffort \? \{ reasoningEffort \} : \{\}/);
+});
+
+test("usage refresh distinguishes bounded background refreshes from a forced awaited fetch", async () => {
+  const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
+  assert.match(source, /Symbol\.for\('codex-deck-force-rate-limit-refresh'\)/);
+  assert.match(source, /delete globalThis\[forceRefreshKey\]/);
+  assert.match(source, /if \(forceRefresh[\s\S]*await Promise\.resolve\(query\.fetch\(\)\)/);
+  assert.match(source, /now - dataUpdatedAt >= 15000/);
+  assert.match(source, /Promise\.resolve\(query\.fetch\(\)\)\.catch\(\(\) => \{\}\)/);
+  assert.match(source, /async requestUsageRefresh\(\): Promise<MicroSnapshot>/);
+  assert.match(source, /requestUsageRefresh[\s\S]*await this\.ensureConnected\(\)/);
+  assert.match(source, /requestUsageRefresh[\s\S]*this\.evaluate[\s\S]*codex-deck-force-rate-limit-refresh/);
+  assert.match(source, /requestUsageRefresh[\s\S]*return this\.refresh\(\)/);
+});
+
 test("renderer bridge prefers the main index document over macOS avatar surfaces", () => {
   const target = selectCodexMainTarget([
     { type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://route" },

@@ -214,6 +214,9 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   }));
 
   let usage;
+  const forceRefreshKey = Symbol.for('codex-deck-force-rate-limit-refresh');
+  const forceRefresh = globalThis[forceRefreshKey] === true;
+  if (forceRefresh) delete globalThis[forceRefreshKey];
   for (const client of queryClients) {
     try {
       const query = client.getQueryCache().getAll().find((candidate) =>
@@ -223,7 +226,9 @@ const SNAPSHOT_EXPRESSION = `(async () => {
       const now = Date.now();
       const dataUpdatedAt = Number(query?.state?.dataUpdatedAt) || 0;
       const lastRefreshAttempt = Number(globalThis[refreshKey]) || 0;
-      if (query && typeof query.fetch === 'function' && now - dataUpdatedAt >= 15000 && now - lastRefreshAttempt >= 15000) {
+      if (forceRefresh && query && typeof query.fetch === 'function') {
+        await Promise.resolve(query.fetch());
+      } else if (query && typeof query.fetch === 'function' && now - dataUpdatedAt >= 15000 && now - lastRefreshAttempt >= 15000) {
         globalThis[refreshKey] = now;
         // Rate-limit refresh is network-backed and must never hold agent status,
         // selection, or lighting behind its response. A later snapshot reads
@@ -303,8 +308,17 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const activeThreadTitle = activeThreadElement
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
+  const reasoningEffortValue = document.querySelector('[data-selected-reasoning-effort]')
+    ?.getAttribute('data-selected-reasoning-effort')?.trim();
+  const reasoningEffort = reasoningEffortValue && reasoningEffortValue.length <= 64
+    ? reasoningEffortValue
+    : undefined;
 
-  return { slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme, ...(usage ? { usage } : {}) };
+  return {
+    slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(usage ? { usage } : {})
+  };
 })()`;
 
 export class CodexMicroRendererBridge {
@@ -329,6 +343,16 @@ export class CodexMicroRendererBridge {
       this.disconnect();
       throw error;
     }
+  }
+
+  async requestUsageRefresh(): Promise<MicroSnapshot> {
+    await this.ensureConnected();
+    await this.evaluate(`globalThis[Symbol.for('codex-deck-force-rate-limit-refresh')] = true`);
+    return this.refresh();
+  }
+
+  async refreshUsage(): Promise<void> {
+    await this.requestUsageRefresh();
   }
 
   async sendAgent(slot: number, act: 0 | 1, expectedThreadKey?: string): Promise<void> {

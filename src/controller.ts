@@ -137,6 +137,7 @@ export class DeckController {
             () => this.microBridge.adjustReasoning(direction)),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
+          refreshUsage: () => runAndInvalidate(() => this.microBridge.requestUsageRefresh().then(() => undefined)),
           consumeRateLimitReset: () => runAndInvalidate(() => this.microBridge.consumeRateLimitReset())
         };
         if (mobileRelayConfig) {
@@ -326,6 +327,39 @@ export class DeckController {
   async createTask(): Promise<void> {
     if (this.isRemoteTarget()) await this.sendRemote({ kind: "keycap", keycapId: "NEW" });
     else await openCodexThread("new");
+  }
+
+  async refreshUsage(): Promise<void> {
+    const source = this.accountUsageSource();
+    if (source.hostId != null && source.hostId !== this.localHost?.hostId) {
+      if (!this.relayClient?.supportsCapability("usage-refresh")) {
+        throw new Error("Remote Codex host does not support usage refresh.");
+      }
+      await this.relayClient.send({ kind: "usage-refresh" });
+      return;
+    }
+
+    const host = this.localHost ?? await getOrCreateHostIdentity();
+    try {
+      const snapshot = await this.microBridge.requestUsageRefresh();
+      const observedAt = Date.now();
+      this.localHost = host;
+      this.mobileRelayServer?.updateHost(host);
+      this.localMobileRelayServer?.updateHost(host);
+      this.localSnapshot = { host, snapshot, observedAt };
+      this.localHealth = { state: "ready", changedAt: observedAt };
+      this.lastError = "";
+    } catch (error) {
+      this.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: Date.now() };
+      const message = String(error);
+      if (message !== this.lastError) {
+        this.lastError = message;
+        streamDeck.logger.warn(`Codex usage refresh unavailable: ${message}`);
+      }
+      await this.refreshDisplay();
+      throw error;
+    }
+    await this.refreshDisplay();
   }
 
   private async refresh(): Promise<void> {
