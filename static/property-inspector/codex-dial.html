@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Dial</title>
+</head>
+<body>
+  <script>
+    let websocket;
+
+    window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent) => {
+      websocket = new WebSocket(`ws://127.0.0.1:${port}`);
+      websocket.addEventListener("open", () => {
+        websocket.send(JSON.stringify({ event: registerEvent, uuid }));
+      });
+    };
+  </script>
+</body>
+</html>
