@@ -168,6 +168,7 @@
           <div>
             <div>Action order</div>
             <p class="hint">Check actions to include, then use the arrows to set dial order.</p>
+            <p id="selector-items-status" class="hint" role="status" aria-live="polite"></p>
           </div>
           <div id="selector-items"></div>
         </div>
@@ -320,17 +321,18 @@
     const SELECTOR_SOURCES = ["agents", "actions", "usage"];
     const FEEDBACK_MODES = ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"];
     const ALL_BINDINGS = BINDING_GROUPS.flatMap((group) => group.values.map(([value]) => value));
-    const ACTION_BINDINGS = ALL_BINDINGS.filter((value) => value !== "none" && bindingAllowed(value, "selector"));
+    const ACTION_BINDINGS = ALL_BINDINGS.filter((value) => bindingAllowed(value, "selector"));
     const ACTION_LABELS = new Map(BINDING_GROUPS.flatMap((group) => group.values));
 
     let settings = { ...PRESETS.reasoning, customized: true };
     let actionOrder = [...ACTION_BINDINGS];
     let selectedActionItems = new Set();
+    let hasPendingSettings = false;
 
     const element = (id) => document.getElementById(id);
 
     function bindingAllowed(value, gesture) {
-      if (!ALL_BINDINGS?.includes(value)) return false;
+      if (!ALL_BINDINGS.includes(value)) return false;
       if (value === "usage.rate-limit-reset") return gesture === "press";
       if (value === "selector.activate") return gesture === "press";
       return true;
@@ -358,43 +360,64 @@
       return JSON.parse(JSON.stringify(value));
     }
 
+    function record(value) {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+
+    function hasOwn(value, key) {
+      return Object.hasOwn(value, key);
+    }
+
     function normalizedSettings(input) {
-      if (!input || input.version !== 1 || !PRESET_IDS.includes(input.preset)) {
+      if (!record(input) || !hasOwn(input, "version") || input.version !== 1 ||
+          !hasOwn(input, "preset") || !PRESET_IDS.includes(input.preset)) {
         return clone(PRESETS.reasoning);
       }
       const fallback = clone(PRESETS[input.preset]);
-      const result = {
-        ...fallback,
-        customized: input.customized === true,
-        press: bindingAllowed(input.press, "press") ? input.press : fallback.press,
-        touchTap: bindingAllowed(input.touchTap, "touch") ? input.touchTap : fallback.touchTap,
-        feedback: FEEDBACK_MODES.includes(input.feedback) ? input.feedback : fallback.feedback
+      const staticLabel = hasOwn(input, "staticLabel") && typeof input.staticLabel === "string"
+        ? input.staticLabel.trim().slice(0, 40)
+        : "";
+      return {
+        version: 1,
+        preset: input.preset,
+        customized: hasOwn(input, "customized") && input.customized === true,
+        rotation: normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation),
+        press: hasOwn(input, "press") && bindingAllowed(input.press, "press")
+          ? input.press : fallback.press,
+        touchTap: hasOwn(input, "touchTap") && bindingAllowed(input.touchTap, "touch")
+          ? input.touchTap : "none",
+        feedback: hasOwn(input, "feedback") && FEEDBACK_MODES.includes(input.feedback)
+          ? input.feedback : fallback.feedback,
+        ...(staticLabel ? { staticLabel } : {})
       };
+    }
 
-      if (input.rotation?.kind === "paired") {
-        result.rotation = {
+    function normalizeRotation(value, fallback) {
+      if (!record(value) || !hasOwn(value, "kind")) return clone(fallback);
+      if (value.kind === "paired") {
+        return {
           kind: "paired",
-          counterClockwise: bindingAllowed(input.rotation.counterClockwise, "rotation")
-            ? input.rotation.counterClockwise : "none",
-          clockwise: bindingAllowed(input.rotation.clockwise, "rotation")
-            ? input.rotation.clockwise : "none"
-        };
-      } else if (input.rotation?.kind === "selector" && SELECTOR_SOURCES.includes(input.rotation.source)) {
-        const uniqueItems = Array.isArray(input.rotation.items)
-          ? input.rotation.items.filter((value, index, values) =>
-            bindingAllowed(value, "selector") && value !== "none" && values.indexOf(value) === index).slice(0, 30)
-          : [];
-        result.rotation = {
-          kind: "selector",
-          source: input.rotation.source,
-          wrap: input.rotation.wrap === true,
-          items: input.rotation.source === "actions" ? uniqueItems : []
+          counterClockwise: hasOwn(value, "counterClockwise") &&
+            bindingAllowed(value.counterClockwise, "rotation") ? value.counterClockwise : "none",
+          clockwise: hasOwn(value, "clockwise") && bindingAllowed(value.clockwise, "rotation")
+            ? value.clockwise : "none"
         };
       }
-
-      const staticLabel = typeof input.staticLabel === "string" ? input.staticLabel.trim().slice(0, 40) : "";
-      if (staticLabel) result.staticLabel = staticLabel;
-      return result;
+      if (value.kind === "selector" && hasOwn(value, "source") &&
+          SELECTOR_SOURCES.includes(value.source) && hasOwn(value, "wrap") &&
+          typeof value.wrap === "boolean" && hasOwn(value, "items") && Array.isArray(value.items)) {
+        return {
+          kind: "selector",
+          source: value.source,
+          wrap: value.wrap,
+          items: value.source === "actions"
+            ? value.items.filter((item) => bindingAllowed(item, "selector"))
+              .filter((item, index, items) => items.indexOf(item) === index)
+              .slice(0, 30)
+            : []
+        };
+      }
+      return clone(fallback);
     }
 
     function applySettings(input) {
@@ -433,37 +456,52 @@
     function renderActionItems() {
       const container = element("selector-items");
       container.replaceChildren();
+      const atLimit = selectedActionItems.size >= 30;
+      element("selector-items-status").textContent = atLimit
+        ? "30 of 30 selected. Uncheck an action to choose another."
+        : `${selectedActionItems.size} of 30 selected.`;
       actionOrder.forEach((binding, index) => {
         const row = document.createElement("div");
         row.className = "action-row";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
+        checkbox.id = `selector-action-${index}`;
         checkbox.dataset.binding = binding;
         checkbox.checked = selectedActionItems.has(binding);
+        checkbox.disabled = atLimit && !checkbox.checked;
         checkbox.addEventListener("change", () => {
+          if (checkbox.checked && !selectedActionItems.has(binding) && selectedActionItems.size >= 30) {
+            checkbox.checked = false;
+            renderActionItems();
+            return;
+          }
           if (checkbox.checked) selectedActionItems.add(binding);
           else selectedActionItems.delete(binding);
-          persist(true);
+          renderActionItems();
+          persistAndQueue(true);
         });
-        const label = document.createElement("span");
+        const label = document.createElement("label");
         label.className = "action-label";
+        label.htmlFor = checkbox.id;
         label.textContent = ACTION_LABELS.get(binding) ?? binding;
         const buttons = document.createElement("span");
         buttons.className = "move-buttons";
-        const up = moveButton(binding, "up", "↑", index === 0);
-        const down = moveButton(binding, "down", "↓", index === actionOrder.length - 1);
+        const actionLabel = ACTION_LABELS.get(binding) ?? binding;
+        const up = moveButton(binding, actionLabel, "up", "↑", index === 0);
+        const down = moveButton(binding, actionLabel, "down", "↓", index === actionOrder.length - 1);
         buttons.append(up, down);
         row.append(checkbox, label, buttons);
         container.appendChild(row);
       });
     }
 
-    function moveButton(binding, direction, label, disabled) {
+    function moveButton(binding, actionLabel, direction, label, disabled) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.direction = direction;
       button.textContent = label;
       button.disabled = disabled;
+      button.setAttribute("aria-label", `Move ${actionLabel} ${direction}`);
       button.addEventListener("click", (event) => {
         event.preventDefault();
         if (button.disabled) return;
@@ -471,7 +509,7 @@
         const next = direction === "up" ? index - 1 : index + 1;
         [actionOrder[index], actionOrder[next]] = [actionOrder[next], actionOrder[index]];
         renderActionItems();
-        persist(true);
+        persistAndQueue(true);
       });
       return button;
     }
@@ -515,40 +553,62 @@
       }
     }
 
+    function persistAndQueue(customized = true) {
+      const wasOpen = websocket?.readyState === WebSocket.OPEN;
+      persist(customized);
+      if (!wasOpen) hasPendingSettings = true;
+    }
+
     function bindControls() {
       element("preset").addEventListener("change", () => {
         applySettings(PRESETS[element("preset").value] ?? PRESETS.reasoning);
-        persist(false);
+        persistAndQueue(false);
       });
       for (const id of ["rotation-kind", "selector-source", "feedback"]) {
         element(id).addEventListener("change", () => {
           updateConditionalViews();
-          persist(true);
+          persistAndQueue(true);
         });
       }
       for (const id of ["counter-clockwise", "clockwise", "press", "touch-tap", "wrap"]) {
-        element(id).addEventListener("change", () => persist(true));
+        element(id).addEventListener("change", () => persistAndQueue(true));
       }
-      element("static-label").addEventListener("input", () => persist(true));
+      element("static-label").addEventListener("input", () => persistAndQueue(true));
     }
 
     window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
+      const replacedSocket = websocket;
+      if (replacedSocket && typeof replacedSocket.close === "function") {
+        try { replacedSocket.close(); } catch {}
+      }
       const generation = ++connectionGeneration;
       let action = {};
-      try { action = JSON.parse(actionInfo || "{}"); } catch { action = {}; }
-      context = action.context ?? uuid;
-      applySettings(action.payload?.settings ?? PRESETS.reasoning);
-      websocket = new WebSocket(`ws://127.0.0.1:${port}`);
-      websocket.addEventListener("open", () => {
+      try {
+        const parsed = JSON.parse(actionInfo || "{}");
+        action = record(parsed) ? parsed : {};
+      } catch { action = {}; }
+      context = hasOwn(action, "context") && typeof action.context === "string" ? action.context : uuid;
+      const initialSettings = hasOwn(action, "payload") && record(action.payload) &&
+        hasOwn(action.payload, "settings") ? action.payload.settings : PRESETS.reasoning;
+      applySettings(initialSettings);
+      hasPendingSettings = false;
+      const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+      websocket = socket;
+      socket.addEventListener("open", () => {
         if (generation !== connectionGeneration) return;
-        websocket.send(JSON.stringify({ event: registerEvent, uuid }));
+        socket.send(JSON.stringify({ event: registerEvent, uuid }));
+        if (hasPendingSettings) {
+          socket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
+          hasPendingSettings = false;
+        }
       });
-      websocket.addEventListener("message", (message) => {
+      socket.addEventListener("message", (message) => {
         if (generation !== connectionGeneration) return;
         let event;
         try { event = JSON.parse(message.data); } catch { return; }
-        if (event.event === "didReceiveSettings") {
-          applySettings(event.payload?.settings ?? PRESETS.reasoning);
+        if (record(event) && event.event === "didReceiveSettings" && hasOwn(event, "payload") &&
+            record(event.payload) && hasOwn(event.payload, "settings")) {
+          applySettings(event.payload.settings);
         }
       });
     };

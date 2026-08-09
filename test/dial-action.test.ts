@@ -4,7 +4,10 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 import type { DeckController } from "../src/controller.js";
 import { CodexDialAction } from "../src/dial-action.js";
-import { expandDialPreset, isDialBindingId } from "../src/dial-domain.js";
+import {
+  expandDialPreset, isDialBindingId, JOYSTICK_DIRECTIONS, MICRO_SLOTS, normalizeDialSettings
+} from "../src/dial-domain.js";
+import { OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 
 const text = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -27,8 +30,9 @@ class FakeElement {
   readonly children: FakeElement[] = [];
   readonly dataset: Record<string, string> = {};
   readonly listeners = new Map<string, Array<(event: FakeEvent) => void>>();
+  readonly attributes = new Map<string, string>();
   parentElement: FakeElement | null = null;
-  value = "";
+  private currentValue = "";
   checked = false;
   disabled = false;
   hidden = false;
@@ -36,11 +40,20 @@ class FakeElement {
   textContent = "";
   className = "";
   maxLength = -1;
+  htmlFor = "";
 
   constructor(readonly tagName: string, readonly id = "") {}
 
   get options(): FakeElement[] {
     return this.descendants().filter(({ tagName }) => tagName === "OPTION");
+  }
+
+  get value(): string { return this.currentValue; }
+
+  set value(value: string) {
+    const options = this.options;
+    this.currentValue = this.tagName === "SELECT" && options.length > 0 &&
+      !options.some((option) => option.value === value) ? "" : value;
   }
 
   appendChild(child: FakeElement): FakeElement {
@@ -64,6 +77,14 @@ class FakeElement {
     this.listeners.set(name, listeners);
   }
 
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
   dispatch(name: string): void {
     const event = { target: this, preventDefault() {} };
     for (const listener of this.listeners.get(name) ?? []) listener(event);
@@ -78,7 +99,7 @@ class FakeDocument {
   readonly elements = new Map<string, FakeElement>();
 
   constructor(source: string) {
-    const elementPattern = /<(select|input|div|section|label|textarea)[^>]*\bid=["']([^"']+)["'][^>]*>/gi;
+    const elementPattern = /<(select|input|div|section|label|p|textarea)[^>]*\bid=["']([^"']+)["'][^>]*>/gi;
     for (const match of source.matchAll(elementPattern)) {
       const tagName = match[1]?.toUpperCase();
       const id = match[2];
@@ -99,7 +120,9 @@ type FakeSocket = {
   url: string;
   readyState: number;
   sent: string[];
+  closed: boolean;
   open(): void;
+  close(): void;
   message(payload: unknown): void;
 };
 
@@ -118,6 +141,7 @@ async function inspectorHarness(): Promise<{
     readonly listeners = new Map<string, Array<(event: { data?: string }) => void>>();
     readonly sent: string[] = [];
     readyState = 0;
+    closed = false;
 
     constructor(readonly url: string) { sockets.push(this); }
 
@@ -128,6 +152,11 @@ async function inspectorHarness(): Promise<{
     }
 
     send(payload: string): void { this.sent.push(payload); }
+
+    close(): void {
+      this.closed = true;
+      this.readyState = 3;
+    }
 
     open(): void {
       this.readyState = FakeWebSocket.OPEN;
@@ -158,6 +187,23 @@ function field(document: FakeDocument, id: string): FakeElement {
 
 function decodedMessages(socket: FakeSocket): Array<Record<string, unknown>> {
   return socket.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
+}
+
+const ALL_RUNTIME_BINDINGS = [
+  "none", "selector.activate", "reasoning.decrease", "reasoning.increase", "new-task",
+  "host.toggle", "usage.refresh", "usage.toggle-overview", "usage.rate-limit-reset",
+  ...MICRO_SLOTS.map((slot) => `micro.${slot}`),
+  ...JOYSTICK_DIRECTIONS.map((direction) => `joystick.${direction}`),
+  ...OFFICIAL_KEYCAP_IDS.map((id) => `keycap.${id}`)
+];
+
+function runtimeBindings(gesture: "rotation" | "press" | "touch" | "selector"): string[] {
+  return ALL_RUNTIME_BINDINGS.filter((value) => isDialBindingId(value, gesture)).sort();
+}
+
+function actionCheckboxes(document: FakeDocument): FakeElement[] {
+  return field(document, "selector-items").descendants()
+    .filter(({ tagName, type }) => tagName === "INPUT" && type === "checkbox");
 }
 
 function adapterHarness(): { adapter: CodexDialAction; calls: ControllerCall[] } {
@@ -344,6 +390,85 @@ test("every preset replaces the complete form and persists exact uncustomized de
   }
 });
 
+test("incoming settings normalize exactly like the runtime before the next complete persistence", async () => {
+  const inherited = Object.create({ version: 1, preset: "usage", customized: true });
+  const selectorValues = runtimeBindings("selector");
+  const cases: unknown[] = [
+    null,
+    [],
+    "malformed",
+    42,
+    inherited,
+    {
+      version: 1,
+      preset: "actions",
+      customized: true,
+      rotation: { kind: "selector", source: "actions", wrap: "yes", items: ["micro.ACT07"] },
+      press: "shell.command",
+      feedback: "neon"
+    },
+    {
+      version: 1,
+      preset: "usage",
+      rotation: { kind: "paired", counterClockwise: "shell.command" },
+      press: "usage.rate-limit-reset",
+      touchTap: "usage.rate-limit-reset",
+      feedback: "static",
+      staticLabel: `  ${"x".repeat(50)}  `
+    },
+    {
+      version: 1,
+      preset: "custom",
+      customized: true,
+      rotation: {
+        kind: "selector",
+        source: "actions",
+        wrap: false,
+        items: [...selectorValues, selectorValues[0], "shell.command"]
+      },
+      press: "host.toggle",
+      touchTap: "keycap.APPS",
+      feedback: "auto"
+    }
+  ];
+
+  for (const [index, input] of cases.entries()) {
+    const { document, sockets, connect } = await inspectorHarness();
+    connect(
+      "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+      JSON.stringify({ context: `dial-normalize-${index}`, payload: { settings: input } })
+    );
+    sockets[0]?.open();
+    field(document, "press").dispatch("change");
+    const last = decodedMessages(sockets[0]!).at(-1);
+    assert.deepEqual(last, {
+      event: "setSettings",
+      context: `dial-normalize-${index}`,
+      payload: { ...normalizeDialSettings(input), customized: true }
+    }, `case ${index} matches runtime normalization`);
+  }
+});
+
+test("null, array, and primitive socket payloads are ignored without losing current settings", async () => {
+  for (const actionInfo of ["null", "[]", '"primitive"', "7"]) {
+    const harness = await inspectorHarness();
+    assert.doesNotThrow(() => harness.connect(
+      "24680", "plugin-uuid", "registerPropertyInspector", "{}", actionInfo
+    ));
+    assert.equal(field(harness.document, "preset").value, "reasoning");
+  }
+
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-safe", payload: { settings: expandDialPreset("actions") } })
+  );
+  for (const message of [null, [], "primitive", 7, { event: "didReceiveSettings", payload: null }]) {
+    assert.doesNotThrow(() => sockets[0]?.message(message));
+    assert.equal(field(document, "preset").value, "actions");
+  }
+});
+
 test("gesture catalogs contain only runtime-valid values and keep reset press-only", async () => {
   const { document } = await inspectorHarness();
   const cases = [
@@ -356,15 +481,99 @@ test("gesture catalogs contain only runtime-valid values and keep reset press-on
     const values = field(document, id).options.map(({ value }) => value);
     assert.ok(values.length > 0, `${id} has options`);
     assert.equal(new Set(values).size, values.length, `${id} has no duplicate values`);
-    assert.equal(values.every((value) => isDialBindingId(value, gesture)), true, `${id} is allow-listed`);
+    assert.deepEqual([...values].sort(), runtimeBindings(gesture), `${id} covers the runtime catalog exactly`);
     assert.equal(values.includes("usage.rate-limit-reset"), gesture === "press");
     assert.equal(values.includes("selector.activate"), gesture === "press");
   }
-  const actionValues = field(document, "selector-items").descendants()
-    .filter(({ tagName, type }) => tagName === "INPUT" && type === "checkbox")
+  const actionValues = actionCheckboxes(document)
     .map(({ dataset }) => dataset.binding ?? "");
   assert.ok(actionValues.length > 6);
-  assert.equal(actionValues.every((value) => value !== "none" && isDialBindingId(value, "selector")), true);
+  assert.deepEqual([...actionValues].sort(), runtimeBindings("selector"));
+});
+
+test("action selection cap is visible, reversible, and accessible", async () => {
+  const items = runtimeBindings("selector").slice(0, 30);
+  const settings = {
+    ...expandDialPreset("custom"),
+    rotation: { kind: "selector", source: "actions", wrap: true, items }
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-cap", payload: { settings } })
+  );
+  sockets[0]?.open();
+
+  let checkboxes = actionCheckboxes(document);
+  assert.equal(checkboxes.filter(({ checked }) => checked).length, 30);
+  assert.equal(checkboxes.filter(({ checked }) => !checked).every(({ disabled }) => disabled), true);
+  assert.match(field(document, "selector-items-status").textContent, /30.*30/i);
+  for (const row of field(document, "selector-items").children) {
+    const checkbox = row.descendants().find(({ tagName }) => tagName === "INPUT");
+    const label = row.descendants().find(({ tagName }) => tagName === "LABEL");
+    assert.ok(checkbox?.id);
+    assert.equal(label?.htmlFor, checkbox.id);
+    for (const button of row.descendants().filter(({ tagName }) => tagName === "BUTTON")) {
+      assert.match(button.getAttribute("aria-label") ?? "", /^Move .+ (up|down)$/);
+    }
+  }
+
+  const selected = checkboxes.find(({ checked }) => checked);
+  assert.ok(selected);
+  selected.checked = false;
+  selected.dispatch("change");
+  checkboxes = actionCheckboxes(document);
+  assert.equal(checkboxes.filter(({ checked }) => checked).length, 29);
+  assert.equal(checkboxes.filter(({ checked }) => !checked).every(({ disabled }) => !disabled), true);
+  assert.match(field(document, "selector-items-status").textContent, /29.*30/i);
+
+  const unselected = checkboxes.find(({ checked }) => !checked);
+  assert.ok(unselected);
+  unselected.checked = true;
+  unselected.dispatch("change");
+  const last = decodedMessages(sockets[0]!).at(-1);
+  assert.equal((last?.payload as { rotation: { items: string[] } }).rotation.items.length, 30);
+  checkboxes = actionCheckboxes(document);
+  assert.equal(checkboxes.filter(({ checked }) => !checked).every(({ disabled }) => disabled), true);
+});
+
+test("pre-open edits flush only the latest complete settings after registration", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-pending", payload: { settings: expandDialPreset("reasoning") } })
+  );
+  field(document, "preset").value = "actions";
+  field(document, "preset").dispatch("change");
+  field(document, "feedback").value = "static";
+  field(document, "feedback").dispatch("change");
+  assert.deepEqual(decodedMessages(sockets[0]!), []);
+  sockets[0]?.open();
+  assert.deepEqual(decodedMessages(sockets[0]!), [
+    { event: "registerPropertyInspector", uuid: "plugin-uuid" },
+    {
+      event: "setSettings",
+      context: "dial-pending",
+      payload: { ...expandDialPreset("actions"), feedback: "static", customized: true }
+    }
+  ]);
+});
+
+test("reconnect closes the replaced socket and ignores its late callbacks", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-old", payload: { settings: expandDialPreset("reasoning") } })
+  );
+  connect(
+    "24681", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-new", payload: { settings: expandDialPreset("usage") } })
+  );
+  assert.equal(sockets[0]?.closed, true);
+  sockets[0]?.open();
+  sockets[0]?.message({ event: "didReceiveSettings", payload: { settings: expandDialPreset("agents") } });
+  assert.equal(field(document, "preset").value, "usage");
+  assert.deepEqual(decodedMessages(sockets[0]!), []);
 });
 
 test("custom edits serialize ordering, visibility, limits, and only setSettings messages", async () => {
