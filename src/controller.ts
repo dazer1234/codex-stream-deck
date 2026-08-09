@@ -1538,6 +1538,7 @@ export class DeckController {
       try { await precedingRefresh; }
       catch { /* The original refresh owner retains its failure; FAST still needs a newer snapshot. */ }
     }
+    if (this.stopped) return;
     await this.refresh();
   }
 

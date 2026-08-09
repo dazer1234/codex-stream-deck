@@ -39,6 +39,8 @@ type ControllerProbe = {
     adjustReasoning?(direction: string): Promise<void>;
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
+    refresh?(): Promise<MicroSnapshot>;
+    close?(): void;
   };
   keycapImages: Map<string, Promise<string | null>>;
   pressedAgents: Map<number, unknown>;
@@ -451,6 +453,40 @@ test("local FAST activation refreshes after an older refresh rejects", async () 
   rejectOlderRefresh(new Error("older render failed"));
   await assert.doesNotReject(activation);
   assert.equal(postCommandRefreshes, 1, "the rejected older read cannot suppress the post-command read");
+});
+
+test("concurrent FAST activations do not refresh after shutdown while awaiting an older refresh", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const olderRefresh = deferred<void>();
+  const trackedOlderRefresh = olderRefresh.promise.finally(() => { state.refreshInFlight = undefined; });
+  let commands = 0;
+  let refreshes = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: snapshotWithFast(false) };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async runKeycap() { commands += 1; },
+    async refresh() {
+      refreshes += 1;
+      return snapshotWithFast(true);
+    },
+    close() {}
+  };
+  state.refreshInFlight = trackedOlderRefresh;
+
+  const activations = [controller.runKeycap("FAST"), controller.runKeycap("FAST")];
+  await settle();
+  assert.equal(commands, 2);
+  assert.equal(refreshes, 0);
+
+  controller.stop();
+  olderRefresh.resolve();
+  await Promise.all(activations);
+  assert.equal(refreshes, 0, "shutdown prevents every queued post-command refresh");
 });
 
 test("selector rotation previews only and selector state stays isolated per action", async () => {
