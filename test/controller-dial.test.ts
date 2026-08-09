@@ -208,7 +208,7 @@ test("only effective FAST keycaps render live state and state changes replace ca
   controller.registerMicroAction("ACT07", microOther);
   controller.registerFixedAction("FAST", officialFast, { kind: "local", keycapId: "FAST" });
   controller.registerFixedAction("APPR", officialOther, { kind: "local", keycapId: "APPR" });
-  await settle();
+  await state.renderAll();
 
   assert.match(decodeImage(microFast.images.at(-1)!), /data-toggle-state="on"/);
   assert.match(decodeImage(officialFast.images.at(-1)!), /data-toggle-state="on"/);
