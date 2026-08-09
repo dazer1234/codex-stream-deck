@@ -4,6 +4,7 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 import type { DeckController } from "../src/controller.js";
 import { CodexDialAction } from "../src/dial-action.js";
+import { expandDialPreset, isDialBindingId } from "../src/dial-domain.js";
 
 const text = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -19,6 +20,145 @@ type ManifestAction = {
 };
 
 type ControllerCall = { method: string; action: unknown; payload?: unknown };
+
+type FakeEvent = { target: FakeElement; preventDefault(): void };
+
+class FakeElement {
+  readonly children: FakeElement[] = [];
+  readonly dataset: Record<string, string> = {};
+  readonly listeners = new Map<string, Array<(event: FakeEvent) => void>>();
+  parentElement: FakeElement | null = null;
+  value = "";
+  checked = false;
+  disabled = false;
+  hidden = false;
+  type = "";
+  textContent = "";
+  className = "";
+  maxLength = -1;
+
+  constructor(readonly tagName: string, readonly id = "") {}
+
+  get options(): FakeElement[] {
+    return this.descendants().filter(({ tagName }) => tagName === "OPTION");
+  }
+
+  appendChild(child: FakeElement): FakeElement {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+
+  append(...children: FakeElement[]): void {
+    for (const child of children) this.appendChild(child);
+  }
+
+  replaceChildren(...children: FakeElement[]): void {
+    this.children.splice(0);
+    this.append(...children);
+  }
+
+  addEventListener(name: string, listener: (event: FakeEvent) => void): void {
+    const listeners = this.listeners.get(name) ?? [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  dispatch(name: string): void {
+    const event = { target: this, preventDefault() {} };
+    for (const listener of this.listeners.get(name) ?? []) listener(event);
+  }
+
+  descendants(): FakeElement[] {
+    return this.children.flatMap((child) => [child, ...child.descendants()]);
+  }
+}
+
+class FakeDocument {
+  readonly elements = new Map<string, FakeElement>();
+
+  constructor(source: string) {
+    const elementPattern = /<(select|input|div|section|label|textarea)[^>]*\bid=["']([^"']+)["'][^>]*>/gi;
+    for (const match of source.matchAll(elementPattern)) {
+      const tagName = match[1]?.toUpperCase();
+      const id = match[2];
+      if (tagName && id) this.elements.set(id, new FakeElement(tagName, id));
+    }
+  }
+
+  getElementById(id: string): FakeElement | null {
+    return this.elements.get(id) ?? null;
+  }
+
+  createElement(tagName: string): FakeElement {
+    return new FakeElement(tagName.toUpperCase());
+  }
+}
+
+type FakeSocket = {
+  url: string;
+  readyState: number;
+  sent: string[];
+  open(): void;
+  message(payload: unknown): void;
+};
+
+async function inspectorHarness(): Promise<{
+  document: FakeDocument;
+  sockets: FakeSocket[];
+  connect: (...args: string[]) => void;
+}> {
+  const source = await text("static/property-inspector/codex-dial.html");
+  const script = source.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "inspector contains an executable script");
+  const document = new FakeDocument(source);
+  const sockets: FakeSocket[] = [];
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readonly listeners = new Map<string, Array<(event: { data?: string }) => void>>();
+    readonly sent: string[] = [];
+    readyState = 0;
+
+    constructor(readonly url: string) { sockets.push(this); }
+
+    addEventListener(name: string, listener: (event: { data?: string }) => void): void {
+      const listeners = this.listeners.get(name) ?? [];
+      listeners.push(listener);
+      this.listeners.set(name, listeners);
+    }
+
+    send(payload: string): void { this.sent.push(payload); }
+
+    open(): void {
+      this.readyState = FakeWebSocket.OPEN;
+      for (const listener of this.listeners.get("open") ?? []) listener({});
+    }
+
+    message(payload: unknown): void {
+      const event = { data: JSON.stringify(payload) };
+      for (const listener of this.listeners.get("message") ?? []) listener(event);
+    }
+  }
+  const window: Record<string, unknown> = {};
+  runInNewContext(script, { window, document, WebSocket: FakeWebSocket, JSON });
+  const connect = window.connectElgatoStreamDeckSocket;
+  assert.equal(typeof connect, "function");
+  return {
+    document,
+    sockets,
+    connect: connect as (...args: string[]) => void
+  };
+}
+
+function field(document: FakeDocument, id: string): FakeElement {
+  const element = document.getElementById(id);
+  assert.ok(element, `missing #${id}`);
+  return element;
+}
+
+function decodedMessages(socket: FakeSocket): Array<Record<string, unknown>> {
+  return socket.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
+}
 
 function adapterHarness(): { adapter: CodexDialAction; calls: ControllerCall[] } {
   const calls: ControllerCall[] = [];
@@ -123,7 +263,7 @@ test("custom layout has five unique typed keys inside the 200 by 100 Encoder can
   }
 });
 
-test("dial artwork and the Task 5 inspector shell are self-contained", async () => {
+test("dial artwork and property inspector are self-contained", async () => {
   const [dial, dial2x, inspector] = await Promise.all([
     text("static/imgs/dial.svg"),
     text("static/imgs/dial@2x.svg"),
@@ -135,34 +275,147 @@ test("dial artwork and the Task 5 inspector shell are self-contained", async () 
   assert.doesNotMatch(`${dial}${dial2x}`, /<image|href=/i, "artwork does not embed third-party assets");
   assert.match(inspector, /connectElgatoStreamDeckSocket/);
   assert.match(inspector, /new WebSocket/);
-  assert.doesNotMatch(inspector, /<input|<select|<button/i, "full configuration controls belong to Task 6");
 });
 
-test("minimal inspector opens loopback WebSocket and sends the Stream Deck registration payload", async () => {
-  const inspector = await text("static/property-inspector/codex-dial.html");
-  const script = inspector.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script, "inspector contains an executable registration script");
-
-  const sockets: FakeWebSocket[] = [];
-  class FakeWebSocket {
-    readonly listeners = new Map<string, () => void>();
-    readonly sent: string[] = [];
-    constructor(readonly url: string) { sockets.push(this); }
-    addEventListener(name: string, listener: () => void): void { this.listeners.set(name, listener); }
-    send(payload: string): void { this.sent.push(payload); }
+test("property inspector exposes presets and independent gesture controls", async () => {
+  const source = await text("static/property-inspector/codex-dial.html");
+  for (const id of [
+    "preset", "rotation-kind", "counter-clockwise", "clockwise", "selector-source",
+    "selector-items", "wrap", "press", "touch-tap", "feedback", "static-label"
+  ]) {
+    assert.match(source, new RegExp(`id=["']${id}["']`));
   }
-  const window: Record<string, unknown> = {};
-  runInNewContext(script, { window, WebSocket: FakeWebSocket });
-  const connect = window.connectElgatoStreamDeckSocket as
-    ((port: number, uuid: string, registerEvent: string) => void) | undefined;
+  assert.match(source, /setSettings/);
+  assert.match(source, /version:\s*1/);
+  assert.match(source, /customized:\s*true/);
+  assert.match(source, /usage\.rate-limit-reset/);
+});
 
-  assert.ok(connect);
-  connect(24680, "plugin-uuid", "registerPropertyInspector");
+test("property inspector registers, initializes, reconnects, and accepts incoming settings", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-1", payload: { settings: expandDialPreset("agents") } })
+  );
   assert.equal(sockets[0]?.url, "ws://127.0.0.1:24680");
-  sockets[0]?.listeners.get("open")?.();
-  assert.deepEqual(sockets[0]?.sent.map((payload) => JSON.parse(payload)), [
+  sockets[0]?.open();
+  assert.deepEqual(decodedMessages(sockets[0]!), [
     { event: "registerPropertyInspector", uuid: "plugin-uuid" }
   ]);
+  assert.equal(field(document, "preset").value, "agents");
+  assert.equal(field(document, "paired-controls").hidden, true);
+  assert.equal(field(document, "selector-controls").hidden, false);
+
+  connect(
+    "24681", "plugin-uuid-2", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-2", payload: { settings: expandDialPreset("actions") } })
+  );
+  assert.equal(field(document, "preset").value, "actions");
+  sockets[0]?.message({
+    event: "didReceiveSettings",
+    payload: { settings: expandDialPreset("usage") }
+  });
+  assert.equal(field(document, "preset").value, "actions", "an obsolete socket cannot overwrite a reconnect");
+  sockets[1]?.message({
+    event: "didReceiveSettings",
+    payload: { settings: { ...expandDialPreset("custom"), staticLabel: "Build monitor" } }
+  });
+  assert.equal(field(document, "preset").value, "custom");
+  assert.equal(field(document, "feedback").value, "static");
+  assert.equal(field(document, "static-label").value, "Build monitor");
+  assert.equal(field(document, "static-label-row").hidden, false);
+});
+
+test("every preset replaces the complete form and persists exact uncustomized defaults", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-preset", payload: { settings: {} } })
+  );
+  sockets[0]?.open();
+  const preset = field(document, "preset");
+  for (const id of ["reasoning", "agents", "actions", "navigation", "usage", "custom"] as const) {
+    preset.value = id;
+    preset.dispatch("change");
+    const last = decodedMessages(sockets[0]!).at(-1);
+    assert.deepEqual(last, {
+      event: "setSettings", context: "dial-preset", payload: expandDialPreset(id)
+    });
+  }
+});
+
+test("gesture catalogs contain only runtime-valid values and keep reset press-only", async () => {
+  const { document } = await inspectorHarness();
+  const cases = [
+    ["counter-clockwise", "rotation"],
+    ["clockwise", "rotation"],
+    ["press", "press"],
+    ["touch-tap", "touch"]
+  ] as const;
+  for (const [id, gesture] of cases) {
+    const values = field(document, id).options.map(({ value }) => value);
+    assert.ok(values.length > 0, `${id} has options`);
+    assert.equal(new Set(values).size, values.length, `${id} has no duplicate values`);
+    assert.equal(values.every((value) => isDialBindingId(value, gesture)), true, `${id} is allow-listed`);
+    assert.equal(values.includes("usage.rate-limit-reset"), gesture === "press");
+    assert.equal(values.includes("selector.activate"), gesture === "press");
+  }
+  const actionValues = field(document, "selector-items").descendants()
+    .filter(({ tagName, type }) => tagName === "INPUT" && type === "checkbox")
+    .map(({ dataset }) => dataset.binding ?? "");
+  assert.ok(actionValues.length > 6);
+  assert.equal(actionValues.every((value) => value !== "none" && isDialBindingId(value, "selector")), true);
+});
+
+test("custom edits serialize ordering, visibility, limits, and only setSettings messages", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-custom", payload: { settings: expandDialPreset("actions") } })
+  );
+  sockets[0]?.open();
+
+  const selectorItems = field(document, "selector-items");
+  const approveRow = selectorItems.children.find((row) =>
+    row.descendants().some(({ dataset }) => dataset.binding === "micro.ACT07"));
+  const up = approveRow?.descendants().find(({ tagName, dataset }) =>
+    tagName === "BUTTON" && dataset.direction === "up");
+  assert.ok(up);
+  up.dispatch("click");
+  let last = decodedMessages(sockets[0]!).at(-1);
+  assert.deepEqual((last?.payload as { rotation: { items: string[] } }).rotation.items.slice(0, 2), [
+    "micro.ACT07", "micro.ACT06"
+  ]);
+  assert.equal((last?.payload as { customized: boolean }).customized, true);
+
+  const rotationKind = field(document, "rotation-kind");
+  rotationKind.value = "paired";
+  rotationKind.dispatch("change");
+  assert.equal(field(document, "paired-controls").hidden, false);
+  assert.equal(field(document, "selector-controls").hidden, true);
+
+  const feedback = field(document, "feedback");
+  feedback.value = "static";
+  feedback.dispatch("change");
+  assert.equal(field(document, "static-label-row").hidden, false);
+  const label = field(document, "static-label");
+  label.value = "x".repeat(70);
+  label.dispatch("input");
+  last = decodedMessages(sockets[0]!).at(-1);
+  assert.equal((last?.payload as { staticLabel: string }).staticLabel, "x".repeat(40));
+
+  rotationKind.value = "selector";
+  rotationKind.dispatch("change");
+  field(document, "selector-source").value = "actions";
+  field(document, "selector-source").dispatch("change");
+  for (const checkbox of selectorItems.descendants().filter(({ tagName, type }) =>
+    tagName === "INPUT" && type === "checkbox")) {
+    checkbox.checked = true;
+    checkbox.dispatch("change");
+  }
+  last = decodedMessages(sockets[0]!).at(-1);
+  assert.equal((last?.payload as { rotation: { items: string[] } }).rotation.items.length, 30);
+  assert.equal(decodedMessages(sockets[0]!).slice(1).every(({ event }) => event === "setSettings"), true);
 });
 
 test("build wires every Encoder asset without executing the source-mutating generator", async () => {

@@ -4,17 +4,561 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Codex Dial</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --background: #202124;
+      --panel: #292b30;
+      --field: #35383f;
+      --field-hover: #3c4048;
+      --border: #484c55;
+      --text: #f3f4f7;
+      --muted: #aeb3bf;
+      --accent: #7f8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 250px;
+      padding: 14px;
+      color: var(--text);
+      background: var(--background);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    header { margin-bottom: 14px; }
+    h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+    header p, .hint { margin: 4px 0 0; color: var(--muted); }
+    .stack { display: grid; gap: 12px; }
+    .panel {
+      display: grid;
+      gap: 10px;
+      padding: 11px;
+      border: 1px solid #353840;
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .panel-title {
+      margin: 0;
+      color: #cfd3ff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    label.field { display: grid; gap: 5px; }
+    label.field > span { color: #d7dae1; }
+    select, input[type="text"] {
+      width: 100%;
+      min-height: 30px;
+      padding: 5px 8px;
+      color: var(--text);
+      background: var(--field);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      outline: none;
+    }
+    select:hover, input[type="text"]:hover { background: var(--field-hover); }
+    select:focus, input[type="text"]:focus { border-color: var(--accent); }
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 28px;
+    }
+    input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
+    #selector-items {
+      display: grid;
+      max-height: 286px;
+      overflow: auto;
+      border: 1px solid #3d4149;
+      border-radius: 6px;
+      background: #24262b;
+    }
+    .action-row {
+      display: grid;
+      grid-template-columns: 19px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 5px 7px;
+      border-bottom: 1px solid #34373d;
+    }
+    .action-row:last-child { border-bottom: 0; }
+    .action-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .move-buttons { display: flex; gap: 3px; }
+    .move-buttons button {
+      width: 26px;
+      height: 24px;
+      padding: 0;
+      color: #d9dce4;
+      background: #34373e;
+      border: 1px solid #4b4f58;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .move-buttons button:hover:not(:disabled) { background: #454a54; border-color: #606672; }
+    .move-buttons button:disabled { opacity: .35; cursor: default; }
+    [hidden] { display: none !important; }
+    @media (max-width: 300px) {
+      body { padding: 10px; }
+      .panel { padding: 9px; }
+    }
+  </style>
 </head>
 <body>
+  <header>
+    <h1>Codex Dial</h1>
+    <p>Configure this knob's rotation, press, touch, and live feedback independently.</p>
+  </header>
+
+  <main class="stack">
+    <section class="panel">
+      <h2 class="panel-title">Preset</h2>
+      <label class="field">
+        <span>Starting point</span>
+        <select id="preset">
+          <option value="reasoning">Reasoning</option>
+          <option value="agents">Agents</option>
+          <option value="actions">Actions</option>
+          <option value="navigation">Navigation</option>
+          <option value="usage">Usage</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Rotation</h2>
+      <label class="field">
+        <span>Mode</span>
+        <select id="rotation-kind">
+          <option value="paired">Paired controls</option>
+          <option value="selector">Rotate to select</option>
+        </select>
+      </label>
+
+      <div id="paired-controls" class="stack">
+        <label class="field">
+          <span>Counter-clockwise</span>
+          <select id="counter-clockwise"></select>
+        </label>
+        <label class="field">
+          <span>Clockwise</span>
+          <select id="clockwise"></select>
+        </label>
+      </div>
+
+      <div id="selector-controls" class="stack" hidden>
+        <label class="field">
+          <span>Selector source</span>
+          <select id="selector-source">
+            <option value="agents">Occupied agents</option>
+            <option value="actions">Configured actions</option>
+            <option value="usage">Usage windows</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <span>Wrap at ends</span>
+          <input id="wrap" type="checkbox">
+        </label>
+        <div id="selector-items-row" class="stack" hidden>
+          <div>
+            <div>Action order</div>
+            <p class="hint">Check actions to include, then use the arrows to set dial order.</p>
+          </div>
+          <div id="selector-items"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Independent gestures</h2>
+      <label class="field">
+        <span>Dial press</span>
+        <select id="press"></select>
+      </label>
+      <label class="field">
+        <span>Touch tap</span>
+        <select id="touch-tap"></select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Touch-strip feedback</h2>
+      <label class="field">
+        <span>Display</span>
+        <select id="feedback">
+          <option value="auto">Automatic</option>
+          <option value="reasoning">Current reasoning</option>
+          <option value="agent">Selected agent</option>
+          <option value="action">Selected action</option>
+          <option value="navigation">Navigation pair</option>
+          <option value="usage">Usage window / overview</option>
+          <option value="static">Static label</option>
+        </select>
+      </label>
+      <label id="static-label-row" class="field" hidden>
+        <span>Label</span>
+        <input id="static-label" type="text" maxlength="40" placeholder="CODEX DIAL">
+      </label>
+    </section>
+  </main>
+
   <script>
     let websocket;
+    let context;
+    let connectionGeneration = 0;
 
-    window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent) => {
+    const PRESETS = {
+      reasoning: {
+        version: 1,
+        preset: "reasoning",
+        customized: false,
+        rotation: { kind: "paired", counterClockwise: "reasoning.decrease", clockwise: "reasoning.increase" },
+        press: "none",
+        touchTap: "keycap.FAST",
+        feedback: "reasoning"
+      },
+      agents: {
+        version: 1,
+        preset: "agents",
+        customized: false,
+        rotation: { kind: "selector", source: "agents", wrap: true, items: [] },
+        press: "selector.activate",
+        touchTap: "keycap.TIME",
+        feedback: "agent"
+      },
+      actions: {
+        version: 1,
+        preset: "actions",
+        customized: false,
+        rotation: {
+          kind: "selector",
+          source: "actions",
+          wrap: true,
+          items: ["micro.ACT06", "micro.ACT07", "micro.ACT08", "micro.ACT09", "micro.ACT10_ACT11", "micro.ACT12"]
+        },
+        press: "selector.activate",
+        touchTap: "keycap.SETUP",
+        feedback: "action"
+      },
+      navigation: {
+        version: 1,
+        preset: "navigation",
+        customized: false,
+        rotation: { kind: "paired", counterClockwise: "joystick.left", clockwise: "joystick.right" },
+        press: "joystick.up",
+        touchTap: "joystick.down",
+        feedback: "navigation"
+      },
+      usage: {
+        version: 1,
+        preset: "usage",
+        customized: false,
+        rotation: { kind: "selector", source: "usage", wrap: true, items: [] },
+        press: "usage.toggle-overview",
+        touchTap: "usage.refresh",
+        feedback: "usage"
+      },
+      custom: {
+        version: 1,
+        preset: "custom",
+        customized: false,
+        rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
+        press: "none",
+        touchTap: "none",
+        feedback: "static"
+      }
+    };
+
+    const BINDING_GROUPS = [
+      { label: "None", values: [["none", "No action"]] },
+      { label: "Selector", values: [["selector.activate", "Activate highlighted item"]] },
+      { label: "Reasoning", values: [
+        ["reasoning.decrease", "Decrease reasoning"],
+        ["reasoning.increase", "Increase reasoning"]
+      ] },
+      { label: "Agents / actions", values: [
+        ["new-task", "New task"],
+        ["micro.ACT06", "Fast"],
+        ["micro.ACT07", "Approve"],
+        ["micro.ACT08", "Reject"],
+        ["micro.ACT09", "Fork"],
+        ["micro.ACT10_ACT11", "Dictation"],
+        ["micro.ACT12", "Send"]
+      ] },
+      { label: "Navigation", values: [
+        ["joystick.up", "Plan"],
+        ["joystick.right", "Forward"],
+        ["joystick.down", "Sidebar"],
+        ["joystick.left", "Back"]
+      ] },
+      { label: "Codex keycaps", values: [
+        ["keycap.FAST", "Fast mode"], ["keycap.APPR", "Approve"], ["keycap.REJ", "Reject"],
+        ["keycap.SPLIT", "Fork chat"], ["keycap.MIC", "Dictation"], ["keycap.CODEX", "Codex / submit"],
+        ["keycap.BUG", "Bug / feedback"], ["keycap.OAI", "OpenAI docs"], ["keycap.TERM", "Terminal"],
+        ["keycap.DWN", "Copy chat Markdown"], ["keycap.DEL", "Archive chat"], ["keycap.NEW", "New task"],
+        ["keycap.NAV", "Browser"], ["keycap.MAGIC", "Pin / unpin"], ["keycap.DIFF", "Review"],
+        ["keycap.PLAY", "Run environment action"], ["keycap.GIT", "Git commit"], ["keycap.BRCH", "Branch review"],
+        ["keycap.MRG", "Merge review"], ["keycap.PR", "Create pull request"], ["keycap.PAINT", "Add photos"],
+        ["keycap.LAB", "Lab / settings"], ["keycap.PARTY", "Side chat"], ["keycap.TIME", "Manage tasks"],
+        ["keycap.MIND+", "Reasoning up"], ["keycap.MIND-", "Reasoning down"], ["keycap.SETUP", "Settings"],
+        ["keycap.FOLD", "Open folder"], ["keycap.UPL", "Add files"], ["keycap.APPS", "Skills"]
+      ] },
+      { label: "Usage", values: [
+        ["usage.refresh", "Refresh usage"],
+        ["usage.toggle-overview", "Toggle usage overview"],
+        ["usage.rate-limit-reset", "Reset rate-limit credit (hold)"]
+      ] },
+      { label: "Host", values: [["host.toggle", "Toggle host"]] }
+    ];
+
+    const PRESET_IDS = Object.keys(PRESETS);
+    const SELECTOR_SOURCES = ["agents", "actions", "usage"];
+    const FEEDBACK_MODES = ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"];
+    const ALL_BINDINGS = BINDING_GROUPS.flatMap((group) => group.values.map(([value]) => value));
+    const ACTION_BINDINGS = ALL_BINDINGS.filter((value) => value !== "none" && bindingAllowed(value, "selector"));
+    const ACTION_LABELS = new Map(BINDING_GROUPS.flatMap((group) => group.values));
+
+    let settings = { ...PRESETS.reasoning, customized: true };
+    let actionOrder = [...ACTION_BINDINGS];
+    let selectedActionItems = new Set();
+
+    const element = (id) => document.getElementById(id);
+
+    function bindingAllowed(value, gesture) {
+      if (!ALL_BINDINGS?.includes(value)) return false;
+      if (value === "usage.rate-limit-reset") return gesture === "press";
+      if (value === "selector.activate") return gesture === "press";
+      return true;
+    }
+
+    function populateBindingSelect(id, gesture) {
+      const select = element(id);
+      select.replaceChildren();
+      for (const group of BINDING_GROUPS) {
+        const values = group.values.filter(([value]) => bindingAllowed(value, gesture));
+        if (values.length === 0) continue;
+        const optionGroup = document.createElement("optgroup");
+        optionGroup.label = group.label;
+        for (const [value, label] of values) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          optionGroup.appendChild(option);
+        }
+        select.appendChild(optionGroup);
+      }
+    }
+
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function normalizedSettings(input) {
+      if (!input || input.version !== 1 || !PRESET_IDS.includes(input.preset)) {
+        return clone(PRESETS.reasoning);
+      }
+      const fallback = clone(PRESETS[input.preset]);
+      const result = {
+        ...fallback,
+        customized: input.customized === true,
+        press: bindingAllowed(input.press, "press") ? input.press : fallback.press,
+        touchTap: bindingAllowed(input.touchTap, "touch") ? input.touchTap : fallback.touchTap,
+        feedback: FEEDBACK_MODES.includes(input.feedback) ? input.feedback : fallback.feedback
+      };
+
+      if (input.rotation?.kind === "paired") {
+        result.rotation = {
+          kind: "paired",
+          counterClockwise: bindingAllowed(input.rotation.counterClockwise, "rotation")
+            ? input.rotation.counterClockwise : "none",
+          clockwise: bindingAllowed(input.rotation.clockwise, "rotation")
+            ? input.rotation.clockwise : "none"
+        };
+      } else if (input.rotation?.kind === "selector" && SELECTOR_SOURCES.includes(input.rotation.source)) {
+        const uniqueItems = Array.isArray(input.rotation.items)
+          ? input.rotation.items.filter((value, index, values) =>
+            bindingAllowed(value, "selector") && value !== "none" && values.indexOf(value) === index).slice(0, 30)
+          : [];
+        result.rotation = {
+          kind: "selector",
+          source: input.rotation.source,
+          wrap: input.rotation.wrap === true,
+          items: input.rotation.source === "actions" ? uniqueItems : []
+        };
+      }
+
+      const staticLabel = typeof input.staticLabel === "string" ? input.staticLabel.trim().slice(0, 40) : "";
+      if (staticLabel) result.staticLabel = staticLabel;
+      return result;
+    }
+
+    function applySettings(input) {
+      settings = normalizedSettings(input);
+      const configuredItems = settings.rotation.kind === "selector" && settings.rotation.source === "actions"
+        ? settings.rotation.items
+        : [];
+      selectedActionItems = new Set(configuredItems);
+      actionOrder = [...configuredItems, ...ACTION_BINDINGS.filter((value) => !selectedActionItems.has(value))];
+
+      element("preset").value = settings.preset;
+      element("rotation-kind").value = settings.rotation.kind;
+      if (settings.rotation.kind === "paired") {
+        element("counter-clockwise").value = settings.rotation.counterClockwise;
+        element("clockwise").value = settings.rotation.clockwise;
+      } else {
+        element("selector-source").value = settings.rotation.source;
+        element("wrap").checked = settings.rotation.wrap;
+      }
+      element("press").value = settings.press;
+      element("touch-tap").value = settings.touchTap;
+      element("feedback").value = settings.feedback;
+      element("static-label").value = settings.staticLabel ?? "";
+      updateConditionalViews();
+      renderActionItems();
+    }
+
+    function updateConditionalViews() {
+      const selector = element("rotation-kind").value === "selector";
+      element("paired-controls").hidden = selector;
+      element("selector-controls").hidden = !selector;
+      element("selector-items-row").hidden = !selector || element("selector-source").value !== "actions";
+      element("static-label-row").hidden = element("feedback").value !== "static";
+    }
+
+    function renderActionItems() {
+      const container = element("selector-items");
+      container.replaceChildren();
+      actionOrder.forEach((binding, index) => {
+        const row = document.createElement("div");
+        row.className = "action-row";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.dataset.binding = binding;
+        checkbox.checked = selectedActionItems.has(binding);
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) selectedActionItems.add(binding);
+          else selectedActionItems.delete(binding);
+          persist(true);
+        });
+        const label = document.createElement("span");
+        label.className = "action-label";
+        label.textContent = ACTION_LABELS.get(binding) ?? binding;
+        const buttons = document.createElement("span");
+        buttons.className = "move-buttons";
+        const up = moveButton(binding, "up", "↑", index === 0);
+        const down = moveButton(binding, "down", "↓", index === actionOrder.length - 1);
+        buttons.append(up, down);
+        row.append(checkbox, label, buttons);
+        container.appendChild(row);
+      });
+    }
+
+    function moveButton(binding, direction, label, disabled) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.direction = direction;
+      button.textContent = label;
+      button.disabled = disabled;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (button.disabled) return;
+        const index = actionOrder.indexOf(binding);
+        const next = direction === "up" ? index - 1 : index + 1;
+        [actionOrder[index], actionOrder[next]] = [actionOrder[next], actionOrder[index]];
+        renderActionItems();
+        persist(true);
+      });
+      return button;
+    }
+
+    function readForm() {
+      const rotation = element("rotation-kind").value === "selector"
+        ? {
+            kind: "selector",
+            source: element("selector-source").value,
+            wrap: element("wrap").checked,
+            items: element("selector-source").value === "actions"
+              ? actionOrder.filter((value) => selectedActionItems.has(value)).slice(0, 30)
+              : []
+          }
+        : {
+            kind: "paired",
+            counterClockwise: element("counter-clockwise").value,
+            clockwise: element("clockwise").value
+          };
+      const staticLabel = element("static-label").value.trim().slice(0, 40);
+      element("static-label").value = staticLabel;
+      return {
+        version: 1,
+        preset: element("preset").value,
+        customized: true,
+        rotation,
+        press: element("press").value,
+        touchTap: element("touch-tap").value,
+        feedback: element("feedback").value,
+        ...(staticLabel ? { staticLabel } : {})
+      };
+    }
+
+    function persist(customized = true) {
+      const payload = readForm();
+      payload.version = 1;
+      payload.customized = customized;
+      settings = payload;
+      if (websocket?.readyState === WebSocket.OPEN) {
+        websocket.send(JSON.stringify({ event: "setSettings", context, payload }));
+      }
+    }
+
+    function bindControls() {
+      element("preset").addEventListener("change", () => {
+        applySettings(PRESETS[element("preset").value] ?? PRESETS.reasoning);
+        persist(false);
+      });
+      for (const id of ["rotation-kind", "selector-source", "feedback"]) {
+        element(id).addEventListener("change", () => {
+          updateConditionalViews();
+          persist(true);
+        });
+      }
+      for (const id of ["counter-clockwise", "clockwise", "press", "touch-tap", "wrap"]) {
+        element(id).addEventListener("change", () => persist(true));
+      }
+      element("static-label").addEventListener("input", () => persist(true));
+    }
+
+    window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
+      const generation = ++connectionGeneration;
+      let action = {};
+      try { action = JSON.parse(actionInfo || "{}"); } catch { action = {}; }
+      context = action.context ?? uuid;
+      applySettings(action.payload?.settings ?? PRESETS.reasoning);
       websocket = new WebSocket(`ws://127.0.0.1:${port}`);
       websocket.addEventListener("open", () => {
+        if (generation !== connectionGeneration) return;
         websocket.send(JSON.stringify({ event: registerEvent, uuid }));
       });
+      websocket.addEventListener("message", (message) => {
+        if (generation !== connectionGeneration) return;
+        let event;
+        try { event = JSON.parse(message.data); } catch { return; }
+        if (event.event === "didReceiveSettings") {
+          applySettings(event.payload?.settings ?? PRESETS.reasoning);
+        }
+      });
     };
+
+    populateBindingSelect("counter-clockwise", "rotation");
+    populateBindingSelect("clockwise", "rotation");
+    populateBindingSelect("press", "press");
+    populateBindingSelect("touch-tap", "touch");
+    bindControls();
+    applySettings(PRESETS.reasoning);
   </script>
 </body>
 </html>
