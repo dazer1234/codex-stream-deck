@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  REASONING_ENCODER_KEYS, resolveAgentDispatch, retainEvaluationPromise, selectCodexMainTarget
+  resolveAgentDispatch, retainEvaluationPromise, selectCodexMainTarget
 } from "../src/codex-micro-renderer-bridge.js";
 import * as microBridgeModule from "../src/codex-micro-renderer-bridge.js";
 import { ADDITIONAL_KEYCAPS, OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
@@ -384,14 +384,25 @@ test("agent routing follows the stable thread identity when a cross-host slot is
   });
 });
 
-test("reasoning controls use the official native encoder rotation events", async () => {
-  assert.deepEqual(REASONING_ENCODER_KEYS, {
-    decrease: "ENC_CW",
-    increase: "ENC_CC"
-  });
+test("reasoning controls invoke dedicated commands without native encoder dispatch", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const keycaps: string[] = [];
+  const dispatches: unknown[][] = [];
+  const testBridge = bridge as unknown as {
+    runKeycap: (keycapId: "MIND+" | "MIND-") => Promise<void>;
+    dispatch: (...args: unknown[]) => Promise<void>;
+  };
+  testBridge.runKeycap = async (keycapId) => { keycaps.push(keycapId); };
+  testBridge.dispatch = async (...args) => { dispatches.push(args); };
+
+  await bridge.adjustReasoning("increase");
+  await bridge.adjustReasoning("decrease");
+
+  assert.deepEqual(keycaps, ["MIND+", "MIND-"]);
+  assert.deepEqual(dispatches, []);
   const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
-  assert.match(source, /act: 2/);
-  assert.match(source, /codex-micro-hid-event/);
+  const adjustment = source.match(/async adjustReasoning\([\s\S]*?\n  }/)?.[0] ?? "";
+  assert.doesNotMatch(adjustment, /ENC_CW|ENC_CC|this\.dispatch/);
 });
 
 test("manifest exposes both dedicated reasoning adjustment buttons", async () => {

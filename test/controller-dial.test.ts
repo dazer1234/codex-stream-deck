@@ -35,6 +35,7 @@ type ControllerProbe = {
   microBridge: {
     sendAgent(slot: number, act: 0 | 1, threadKey?: string): Promise<void>;
     sendAction?(slot: string, act: 0 | 1): Promise<void>;
+    sendEncoder?(act: 0 | 1): Promise<void>;
     sendJoystick?(direction: string, distance: 0 | 1): Promise<void>;
     adjustReasoning?(direction: string): Promise<void>;
     runKeycap?(keycapId: string): Promise<void>;
@@ -589,6 +590,31 @@ test("paired detents continue after a dispatch failure and alert only the failin
 
   assert.deepEqual(attempts, ["attempt-1", "attempt-2"]);
   assert.equal(action.alerts, 1);
+});
+
+test("reasoning dial maps each direction to one dedicated adjustment without encoder clicks", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-direction");
+  const adjustments: string[] = [];
+  const encoderClicks: number[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning(direction) { adjustments.push(direction); },
+    async sendEncoder(act) { encoderClicks.push(act); }
+  };
+
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  controller.rotateDial(action, 1);
+  controller.rotateDial(action, -1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(adjustments, ["increase", "decrease"]);
+  assert.deepEqual(encoderClicks, []);
 });
 
 test("rotation rejects malformed or oversized events and atomically bounds one-shot backlog", async () => {

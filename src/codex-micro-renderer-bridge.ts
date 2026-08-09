@@ -65,11 +65,6 @@ const DEVICE_STATE = {
   state: { status: "connected", error: null, battery: { percentage: 100, isCharging: true } }
 };
 
-export const REASONING_ENCODER_KEYS: Record<ReasoningAdjustment, "ENC_CW" | "ENC_CC"> = {
-  decrease: "ENC_CW",
-  increase: "ENC_CC"
-};
-
 type RendererUsageQuery = {
   state?: { data?: unknown; dataUpdatedAt?: number };
   fetch?: () => unknown;
@@ -567,9 +562,7 @@ export class CodexMicroRendererBridge {
   }
 
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
-    await this.dispatch("codex-micro-hid-event", {
-      event: { key: REASONING_ENCODER_KEYS[direction], act: 2, slot: null, threadKey: null }
-    }, "codex-micro-hid-event");
+    await this.runKeycap(direction === "increase" ? "MIND+" : "MIND-");
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
