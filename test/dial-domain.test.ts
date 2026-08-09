@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_ACTION_SELECTOR_ITEMS,
+  DialCommandQueue,
   JOYSTICK_DIRECTIONS,
   MICRO_SLOTS,
+  bindingLifecycle,
   deriveDialFeedback,
   expandDialPreset,
   initialDialRuntimeState,
@@ -93,6 +95,35 @@ function actionSelector(
     rotation: { kind: "selector", source: "actions", wrap: true, items }
   });
 }
+
+test("binding lifecycle distinguishes momentary, one-shot, and protected hold commands", () => {
+  assert.equal(bindingLifecycle("none"), "none");
+  assert.equal(bindingLifecycle("micro.ACT07"), "momentary");
+  assert.equal(bindingLifecycle("joystick.left"), "momentary");
+  assert.equal(bindingLifecycle("reasoning.increase"), "one-shot");
+  assert.equal(bindingLifecycle("keycap.FAST"), "one-shot");
+  assert.equal(bindingLifecycle("usage.rate-limit-reset"), "hold");
+});
+
+test("serialized queue preserves every detent after async work", async () => {
+  const seen: number[] = [];
+  const queue = new DialCommandQueue();
+  for (const value of [1, 2, 3]) queue.enqueue(async () => {
+    await Promise.resolve();
+    seen.push(value);
+  });
+  await queue.idle();
+  assert.deepEqual(seen, [1, 2, 3]);
+});
+
+test("serialized queue recovers after a rejected operation", async () => {
+  const seen: string[] = [];
+  const queue = new DialCommandQueue();
+  queue.enqueue(async () => { seen.push("failed"); throw new Error("expected"); });
+  queue.enqueue(async () => { seen.push("recovered"); });
+  await queue.idle();
+  assert.deepEqual(seen, ["failed", "recovered"]);
+});
 
 test("runtime selectors expose occupied agents, exact usage choices, and ordered safe actions", () => {
   const agentSettings = expandDialPreset("agents");

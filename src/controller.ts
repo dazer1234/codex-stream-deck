@@ -1,4 +1,4 @@
-import streamDeck, { type KeyAction } from "@elgato/streamdeck";
+import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
@@ -10,7 +10,27 @@ import { CodexRelayClient, readRelayClientConfig } from "./codex-relay-client.js
 import { CodexRelayServer, readRelayServerConfig } from "./codex-relay-server.js";
 import { CodexMicroRendererBridge } from "./codex-micro-renderer-bridge.js";
 import { getOrCreateHostIdentity } from "./host-identity.js";
-import type { OfficialKeycapId } from "./keycaps.js";
+import { ADDITIONAL_KEYCAPS, type OfficialKeycapId } from "./keycaps.js";
+import {
+  DialCommandQueue,
+  bindingLifecycle,
+  deriveDialFeedback,
+  dialBindingLabel,
+  initialDialRuntimeState,
+  isDialBindingId,
+  normalizeDialSettings,
+  reconcileSelector,
+  reduceDialRotation,
+  selectedItem,
+  selectorItems
+} from "./dial-domain.js";
+import type {
+  CodexDialSettings,
+  DialBindingId,
+  DialRuntimeState,
+  DialRuntimeView,
+  DialSelectorItem
+} from "./dial-types.js";
 import { HostActivityIndex, type HostSnapshot, type RelayCommand } from "./relay-protocol.js";
 import {
   renderAgentKey, renderBuiltinKeycap, renderFallbackKeycap, renderHostTargetKey, renderImportedKeycap,
@@ -34,6 +54,17 @@ type MicroActionRegistration = { action: KeyAction; slot: MicroActionSlot };
 type UsageLimitRegistration = { action: KeyAction; mode: UsageLimitMode };
 type ActionIdentity = { id: string };
 type ContextRingSettings = { showContextRings?: boolean };
+type CodexDialAction = DialAction<CodexDialSettings>;
+type DialRegistration = {
+  action: CodexDialAction;
+  settings: CodexDialSettings;
+  state: DialRuntimeState;
+  queue: DialCommandQueue;
+  pressed?: { binding: DialBindingId; item?: DialSelectorItem };
+  lastFeedback?: string;
+  renderAgain?: boolean;
+  rendering?: Promise<void>;
+};
 
 const USER_ICON_ROOT = join(codexDeckStateRoot(), "icons");
 const LOCAL_MOBILE_CONFIG = "mobile-local-relay-server.json";
@@ -50,7 +81,10 @@ export class DeckController {
   private readonly usageLimitActions = new Map<string, UsageLimitRegistration>();
   private readonly usageOverviewActions = new Map<string, KeyAction>();
   private readonly rateLimitResetActions = new Map<string, KeyAction>();
+  private readonly dials = new Map<string, DialRegistration>();
   private readonly resetHolds = new Map<string, number>();
+  private readonly dialDescriptionErrors = new Set<string>();
+  private readonly dialRenderErrors = new Set<string>();
   private readonly activityIndex = new HostActivityIndex();
   private readonly pressedAgents = new Map<number, RoutedAgentSlot>();
   private readonly pressedControlTargets = new Map<string, string>();
@@ -219,6 +253,94 @@ export class DeckController {
     this.lastImages.delete(action.id);
   }
 
+  registerDial(action: CodexDialAction, input: unknown): void {
+    const registration: DialRegistration = {
+      action,
+      settings: normalizeDialSettings(input),
+      state: initialDialRuntimeState(),
+      queue: new DialCommandQueue()
+    };
+    this.dials.set(action.id, registration);
+    this.updateDialDescription(registration);
+    void this.renderDialSafely(registration);
+  }
+
+  updateDialSettings(action: CodexDialAction, input: unknown): void {
+    const settings = normalizeDialSettings(input);
+    const existing = this.dials.get(action.id);
+    const registration: DialRegistration = existing ?? {
+      action,
+      settings,
+      state: initialDialRuntimeState(),
+      queue: new DialCommandQueue()
+    };
+    registration.action = action;
+    registration.settings = settings;
+    this.dials.set(action.id, registration);
+    this.updateDialDescription(registration);
+    void this.renderDialSafely(registration);
+  }
+
+  unregisterDial(action: ActionIdentity): void {
+    this.dials.delete(action.id);
+    this.resetHolds.delete(action.id);
+  }
+
+  rotateDial(action: CodexDialAction, ticks: number): void {
+    const registration = this.dials.get(action.id);
+    if (!registration) return;
+    registration.settings = normalizeDialSettings(registration.settings);
+    const reduced = reduceDialRotation(
+      registration.settings,
+      registration.state,
+      this.dialRuntimeView(registration.settings, registration.state),
+      ticks
+    );
+    registration.state = reduced.state;
+    if (registration.settings.rotation.kind === "selector") {
+      void this.renderDialSafely(registration);
+    }
+    for (const binding of reduced.bindings) {
+      this.enqueueDialCommand(registration, () => this.dispatchDialTap(registration, binding));
+    }
+  }
+
+  beginDialPress(action: CodexDialAction): Promise<void> {
+    const registration = this.dials.get(action.id);
+    if (!registration) return Promise.resolve();
+    if (registration.pressed) return registration.queue.idle();
+    registration.settings = normalizeDialSettings(registration.settings);
+    const pressed = this.resolveDialPress(registration);
+    registration.pressed = pressed;
+    this.enqueueDialCommand(
+      registration,
+      () => this.dispatchDialDown(registration, pressed.binding, pressed.item)
+    );
+    return registration.queue.idle();
+  }
+
+  finishDialPress(action: CodexDialAction): Promise<void> {
+    const registration = this.dials.get(action.id);
+    if (!registration) return Promise.resolve();
+    const pressed = registration.pressed;
+    registration.pressed = undefined;
+    if (!pressed) return registration.queue.idle();
+    this.enqueueDialCommand(
+      registration,
+      () => this.dispatchDialUp(registration, pressed.binding, pressed.item)
+    );
+    return registration.queue.idle();
+  }
+
+  touchDial(action: CodexDialAction): Promise<void> {
+    const registration = this.dials.get(action.id);
+    if (!registration) return Promise.resolve();
+    registration.settings = normalizeDialSettings(registration.settings);
+    const binding = registration.settings.touchTap;
+    this.enqueueDialCommand(registration, () => this.dispatchDialTap(registration, binding));
+    return registration.queue.idle();
+  }
+
   registerUsageLimit(action: KeyAction, mode: UsageLimitMode): void {
     const registration = { action, mode };
     this.usageLimitActions.set(action.id, registration);
@@ -290,12 +412,15 @@ export class DeckController {
     await this.renderAll();
   }
 
-  async sendAgent(slot: number, act: 0 | 1): Promise<void> {
+  async sendAgent(slot: number, act: 0 | 1, expectedThreadKey?: string): Promise<void> {
     const assignment = act === 0 ? this.pressedAgents.get(slot) : this.routedSlots[slot];
     if (!assignment) throw new Error(`No Codex task is assigned to global agent slot ${slot + 1}.`);
+    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
+    if (expectedThreadKey != null && assignment.threadKey !== expectedThreadKey) {
+      throw new Error("The selected Codex task no longer matches the highlighted task.");
+    }
     if (act === 1) this.pressedAgents.set(slot, assignment);
     else this.pressedAgents.delete(slot);
-    if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
     if (assignment.host.hostId === this.localHost?.hostId) {
       await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
     } else await this.sendRemote({ kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act });
@@ -462,8 +587,248 @@ export class DeckController {
       ...[...this.hostToggleActions.values()].map((action) => this.renderHostToggle(action)),
       ...[...this.usageLimitActions.values()].map((registration) => this.renderUsageLimit(registration)),
       ...[...this.usageOverviewActions.values()].map((action) => this.renderUsageOverview(action)),
-      ...[...this.rateLimitResetActions.values()].map((action) => this.renderRateLimitReset(action))
+      ...[...this.rateLimitResetActions.values()].map((action) => this.renderRateLimitReset(action)),
+      ...[...this.dials.values()].map((registration) => this.renderDialSafely(registration))
     ]);
+  }
+
+  private dialRuntimeView(
+    settings: CodexDialSettings,
+    state: DialRuntimeState
+  ): DialRuntimeView {
+    const targetSnapshot = this.targetSnapshot();
+    const usageSource = this.accountUsageSource();
+    const usage = usageSource.snapshot?.usage;
+    const selectedUsage = selectUsageWindow(usage, state.usageMode);
+    const fiveHour = selectUsageWindow(usage, "five-hour");
+    const weekly = selectUsageWindow(usage, "weekly");
+    const feedbackUsesUsage = settings.feedback === "usage" ||
+      (settings.feedback === "auto" && settings.rotation.kind === "selector" &&
+        settings.rotation.source === "usage");
+    const actionLabels: DialRuntimeView["actionLabels"] = {};
+    for (const [slot, value] of Object.entries(targetSnapshot?.layout.slots ?? {})) {
+      const keycapId = value.keycapId;
+      const label = ADDITIONAL_KEYCAPS.find(({ id }) => id === keycapId)?.name ?? keycapId;
+      const binding = `micro.${slot}`;
+      if (isDialBindingId(binding, "selector")) actionLabels[binding] = label;
+    }
+    for (const keycap of ADDITIONAL_KEYCAPS) actionLabels[`keycap.${keycap.id}`] = keycap.name;
+    return {
+      health: (feedbackUsesUsage ? usageSource.health : this.targetHealth()).state,
+      reasoningEffort: targetSnapshot?.reasoningEffort,
+      agents: this.routedSlots
+        .filter((slot): slot is RoutedAgentSlot & { threadKey: string } => slot.threadKey != null)
+        .map((slot) => ({
+          id: slot.id,
+          identity: `${slot.host.hostId}:${slot.threadKey}`,
+          threadKey: slot.threadKey,
+          title: slot.title ?? `Agent ${slot.id + 1}`,
+          status: slot.status,
+          ...(slot.contextUsedPercent == null ? {} : { contextUsedPercent: slot.contextUsedPercent })
+        })),
+      actionLabels,
+      ...(usage == null ? {} : {
+        usage: {
+          mode: selectedUsage?.kind === "five-hour" || selectedUsage?.kind === "weekly"
+            ? selectedUsage.kind
+            : "auto",
+          remainingPercent: selectedUsage?.remainingPercent,
+          resetsAt: selectedUsage?.resetsAt,
+          observedAt: usage.observedAt,
+          fiveHourRemaining: fiveHour?.remainingPercent,
+          weeklyRemaining: weekly?.remainingPercent
+        }
+      }),
+      now: Date.now()
+    };
+  }
+
+  private async renderDial(registration: DialRegistration): Promise<void> {
+    registration.settings = normalizeDialSettings(registration.settings);
+    const view = this.dialRuntimeView(registration.settings, registration.state);
+    if (registration.settings.rotation.kind === "selector") {
+      registration.state = reconcileSelector(
+        registration.state,
+        selectorItems(registration.settings, view)
+      );
+    }
+    const feedback = deriveDialFeedback(registration.settings, registration.state, view);
+    const signature = JSON.stringify(feedback);
+    if (registration.lastFeedback === signature) return;
+    await registration.action.setFeedback({
+      title: feedback.title,
+      value: feedback.value,
+      detail: feedback.detail,
+      indicator: feedback.indicator,
+      accent: { value: 100, bar_fill_c: feedback.accent }
+    });
+    registration.lastFeedback = signature;
+  }
+
+  private async renderDialSafely(registration: DialRegistration): Promise<void> {
+    if (registration.rendering) {
+      registration.renderAgain = true;
+      await registration.rendering;
+      return;
+    }
+    const rendering = (async () => {
+      do {
+        registration.renderAgain = false;
+        try {
+          await this.renderDial(registration);
+        } catch (error) {
+          const message = String(error);
+          if (!this.dialRenderErrors.has(message)) {
+            this.dialRenderErrors.add(message);
+            streamDeck.logger.error(`Codex dial feedback unavailable: ${message}`);
+          }
+        }
+      } while (registration.renderAgain);
+    })();
+    registration.rendering = rendering;
+    try { await rendering; }
+    finally {
+      if (registration.rendering === rendering) registration.rendering = undefined;
+    }
+  }
+
+  private updateDialDescription(registration: DialRegistration): void {
+    const { settings, action } = registration;
+    const rotate = settings.rotation.kind === "paired" ? "Adjust" : "Select";
+    const push = dialBindingLabel(settings.press);
+    const touch = dialBindingLabel(settings.touchTap);
+    void action.setTriggerDescription({ rotate, push, touch }).catch((error) => {
+      const message = String(error);
+      if (this.dialDescriptionErrors.has(message)) return;
+      this.dialDescriptionErrors.add(message);
+      streamDeck.logger.warn(`Codex dial trigger descriptions unavailable: ${message}`);
+    });
+  }
+
+  private resolveDialPress(
+    registration: DialRegistration
+  ): { binding: DialBindingId; item?: DialSelectorItem } {
+    const binding = registration.settings.press;
+    if (binding !== "selector.activate") return { binding };
+    const item = selectedItem(
+      registration.settings,
+      registration.state,
+      this.dialRuntimeView(registration.settings, registration.state)
+    );
+    return item ? { binding, item } : { binding };
+  }
+
+  private enqueueDialCommand(
+    registration: DialRegistration,
+    operation: () => Promise<void>
+  ): void {
+    registration.queue.enqueue(async () => {
+      try {
+        await operation();
+      } catch (error) {
+        streamDeck.logger.error(`Codex dial command failed (${registration.action.id}): ${String(error)}`);
+        try { await registration.action.showAlert(); }
+        catch (alertError) {
+          streamDeck.logger.error(`Codex dial alert failed (${registration.action.id}): ${String(alertError)}`);
+        }
+      }
+    });
+  }
+
+  private async dispatchDialTap(
+    registration: DialRegistration,
+    binding: DialBindingId,
+    item?: DialSelectorItem
+  ): Promise<void> {
+    const lifecycle = bindingLifecycle(binding);
+    if (lifecycle === "momentary" || binding === "selector.activate") {
+      await this.dispatchDialBinding(registration, binding, 1, item);
+      await this.dispatchDialBinding(registration, binding, 0, item);
+      return;
+    }
+    if (lifecycle === "hold") throw new Error("Rate-limit reset requires a dial press and hold.");
+    await this.dispatchDialBinding(registration, binding, 1, item);
+  }
+
+  private async dispatchDialDown(
+    registration: DialRegistration,
+    binding: DialBindingId,
+    item?: DialSelectorItem
+  ): Promise<void> {
+    if (bindingLifecycle(binding) === "hold") {
+      this.beginRateLimitReset(registration.action);
+      return;
+    }
+    await this.dispatchDialBinding(registration, binding, 1, item);
+  }
+
+  private async dispatchDialUp(
+    registration: DialRegistration,
+    binding: DialBindingId,
+    item?: DialSelectorItem
+  ): Promise<void> {
+    if (bindingLifecycle(binding) === "hold") {
+      const reset = await this.finishRateLimitReset(registration.action);
+      if (reset) {
+        const action = registration.action as CodexDialAction & {
+          showOk?: () => Promise<void>;
+        };
+        await action.showOk?.();
+      }
+      return;
+    }
+    if (bindingLifecycle(binding) === "momentary" || binding === "selector.activate") {
+      await this.dispatchDialBinding(registration, binding, 0, item);
+    }
+  }
+
+  private async dispatchDialBinding(
+    registration: DialRegistration,
+    binding: DialBindingId,
+    act: 0 | 1,
+    item?: DialSelectorItem
+  ): Promise<void> {
+    if (!isDialBindingId(binding, "press")) throw new Error("Unsupported Codex dial binding.");
+    if (binding === "none") return;
+    if (binding === "selector.activate") {
+      if (item?.agentSlot != null && item.threadKey) {
+        await this.sendAgent(item.agentSlot, act, item.threadKey);
+        return;
+      }
+      if (item?.binding && isDialBindingId(item.binding, "selector")) {
+        await this.dispatchDialBinding(registration, item.binding, act);
+        return;
+      }
+      throw new Error("No Codex dial selection is available.");
+    }
+    const lifecycle = bindingLifecycle(binding);
+    if (act === 0 && lifecycle !== "momentary") return;
+    if (binding === "reasoning.decrease") return this.adjustReasoning("decrease");
+    if (binding === "reasoning.increase") return this.adjustReasoning("increase");
+    if (binding === "new-task") return this.createTask();
+    if (binding === "host.toggle") return this.toggleTargetHost();
+    if (binding === "usage.refresh") return this.refreshUsage();
+    if (binding === "usage.toggle-overview") {
+      registration.state = {
+        ...registration.state,
+        usageOverview: !registration.state.usageOverview
+      };
+      await this.renderDialSafely(registration);
+      return;
+    }
+    if (binding === "usage.rate-limit-reset") {
+      throw new Error("Rate-limit reset requires a dial press and hold.");
+    }
+    if (binding.startsWith("micro.")) {
+      return this.sendMicroAction(binding.slice(6) as MicroActionSlot, act);
+    }
+    if (binding.startsWith("joystick.")) {
+      return this.sendJoystick(binding.slice(9) as MicroDirection, act);
+    }
+    if (binding.startsWith("keycap.") && act === 1) {
+      return this.runKeycap(binding.slice(7) as OfficialKeycapId);
+    }
+    throw new Error("Unsupported Codex dial binding.");
   }
 
   private async renderAgent({ action, slot }: AgentRegistration): Promise<void> {

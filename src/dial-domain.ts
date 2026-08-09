@@ -23,6 +23,27 @@ export const DEFAULT_ACTION_SELECTOR_ITEMS: readonly DialBindingId[] = Object.fr
   MICRO_SLOTS.map((slot): DialBindingId => `micro.${slot}`)
 );
 
+export function bindingLifecycle(
+  binding: DialBindingId
+): "none" | "one-shot" | "momentary" | "hold" {
+  if (binding === "none") return "none";
+  if (binding === "usage.rate-limit-reset") return "hold";
+  if (binding.startsWith("micro.") || binding.startsWith("joystick.")) return "momentary";
+  return "one-shot";
+}
+
+export class DialCommandQueue {
+  private tail: Promise<void> = Promise.resolve();
+
+  enqueue(operation: () => Promise<void>): void {
+    this.tail = this.tail.then(operation, operation).catch(() => undefined);
+  }
+
+  idle(): Promise<void> {
+    return this.tail;
+  }
+}
+
 const PRESET_IDS = new Set<string>(DIAL_PRESETS);
 const FEEDBACK_MODE_IDS = new Set<string>(DIAL_FEEDBACK_MODES);
 const SELECTOR_SOURCE_IDS = new Set<string>(DIAL_SELECTOR_SOURCES);
@@ -71,7 +92,7 @@ export function selectorItems(
   }
   return settings.rotation.items.map((binding) => ({
     id: binding,
-    label: cleanActionLabel(view.actionLabels[binding]) ?? humanBindingLabel(binding),
+    label: cleanActionLabel(view.actionLabels[binding]) ?? dialBindingLabel(binding),
     binding
   }));
 }
@@ -324,7 +345,7 @@ function cleanActionLabel(value: string | undefined): string | undefined {
   return clean || undefined;
 }
 
-function humanBindingLabel(binding: DialBindingId): string {
+export function dialBindingLabel(binding: DialBindingId): string {
   const fixed: Partial<Record<DialBindingId, string>> = {
     none: "None",
     "selector.activate": "Activate Selection",
