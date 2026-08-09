@@ -32,3 +32,31 @@ test("release audit accepts explicit clean roots and rejects private state", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("release audit requires every packaged Codex Dial asset declared by a plugin manifest", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-dial-audit-"));
+  try {
+    await writeFile(join(root, "manifest.json"), JSON.stringify({
+      Actions: [{ UUID: "com.simeo.codex-deck.codex-dial", Controllers: ["Encoder"] }]
+    }), "utf8");
+
+    const missingResult = spawnSync(process.execPath, [auditScript, root], { encoding: "utf8" });
+    assert.equal(missingResult.status, 1);
+    for (const relative of [
+      "static/property-inspector/codex-dial.html",
+      "static/layouts/codex-dial.json",
+      "static/imgs/dial.svg",
+      "static/imgs/dial@2x.svg"
+    ]) {
+      assert.match(missingResult.stderr, new RegExp(`missing packaged Codex Dial asset: ${relative.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      await mkdir(join(root, relative, ".."), { recursive: true });
+      await writeFile(join(root, relative), "fixture\n", "utf8");
+    }
+
+    const completeResult = spawnSync(process.execPath, [auditScript, root], { encoding: "utf8" });
+    assert.equal(completeResult.status, 0, completeResult.stderr);
+    assert.match(completeResult.stdout, /passed for 1 artifact roots/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

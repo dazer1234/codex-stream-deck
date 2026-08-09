@@ -634,3 +634,26 @@ test("build wires every Encoder asset without executing the source-mutating gene
     assert.match(source, new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
+
+test("Stream Deck Plus guide documents the supported dial contract without overstating coverage", async () => {
+  const [readme, guide, macos, windows] = await Promise.all([
+    text("README.md"), text("docs/STREAM_DECK_PLUS.md"), text("docs/MACOS.md"), text("docs/WINDOWS.md")
+  ]);
+
+  assert.match(readme, /\[Stream Deck \+ guide\]\(docs\/STREAM_DECK_PLUS\.md\)/);
+  assert.match(macos, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
+  assert.match(windows, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
+
+  for (const label of ["Reasoning", "Agents", "Actions", "Usage"]) assert.match(guide, new RegExp(`\\b${label}\\b`));
+  for (const gesture of ["rotate", "press", "touch"]) assert.match(guide, new RegExp(`\\b${gesture}\\b`, "i"));
+  for (const state of ["NO ITEMS", "OFFLINE", "DEGRADED", "CONNECTING"]) assert.match(guide, new RegExp(state));
+  assert.match(guide, /Reasoning[^\n]*decrease[^\n]*increase/i);
+  assert.match(guide, /Agents[^\n]*occupied agent[^\n]*focus/i);
+  assert.match(guide, /Actions[^\n]*Fast[^\n]*Approve[^\n]*Reject[^\n]*Fork[^\n]*Dictation[^\n]*Send/i);
+  assert.match(guide, /Usage[^\n]*Automatic[^\n]*5-hour[^\n]*Weekly/i);
+  assert.match(guide, /1\.2.second hold/i);
+  assert.match(guide, /REASONING[^\n]*UNAVAILABLE/);
+  assert.match(guide, /macOS/);
+  assert.match(guide, /Windows[^.\n]*(?:CI|build)[^.\n]*not[^.\n]*physical-device/i);
+  assert.doesNotMatch(guide, /physically (?:tested|verified)[^.\n]*Windows/i);
+});

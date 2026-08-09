@@ -39,6 +39,10 @@ Tailscale remote access remains a separate optional profile; see
    **Start Codex Deck.command** is the double-clickable equivalent of `start`.
 5. Open **Codex Settings > Codex Micro**, configure the native slots, and add the actions from the [recommended layout](../README.md#recommended-15-key-layout). Leave the Windows/Mac target position empty or replace it with another action.
 
+### Stream Deck + knobs
+
+On a Stream Deck +, drag one **Codex Dial** action onto each knob you want to use. The recommended Reasoning, Agents, Actions, and Usage presets, independent rotate/press/touch settings, and the macOS physical verification checklist are in the [Stream Deck + guide](STREAM_DECK_PLUS.md). The guide's checklist is the verification boundary; this setup page does not by itself claim that a specific build completed hardware QA.
+
 If an archive tool removed executable permissions, restore only the two launcher files:
 
 ```zsh

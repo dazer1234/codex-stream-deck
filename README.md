@@ -28,6 +28,7 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 - Native key-down/key-up handling for Micro slots `ACT06` through `ACT12`.
 - Native joystick up, right, down, left, and encoder click.
 - Dedicated reasoning-effort up/down buttons with press-and-hold repeat.
+- Configurable Stream Deck + knobs with independent rotate, press, touch, and live feedback controls; see the [Stream Deck + guide](docs/STREAM_DECK_PLUS.md).
 - Live usage controls: a configurable circular 5-hour/weekly limit key and a two-window overview.
 - A centered reset-credit counter with a deliberate 1.2-second hold before an applicable credit can be consumed.
 - A local `codex://threads/new` action for a new task.
@@ -43,9 +44,10 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 - Elgato Stream Deck 6.6 or newer on the computer connected to the Stream Deck.
 - Node.js 20 or newer for the platform launcher.
 - Windows 10+ or macOS 13+.
-- Tested hardware: standard 15-key Stream Deck MK.2.
+- Tested keypad hardware: standard 15-key Stream Deck MK.2.
+- Stream Deck + is required for the Encoder-only **Codex Dial** action.
 
-Other Stream Deck models may work, but the included layout and physical-device testing target the normal 5×3 MK.2.
+Other keypad models may work, but the included 15-key layout and its existing physical-device testing target the normal 5×3 MK.2. Stream Deck + dial setup and its separate verification boundary are documented in the [Stream Deck + guide](docs/STREAM_DECK_PLUS.md).
 
 ## Quick install
 
@@ -56,6 +58,7 @@ Other Stream Deck models may work, but the included layout and physical-device t
 3. Follow [Windows](docs/WINDOWS.md), [macOS](docs/MACOS.md), or [Windows + Mac](docs/MULTI_HOST.md).
 4. In **Codex Settings > Codex Micro**, choose the agent source, action assignments, joystick actions, and encoder behavior.
 5. Build the two Stream Deck pages below.
+6. On Stream Deck +, add the optional four-knob [Status-focused Codex Dial layout](docs/STREAM_DECK_PLUS.md#status-focused-four-knob-defaults).
 
 The iPhone companion is currently source-only: **a Mac with Xcode is required
 to build, sign, and install it**, even when the phone will control only a

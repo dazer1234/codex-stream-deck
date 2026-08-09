@@ -18,6 +18,12 @@ const forbiddenText = [
   ...String(process.env.CODEX_DECK_PRIVATE_MARKERS ?? "").split("|").filter(Boolean).map((marker) => new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"))
 ];
 const textExtensions = new Set([".cmd", ".command", ".html", ".js", ".json", ".map", ".md", ".mjs", ".ps1", ".sh", ".svg", ".txt"]);
+const codexDialAssets = [
+  "static/property-inspector/codex-dial.html",
+  "static/layouts/codex-dial.json",
+  "static/imgs/dial.svg",
+  "static/imgs/dial@2x.svg"
+];
 const failures = [];
 
 async function walk(path) {
@@ -37,8 +43,34 @@ async function walk(path) {
   for (const pattern of forbiddenText) if (pattern.test(contents)) failures.push(`${path}: contains private setup marker ${pattern}`);
 }
 
+async function auditDeclaredCodexDialAssets(root) {
+  const manifestPath = resolve(root, "manifest.json");
+  let manifest;
+  try { manifest = JSON.parse(await readFile(manifestPath, "utf8")); }
+  catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+    failures.push(`${manifestPath}: cannot inspect plugin manifest (${String(error)})`);
+    return;
+  }
+  const declaresDial = Array.isArray(manifest?.Actions) && manifest.Actions.some(
+    (action) => action?.UUID === "com.simeo.codex-deck.codex-dial"
+  );
+  if (!declaresDial) return;
+  for (const relative of codexDialAssets) {
+    try {
+      const info = await stat(resolve(root, relative));
+      if (!info.isFile()) throw new Error("not a file");
+    } catch {
+      failures.push(`${root}: missing packaged Codex Dial asset: ${relative}`);
+    }
+  }
+}
+
 for (const root of roots) {
-  try { await walk(root); }
+  try {
+    await walk(root);
+    await auditDeclaredCodexDialAssets(root);
+  }
   catch (error) { failures.push(`${root}: cannot audit (${String(error)})`); }
 }
 
