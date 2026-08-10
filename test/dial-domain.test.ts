@@ -624,6 +624,44 @@ test("usage feedback reports percent left, reset countdown, and both overview wi
   });
 });
 
+test("usage feedback formats reset countdowns as compact day, hour, and minute units", () => {
+  const settings = expandDialPreset("usage");
+  const state = {
+    ...initialDialRuntimeState(),
+    selectedId: "five-hour",
+    usageMode: "five-hour" as const
+  };
+  const now = 1_000;
+  const cases = [
+    [48 * 60_000, "RESETS IN 48M"],
+    [(5 * 60 + 48) * 60_000, "RESETS IN 5H 48M"],
+    [24 * 60 * 60_000, "RESETS IN 1D"],
+    [(24 * 60 + 1) * 60_000, "RESETS IN 1D 1M"],
+    [(125 * 60 + 48) * 60_000, "RESETS IN 5D 5H 48M"],
+    [7 * 24 * 60 * 60_000, "RESETS IN 7D"],
+    [0, "RESETS IN 0M"],
+    [60_001, "RESETS IN 2M"]
+  ] as const;
+
+  for (const [remainingMs, expected] of cases) {
+    const view: DialRuntimeView = {
+      ...RUNTIME_VIEW,
+      now,
+      usage: { ...RUNTIME_VIEW.usage!, resetsAt: now + remainingMs }
+    };
+    assert.equal(deriveDialFeedback(settings, state, view).detail, expected);
+  }
+
+  for (const resetsAt of [undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const view: DialRuntimeView = {
+      ...RUNTIME_VIEW,
+      now,
+      usage: { ...RUNTIME_VIEW.usage!, resetsAt }
+    };
+    assert.equal(deriveDialFeedback(settings, state, view).detail, "RESET UNAVAILABLE");
+  }
+});
+
 test("partial usage runtime views remain honest and accept a nullable reset time", () => {
   const partialView: DialRuntimeView = {
     ...RUNTIME_VIEW,

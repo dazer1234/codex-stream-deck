@@ -609,11 +609,15 @@ function resetCountdown(resetsAt: number | null | undefined, now: number): strin
     return "RESET UNAVAILABLE";
   }
   const minutes = Math.max(0, Math.ceil((resetsAt - now) / 60_000));
-  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(minutes / (24 * 60));
+  const hours = Math.floor((minutes % (24 * 60)) / 60);
   const remainder = minutes % 60;
-  if (hours === 0) return `RESETS IN ${remainder}M`;
-  if (remainder === 0) return `RESETS IN ${hours}H`;
-  return `RESETS IN ${hours}H ${remainder}M`;
+  const units = [
+    ...(days > 0 ? [`${days}D`] : []),
+    ...(hours > 0 ? [`${hours}H`] : []),
+    ...(remainder > 0 || (days === 0 && hours === 0) ? [`${remainder}M`] : [])
+  ];
+  return `RESETS IN ${units.join(" ")}`;
 }
 
 function usageAccent(remaining: number | undefined): string {
