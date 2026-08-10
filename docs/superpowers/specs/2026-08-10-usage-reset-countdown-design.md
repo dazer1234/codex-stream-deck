@@ -1,7 +1,7 @@
 # Usage Reset Countdown Design
 
 **Date:** 2026-08-10
-**Status:** Approved concept; awaiting written-spec review
+**Status:** Approved
 
 ## Problem
 
