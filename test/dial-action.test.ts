@@ -130,6 +130,7 @@ async function inspectorHarness(): Promise<{
   document: FakeDocument;
   sockets: FakeSocket[];
   connect: (...args: string[]) => void;
+  normalize: (input: unknown) => Record<string, unknown>;
 }> {
   const source = await text("static/property-inspector/codex-dial.html");
   const script = source.match(/<script>([\s\S]*?)<\/script>/)?.[1];
@@ -169,13 +170,18 @@ async function inspectorHarness(): Promise<{
     }
   }
   const window: Record<string, unknown> = {};
-  runInNewContext(script, { window, document, WebSocket: FakeWebSocket, JSON });
+  runInNewContext(`${script}\nwindow.__normalizedSettings = normalizedSettings;`, {
+    window, document, WebSocket: FakeWebSocket, JSON
+  });
   const connect = window.connectElgatoStreamDeckSocket;
+  const normalize = window.__normalizedSettings;
   assert.equal(typeof connect, "function");
+  assert.equal(typeof normalize, "function");
   return {
     document,
     sockets,
-    connect: connect as (...args: string[]) => void
+    connect: connect as (...args: string[]) => void,
+    normalize: normalize as (input: unknown) => Record<string, unknown>
   };
 }
 
@@ -484,6 +490,22 @@ test("incoming Ultra settings update the checkbox and complete form payload", as
   });
 });
 
+test("property inspector ignores inherited Ultra settings exactly like runtime normalization", async () => {
+  const harness = await inspectorHarness();
+  const { includeUltraReasoning: _omitted, ...ownSettings } = expandDialPreset("reasoning");
+  const inheritedUltra = Object.assign(
+    Object.create({ includeUltraReasoning: true }) as Record<string, unknown>,
+    ownSettings
+  );
+  assert.equal(Object.hasOwn(inheritedUltra, "includeUltraReasoning"), false);
+
+  const inspectorNormalized = JSON.parse(
+    JSON.stringify(harness.normalize(inheritedUltra))
+  ) as Record<string, unknown>;
+  assert.equal(inspectorNormalized.includeUltraReasoning, false);
+  assert.deepEqual(inspectorNormalized, normalizeDialSettings(inheritedUltra));
+});
+
 test("Ultra preference survives unrelated edits and remains persisted while hidden", async () => {
   const settings = { ...expandDialPreset("reasoning"), includeUltraReasoning: true };
   const { document, sockets, connect } = await inspectorHarness();
@@ -504,6 +526,16 @@ test("Ultra preference survives unrelated edits and remains persisted while hidd
   assert.equal(row.hidden, true);
   assert.equal(field(document, "include-ultra").checked, true);
   assert.equal((decodedMessages(sockets[0]!).at(-1)?.payload as { includeUltraReasoning: boolean }).includeUltraReasoning, true);
+
+  const press = field(document, "press");
+  press.value = "host.toggle";
+  press.dispatch("change");
+  const hiddenEditPayload = decodedMessages(sockets[0]!).at(-1)?.payload as {
+    includeUltraReasoning: boolean;
+    press: string;
+  };
+  assert.equal(hiddenEditPayload.press, "host.toggle");
+  assert.equal(hiddenEditPayload.includeUltraReasoning, true);
 
   const counterClockwise = field(document, "counter-clockwise");
   counterClockwise.value = "reasoning.increase";

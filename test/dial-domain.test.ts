@@ -801,7 +801,13 @@ test("Ultra reasoning normalization accepts only own literal booleans", () => {
   const base = expandDialPreset("reasoning");
   assert.equal(normalizeDialSettings({ ...base, includeUltraReasoning: true }).includeUltraReasoning, true);
   assert.equal(normalizeDialSettings({ ...base, includeUltraReasoning: false }).includeUltraReasoning, false);
-  assert.equal(normalizeDialSettings(base).includeUltraReasoning, false, "the preset default remains false");
+  const { includeUltraReasoning: _omitted, ...withoutUltra } = base;
+  assert.equal(Object.hasOwn(withoutUltra, "includeUltraReasoning"), false);
+  assert.equal(
+    normalizeDialSettings(withoutUltra).includeUltraReasoning,
+    false,
+    "valid legacy settings without the field default false"
+  );
 
   const inheritedTrue = Object.create({ includeUltraReasoning: true }) as Record<string, unknown>;
   Object.assign(inheritedTrue, base);
