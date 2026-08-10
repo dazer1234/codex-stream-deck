@@ -369,7 +369,13 @@ export function normalizeReasoningEffortOrder(value: unknown): string[] | undefi
 }
 
 export function readSelectedReasoningModelId(element: ReasoningTriggerElement): string | undefined {
-  const pending: Array<{ value: unknown; selectedValue: boolean; propsObject: boolean; depth: number }> = [];
+  const pending: Array<{
+    value: unknown;
+    selectedValue: boolean;
+    propsObject: boolean;
+    siblingGroups: object[];
+    depth: number;
+  }> = [];
   try {
     for (const key of Object.getOwnPropertyNames(element)) {
       if (key.startsWith("__reactProps$")) {
@@ -379,6 +385,7 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
           value: property.value,
           selectedValue: false,
           propsObject: false,
+          siblingGroups: [],
           depth: 0
         });
       }
@@ -387,7 +394,8 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
   const seenOutside = new Set<object>();
   const seenSelected = new Set<object>();
   const legacyModelIds = new Set<string>();
-  const siblingModelIds = new Map<object, string>();
+  const selectedValueGroups = new Set<object>();
+  const siblingModelIds = new Map<object, { model: string; groups: Set<object> }>();
   let malformed = false;
   let visited = 0;
   while (pending.length && visited < 3000) {
@@ -445,11 +453,7 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
       malformed = true;
       continue;
     }
-    if (hidden) {
-      if (!isStructuredCloneSafePlainData(object, 3000, 32, 1000) ||
-          (props && !isStructuredCloneSafePlainData(props, 3000, 32, 1000))) malformed = true;
-      continue;
-    }
+    if (hidden) continue;
     const modelProperty = readOwnDataProperty(object, "model");
     if (!modelProperty) {
       malformed = true;
@@ -461,7 +465,13 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
       if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model) ||
           !isStructuredCloneSafePlainData(object, 3000, 32, 1000)) malformed = true;
       else if (current.selectedValue) legacyModelIds.add(model);
-      else siblingModelIds.set(object, model);
+      else {
+        const existing = siblingModelIds.get(object);
+        if (existing) {
+          if (existing.model !== model) malformed = true;
+          for (const group of current.siblingGroups) existing.groups.add(group);
+        } else siblingModelIds.set(object, { model, groups: new Set(current.siblingGroups) });
+      }
     }
     try {
       for (const key of Object.keys(object)) {
@@ -471,19 +481,36 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
           malformed = true;
           continue;
         }
+        if (current.propsObject && key === "selectedValue") {
+          const group = current.siblingGroups[current.siblingGroups.length - 1];
+          if (group) selectedValueGroups.add(group);
+        }
+        let siblingGroups = current.siblingGroups;
+        if (key === "children" && property.value && typeof property.value === "object" &&
+            !current.siblingGroups.includes(property.value)) {
+          if (current.siblingGroups.length >= 32) {
+            malformed = true;
+            continue;
+          }
+          siblingGroups = [...current.siblingGroups, property.value];
+        }
         pending.push({
           value: property.value,
           selectedValue: current.selectedValue || key === "selectedValue",
           propsObject: key === "props",
+          siblingGroups,
           depth: current.depth + 1
         });
       }
     } catch { malformed = true; }
   }
   if (pending.length > 0) malformed = true;
-  if (malformed || legacyModelIds.size > 1 || siblingModelIds.size > 1) return undefined;
+  const eligibleSiblingModels = [...siblingModelIds.values()].filter((candidate) =>
+    [...candidate.groups].some((group) => selectedValueGroups.has(group))
+  );
+  if (malformed || legacyModelIds.size > 1 || eligibleSiblingModels.length > 1) return undefined;
   const legacyModel = legacyModelIds.values().next().value as string | undefined;
-  const siblingModel = siblingModelIds.values().next().value as string | undefined;
+  const siblingModel = eligibleSiblingModels[0]?.model;
   return legacyModel && siblingModel && legacyModel !== siblingModel ? undefined : legacyModel ?? siblingModel;
 }
 

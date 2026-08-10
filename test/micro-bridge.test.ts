@@ -351,16 +351,19 @@ test("reasoning metadata reads the unique visible Codex sibling model when selec
     getAttribute: () => null,
     "__reactProps$live": {
       children: [
-        {
-          props: {
-            children: [{
-              props: {
-                children: [{ props: { children: { props: { model: liveModel } } } }]
-              }
-            }]
-          }
-        },
-        { children: [null, { props: { selectedValue: "high" } }] }
+        null,
+        [
+          {
+            props: {
+              children: [{
+                props: {
+                  children: [{ props: { children: { props: { model: liveModel } } } }]
+                }
+              }]
+            }
+          },
+          { props: { selectedValue: "high" } }
+        ]
       ]
     }
   };
@@ -375,26 +378,54 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
   const liveModel = "gpt-5.3-codex-spark";
   const read = (props: unknown) => readModelId({ getAttribute: () => null, "__reactProps$live": props });
   const sibling = (model: unknown) => ({ props: { children: { props: { model } } } });
+  const currentShape = (siblings: unknown[]) => ({
+    children: [null, [...siblings, { props: { selectedValue: "high" } }]]
+  });
 
   assert.equal(read({
     selectedValue: { props: { model: liveModel } },
-    children: [sibling(liveModel), { props: { selectedValue: "high" } }]
+    ...currentShape([sibling(liveModel)])
   }), liveModel, "the legacy selectedValue and current sibling may agree");
   assert.equal(read({
-    selectedValue: { props: { model: "gpt-5.6-sol" } }, children: [sibling(liveModel)]
+    selectedValue: { props: { model: "gpt-5.6-sol" } }, ...currentShape([sibling(liveModel)])
   }), undefined, "conflicting legacy and sibling models are ambiguous");
-  assert.equal(read({ children: [sibling(liveModel), sibling("gpt-5.6-sol")] }), undefined,
+  assert.equal(read(currentShape([sibling(liveModel), sibling("gpt-5.6-sol")])), undefined,
     "multiple visible sibling models are ambiguous");
-  assert.equal(read({ children: [sibling(liveModel), sibling(liveModel)] }), undefined,
+  assert.equal(read(currentShape([sibling(liveModel), sibling(liveModel)])), undefined,
     "distinct visible sibling nodes are ambiguous even when their model IDs agree");
-  assert.equal(read({
-    children: [sibling(liveModel), { props: { hidden: true, children: { props: { model: "stale-model" } } } }]
-  }), liveModel, "hidden sibling candidates are excluded");
-  assert.equal(read({
-    children: [{ props: { hidden: true, children: { props: { model: liveModel } } } }]
-  }), undefined, "hidden-only sibling candidates cannot authorize");
-  assert.equal(read({ children: [{ props: { className: "measurement", children: { props: { model: liveModel } } } }] }), undefined,
+  assert.equal(read(currentShape([
+    sibling(liveModel), { props: { hidden: true, children: { props: { model: "stale-model" } } } }
+  ])), liveModel, "hidden sibling candidates are excluded");
+  assert.equal(read(currentShape([
+    { props: { hidden: true, children: { props: { model: liveModel } } } }
+  ])), undefined, "hidden-only sibling candidates cannot authorize");
+  assert.equal(read(currentShape([
+    { props: { className: "measurement", children: { props: { model: liveModel } } } }
+  ])), undefined,
     "measurement-only candidates are excluded");
+
+  assert.equal(read({ children: [sibling(liveModel)] }), undefined,
+    "a current-shape sibling model requires a local selectedValue anchor");
+  assert.equal(read({ props: { model: liveModel } }), undefined,
+    "a direct props.model is not a current-shape candidate");
+  assert.equal(read({
+    children: [{ props: { selectedValue: "high" } }],
+    unrelated: { deeply: { props: { model: liveModel } } }
+  }), undefined, "an unrelated nested model cannot use a global selectedValue anchor");
+  assert.equal(read({
+    children: [
+      sibling(liveModel),
+      { props: { children: [{ props: { selectedValue: "high" } }] } }
+    ]
+  }), undefined, "a model must share the selectedValue anchor's nearest children group");
+
+  const reactElement = { $$typeof: Symbol.for("react.element"), props: { onClick: () => {} } };
+  assert.equal(read(currentShape([
+    sibling(liveModel), { props: { hidden: true, children: reactElement } }
+  ])), liveModel, "hidden React element wrappers are excluded without recursive validation");
+  assert.equal(read(currentShape([
+    sibling(liveModel), { props: { className: "measurement", children: reactElement } }
+  ])), liveModel, "measurement React element wrappers are excluded without recursive validation");
 
   let hiddenProxyDescriptorTraps = 0;
   let hiddenProxyGetterReads = 0;
@@ -409,8 +440,8 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
       return Reflect.getOwnPropertyDescriptor(target, key);
     }
   });
-  assert.equal(read({ children: [sibling(liveModel), hiddenProxy] }), undefined,
-    "a hidden proxy branch makes sibling model metadata unavailable");
+  assert.equal(read(currentShape([sibling(liveModel), hiddenProxy])), liveModel,
+    "a hidden proxy branch is excluded and cannot authorize itself");
   assert.equal(hiddenProxyGetterReads, 0, "hidden proxy inspection must not invoke property getters");
   assert.ok(hiddenProxyDescriptorTraps > 0 && hiddenProxyDescriptorTraps <= 32,
     "proxy descriptor traps are bounded even though reflection cannot avoid them entirely");
@@ -421,11 +452,11 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
     enumerable: true,
     get() { accessorReads++; return liveModel; }
   });
-  assert.equal(read({ children: [{ props: accessorProps }] }), undefined);
+  assert.equal(read(currentShape([{ props: accessorProps }])), undefined);
   assert.equal(accessorReads, 0, "sibling candidates must not invoke model accessors");
-  assert.equal(read({ children: [{ props: new Proxy({ model: liveModel }, {}) }] }), undefined,
+  assert.equal(read(currentShape([{ props: new Proxy({ model: liveModel }, {}) }])), undefined,
     "proxy-backed sibling candidates cannot authorize");
-  assert.equal(read({ children: [sibling(` ${liveModel}`)] }), undefined,
+  assert.equal(read(currentShape([sibling(` ${liveModel}`)])), undefined,
     "malformed sibling model IDs cannot authorize");
 
   const overDepth: Record<string, unknown> = {};
@@ -443,6 +474,40 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
   for (let index = 0; index < 3000; index++) nodes.push({});
   nodes.push({ props: { model: liveModel } });
   assert.equal(read(overNodes), undefined, "sibling candidates beyond the node bound cannot authorize");
+});
+
+test("active reasoning metadata cannot use an unanchored props.model to select matching query data", () => {
+  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
+    element: Record<string, unknown>
+  ) => string | undefined;
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, unknown>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, unknown>) => boolean
+  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  const wrongModel = "gpt-5.3-codex-spark";
+  const queryClient = {
+    getQueryCache: () => ({ getAll: () => [{
+      queryKey: ["models", "list", "local", "chatgpt", 100],
+      state: { data: { data: [{
+        model: wrongModel,
+        supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({ reasoningEffort }))
+      }] } }
+    }] }),
+    getQueryData: () => undefined
+  };
+  const trigger = {
+    visible: true,
+    getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "high" : null,
+    "__reactProps$live": {
+      children: [{ props: { selectedValue: "high" } }],
+      unrelated: { deeply: { props: { model: wrongModel } } }
+    }
+  };
+
+  assert.equal(readModelId(trigger), undefined, "the wrong model must not become an active candidate");
+  assert.equal(read([trigger], { memoizedProps: { value: queryClient }, child: null, sibling: null },
+    (element) => element.visible === true), undefined);
 });
 
 test("active reasoning metadata fails closed on missing, malformed, duplicate, or ambiguous model data", () => {
