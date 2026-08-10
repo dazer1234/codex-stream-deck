@@ -1,6 +1,6 @@
 # Fast Mode Feedback and Reasoning Dial Correction
 
-**Date:** 2026-08-09  
+**Date:** 2026-08-09
 **Status:** Approved design; implementation pending
 
 ## Problem
