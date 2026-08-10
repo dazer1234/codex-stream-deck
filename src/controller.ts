@@ -32,7 +32,10 @@ import type {
   DialRuntimeView,
   DialSelectorItem
 } from "./dial-types.js";
-import { HostActivityIndex, type HostSnapshot, type RelayCommand } from "./relay-protocol.js";
+import {
+  HostActivityIndex, RELAY_REASONING_POLICY_CAPABILITY,
+  type HostSnapshot, type RelayCommand
+} from "./relay-protocol.js";
 import {
   renderAgentKey, renderBuiltinKeycap, renderFallbackKeycap, renderHostTargetKey, renderImportedKeycap,
   renderRateLimitResetKey, renderUsageLimitKey, renderUsageOverviewKey, type BuiltinIconName
@@ -1383,6 +1386,10 @@ export class DeckController {
     }
     if (requireReady && this.relayClient?.currentHealth().state !== "ready") {
       throw new Error("The captured Codex host is not ready.");
+    }
+    if (command.kind === "reasoning" && !command.includeUltra &&
+        !this.relayClient?.supportsCurrentReadyCapability(RELAY_REASONING_POLICY_CAPABILITY)) {
+      throw new Error("Remote Codex host does not support reasoning policy controls.");
     }
     return this.sendRemote(command);
   }

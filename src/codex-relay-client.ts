@@ -5,7 +5,8 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { isAllowedRelayHost } from "./relay-network.js";
 import {
-  RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
+  RELAY_PROTOCOL_VERSION, RELAY_REASONING_POLICY_CAPABILITY,
+  normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
   type HostSnapshot, type RelayCommand, type RelayResultMessage
 } from "./relay-protocol.js";
 import type { CodexHost, HostHealth, ReasoningAdjustmentResult } from "./types.js";
@@ -39,6 +40,7 @@ export class CodexRelayClient {
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
   private readonly pending = new Map<string, {
     commandKind: RelayCommand["kind"];
+    legacyUnrestrictedReasoning: boolean;
     resolve: (outcome: ReasoningAdjustmentResult | undefined) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
@@ -72,6 +74,11 @@ export class CodexRelayClient {
   }
   isConnected(): boolean { return this.socket?.readyState === WebSocket.OPEN && this.host != null; }
   supportsCapability(capability: string): boolean { return this.capabilities.has(capability); }
+  supportsCurrentReadyCapability(capability: string): boolean {
+    return this.socket?.readyState === WebSocket.OPEN &&
+      this.readyGeneration === this.connectionGeneration && this.readyHostId != null &&
+      this.host?.hostId === this.readyHostId && this.capabilities.has(capability);
+  }
   supportsCapabilityForSnapshot(capability: string, hostId: string): boolean {
     return this.socket?.readyState === WebSocket.OPEN &&
       this.currentHealth().state === "ready" &&
@@ -90,13 +97,21 @@ export class CodexRelayClient {
         this.host?.hostId !== this.readyHostId) {
       throw new Error("Remote Codex host is offline.");
     }
+    const supportsReasoningPolicy = this.capabilities.has(RELAY_REASONING_POLICY_CAPABILITY);
+    if (command.kind === "reasoning" && !command.includeUltra && !supportsReasoningPolicy) {
+      throw new Error("Remote Codex host does not support reasoning policy controls.");
+    }
+    const legacyUnrestrictedReasoning = command.kind === "reasoning" &&
+      command.includeUltra && !supportsReasoningPolicy;
     const requestId = randomUUID();
     return new Promise<ReasoningAdjustmentResult | undefined>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error("Remote Codex command timed out."));
       }, RELAY_COMMAND_TIMEOUT_MS);
-      this.pending.set(requestId, { commandKind: command.kind, resolve, reject, timer });
+      this.pending.set(requestId, {
+        commandKind: command.kind, legacyUnrestrictedReasoning, resolve, reject, timer
+      });
       socket.send(JSON.stringify({ type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command }));
     });
   }
@@ -165,6 +180,10 @@ export class CodexRelayClient {
     }
     if (pending.commandKind === "reasoning" &&
         message.outcome !== "applied" && message.outcome !== "blocked-ultra") {
+      if (pending.legacyUnrestrictedReasoning && message.outcome === undefined) {
+        pending.resolve("applied");
+        return;
+      }
       pending.reject(new Error("Remote Codex returned an invalid reasoning adjustment result."));
       return;
     }

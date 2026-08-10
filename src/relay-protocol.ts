@@ -17,8 +17,10 @@ export type RelayCommand =
   | { kind: "keycap"; keycapId: OfficialKeycapId };
 
 export type RelayAuthMessage = { type: "auth"; protocol: 1; token: string };
+export const RELAY_REASONING_POLICY_CAPABILITY = "reasoning-policy";
 export const RELAY_CAPABILITIES = [
-  "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "usage-refresh", "rate-limit-reset"
+  "agent", "action", "joystick", "encoder", "reasoning", RELAY_REASONING_POLICY_CAPABILITY,
+  "keycap", "usage", "usage-refresh", "rate-limit-reset"
 ] as const;
 export type RelayReadyMessage = {
   type: "ready";

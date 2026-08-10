@@ -33,6 +33,7 @@ type ControllerProbe = {
     currentHost(): CodexHost | undefined;
     currentHealth(): HostHealth;
     currentSnapshot(): { host: CodexHost; observedAt: number; snapshot: MicroSnapshot } | undefined;
+    supportsCurrentReadyCapability?(capability: string): boolean;
     send(command: unknown): Promise<void | ReasoningAdjustmentResult>;
   };
   microBridge: {
@@ -674,6 +675,7 @@ test("remote reasoning detents carry each dial's explicit Ultra policy", async (
     currentHost: () => REMOTE_HOST,
     currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
     currentSnapshot: () => undefined,
+    supportsCurrentReadyCapability: () => true,
     async send(command) { commands.push(command); return "applied"; }
   };
 
@@ -690,6 +692,33 @@ test("remote reasoning detents carry each dial's explicit Ultra policy", async (
     { kind: "reasoning", direction: "increase", includeUltra: false },
     { kind: "reasoning", direction: "decrease", includeUltra: true }
   ]);
+});
+
+test("restricted remote reasoning refuses a legacy peer before controller send", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-legacy-policy");
+  const commands: unknown[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => undefined,
+    supportsCurrentReadyCapability: () => false,
+    async send(command) { commands.push(command); return "applied"; }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  });
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(commands, []);
+  assert.equal(action.alerts, 1);
+  controller.unregisterDial(action);
 });
 
 test("public reasoning actions remain unrestricted locally and remotely", async () => {
@@ -756,6 +785,7 @@ test("blocked local and remote reasoning show identical registration-safe Ultra 
         host: REMOTE_HOST, observedAt: 1_000,
         snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
       }),
+      supportsCurrentReadyCapability: () => true,
       async send() { return "blocked-ultra"; }
     };
     controller.registerDial(action, {
