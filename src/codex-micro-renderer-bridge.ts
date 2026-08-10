@@ -386,7 +386,8 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
   } catch { return undefined; }
   const seenOutside = new Set<object>();
   const seenSelected = new Set<object>();
-  const modelIds = new Set<string>();
+  const legacyModelIds = new Set<string>();
+  const siblingModelIds = new Map<object, string>();
   let malformed = false;
   let visited = 0;
   while (pending.length && visited < 3000) {
@@ -444,7 +445,11 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
       malformed = true;
       continue;
     }
-    if (hidden) continue;
+    if (hidden) {
+      if (!isStructuredCloneSafePlainData(object, 3000, 32, 1000) ||
+          (props && !isStructuredCloneSafePlainData(props, 3000, 32, 1000))) malformed = true;
+      continue;
+    }
     const modelProperty = readOwnDataProperty(object, "model");
     if (!modelProperty) {
       malformed = true;
@@ -455,7 +460,8 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
       const model = typeof rawModel === "string" ? rawModel.trim() : "";
       if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model) ||
           !isStructuredCloneSafePlainData(object, 3000, 32, 1000)) malformed = true;
-      else modelIds.add(model);
+      else if (current.selectedValue) legacyModelIds.add(model);
+      else siblingModelIds.set(object, model);
     }
     try {
       for (const key of Object.keys(object)) {
@@ -475,7 +481,10 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
     } catch { malformed = true; }
   }
   if (pending.length > 0) malformed = true;
-  return !malformed && modelIds.size === 1 ? modelIds.values().next().value : undefined;
+  if (malformed || legacyModelIds.size > 1 || siblingModelIds.size > 1) return undefined;
+  const legacyModel = legacyModelIds.values().next().value as string | undefined;
+  const siblingModel = siblingModelIds.values().next().value as string | undefined;
+  return legacyModel && siblingModel && legacyModel !== siblingModel ? undefined : legacyModel ?? siblingModel;
 }
 
 export function findRendererQueryClients(rootFiber: unknown): unknown[] {

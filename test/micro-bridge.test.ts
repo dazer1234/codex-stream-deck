@@ -385,6 +385,8 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
   }), undefined, "conflicting legacy and sibling models are ambiguous");
   assert.equal(read({ children: [sibling(liveModel), sibling("gpt-5.6-sol")] }), undefined,
     "multiple visible sibling models are ambiguous");
+  assert.equal(read({ children: [sibling(liveModel), sibling(liveModel)] }), undefined,
+    "distinct visible sibling nodes are ambiguous even when their model IDs agree");
   assert.equal(read({
     children: [sibling(liveModel), { props: { hidden: true, children: { props: { model: "stale-model" } } } }]
   }), liveModel, "hidden sibling candidates are excluded");
@@ -393,6 +395,25 @@ test("reasoning sibling model candidates fail closed on ambiguity and unsafe dat
   }), undefined, "hidden-only sibling candidates cannot authorize");
   assert.equal(read({ children: [{ props: { className: "measurement", children: { props: { model: liveModel } } } }] }), undefined,
     "measurement-only candidates are excluded");
+
+  let hiddenProxyDescriptorTraps = 0;
+  let hiddenProxyGetterReads = 0;
+  const hiddenProxyTarget: Record<string, unknown> = { props: { hidden: true } };
+  Object.defineProperty(hiddenProxyTarget, "model", {
+    enumerable: true,
+    get() { hiddenProxyGetterReads++; return "hidden-model"; }
+  });
+  const hiddenProxy = new Proxy(hiddenProxyTarget, {
+    getOwnPropertyDescriptor(target, key) {
+      hiddenProxyDescriptorTraps++;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    }
+  });
+  assert.equal(read({ children: [sibling(liveModel), hiddenProxy] }), undefined,
+    "a hidden proxy branch makes sibling model metadata unavailable");
+  assert.equal(hiddenProxyGetterReads, 0, "hidden proxy inspection must not invoke property getters");
+  assert.ok(hiddenProxyDescriptorTraps > 0 && hiddenProxyDescriptorTraps <= 32,
+    "proxy descriptor traps are bounded even though reflection cannot avoid them entirely");
 
   let accessorReads = 0;
   const accessorProps: Record<string, unknown> = {};
