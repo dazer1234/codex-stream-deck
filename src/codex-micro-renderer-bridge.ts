@@ -450,7 +450,7 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
       malformed = true;
       continue;
     }
-    if (current.selectedValue && current.propsObject && modelProperty.exists) {
+    if (current.propsObject && modelProperty.exists) {
       const rawModel = modelProperty.value;
       const model = typeof rawModel === "string" ? rawModel.trim() : "";
       if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model) ||
@@ -459,7 +459,7 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
     }
     try {
       for (const key of Object.keys(object)) {
-        if (key === "model" && current.selectedValue && current.propsObject) continue;
+        if (key === "model" && current.propsObject) continue;
         const property = readOwnDataProperty(object, key);
         if (!property?.exists) {
           malformed = true;

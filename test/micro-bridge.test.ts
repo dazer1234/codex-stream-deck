@@ -342,6 +342,88 @@ test("active reasoning metadata uses the one visible composer and its current se
   ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
 });
 
+test("reasoning metadata reads the unique visible Codex sibling model when selectedValue has no model", () => {
+  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
+    element: Record<string, unknown>
+  ) => string | undefined;
+  const liveModel = "gpt-5.3-codex-spark";
+  const trigger = {
+    getAttribute: () => null,
+    "__reactProps$live": {
+      children: [
+        {
+          props: {
+            children: [{
+              props: {
+                children: [{ props: { children: { props: { model: liveModel } } } }]
+              }
+            }]
+          }
+        },
+        { children: [null, { props: { selectedValue: "high" } }] }
+      ]
+    }
+  };
+
+  assert.equal(readModelId(trigger), liveModel);
+});
+
+test("reasoning sibling model candidates fail closed on ambiguity and unsafe data", () => {
+  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
+    element: Record<string, unknown>
+  ) => string | undefined;
+  const liveModel = "gpt-5.3-codex-spark";
+  const read = (props: unknown) => readModelId({ getAttribute: () => null, "__reactProps$live": props });
+  const sibling = (model: unknown) => ({ props: { children: { props: { model } } } });
+
+  assert.equal(read({
+    selectedValue: { props: { model: liveModel } },
+    children: [sibling(liveModel), { props: { selectedValue: "high" } }]
+  }), liveModel, "the legacy selectedValue and current sibling may agree");
+  assert.equal(read({
+    selectedValue: { props: { model: "gpt-5.6-sol" } }, children: [sibling(liveModel)]
+  }), undefined, "conflicting legacy and sibling models are ambiguous");
+  assert.equal(read({ children: [sibling(liveModel), sibling("gpt-5.6-sol")] }), undefined,
+    "multiple visible sibling models are ambiguous");
+  assert.equal(read({
+    children: [sibling(liveModel), { props: { hidden: true, children: { props: { model: "stale-model" } } } }]
+  }), liveModel, "hidden sibling candidates are excluded");
+  assert.equal(read({
+    children: [{ props: { hidden: true, children: { props: { model: liveModel } } } }]
+  }), undefined, "hidden-only sibling candidates cannot authorize");
+  assert.equal(read({ children: [{ props: { className: "measurement", children: { props: { model: liveModel } } } }] }), undefined,
+    "measurement-only candidates are excluded");
+
+  let accessorReads = 0;
+  const accessorProps: Record<string, unknown> = {};
+  Object.defineProperty(accessorProps, "model", {
+    enumerable: true,
+    get() { accessorReads++; return liveModel; }
+  });
+  assert.equal(read({ children: [{ props: accessorProps }] }), undefined);
+  assert.equal(accessorReads, 0, "sibling candidates must not invoke model accessors");
+  assert.equal(read({ children: [{ props: new Proxy({ model: liveModel }, {}) }] }), undefined,
+    "proxy-backed sibling candidates cannot authorize");
+  assert.equal(read({ children: [sibling(` ${liveModel}`)] }), undefined,
+    "malformed sibling model IDs cannot authorize");
+
+  const overDepth: Record<string, unknown> = {};
+  let branch = overDepth;
+  for (let depth = 0; depth < 33; depth++) {
+    const children: Record<string, unknown>[] = [{}];
+    branch.children = children;
+    branch = children[0]!;
+  }
+  branch.props = { model: liveModel };
+  assert.equal(read(overDepth), undefined, "sibling candidates beyond the depth bound cannot authorize");
+
+  const overNodes: Record<string, unknown> = { children: [] };
+  const nodes = overNodes.children as Record<string, unknown>[];
+  for (let index = 0; index < 3000; index++) nodes.push({});
+  nodes.push({ props: { model: liveModel } });
+  assert.equal(read(overNodes), undefined, "sibling candidates beyond the node bound cannot authorize");
+});
+
 test("active reasoning metadata fails closed on missing, malformed, duplicate, or ambiguous model data", () => {
   const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
     elements: Iterable<Record<string, unknown>>,
