@@ -17,29 +17,33 @@ function createGuardedRendererHarness(options: {
   modelId?: string;
   supportedEfforts?: string[];
   advanceEffortOnCommand?: boolean;
-  holdFetch?: boolean;
+  failConfirmationReadAfterCommand?: boolean;
 }): {
   evaluate: <T>(expression: string) => Promise<T>;
   runnerCalls: Array<[string, string]>;
   currentEffort: () => string | undefined;
-  waitForFetchCount: (count: number) => Promise<void>;
-  releaseFetch: () => void;
+  restoreMetadataReads: () => void;
 } {
   const runnerCalls: Array<[string, string]> = [];
   const globalKey = `__codexDeckGuardedRunnerCalls${++guardedRendererHarnessId}`;
   const runtime = globalThis as unknown as Record<string, unknown>;
   const supportedEfforts = options.supportedEfforts ?? ["low", "medium", "high", "xhigh", "max", "ultra"];
   let currentEffort = options.currentEffort;
-  runtime[globalKey] = {
+  let metadataReadsFail = false;
+  const runnerState = {
     run(command: string, source: string) {
       runnerCalls.push([command, source]);
+      if (options.failConfirmationReadAfterCommand) metadataReadsFail = true;
       if (options.advanceEffortOnCommand) {
         const index = currentEffort == null ? -1 : supportedEfforts.indexOf(currentEffort);
-        if (index >= 0 && index + 1 < supportedEfforts.length) currentEffort = supportedEfforts[index + 1];
+        if (index >= 0 && index + 1 < supportedEfforts.length) {
+          queueMicrotask(() => { currentEffort = supportedEfforts[index + 1]; });
+        }
       }
       return true;
     }
   };
+  runtime[globalKey] = runnerState;
   const runnerSource = [
     "export function guarded(command, source) {",
     `  return globalThis[${JSON.stringify(globalKey)}].run(command, source);`,
@@ -70,11 +74,16 @@ function createGuardedRendererHarness(options: {
   const trigger = () => ({
     isConnected: true,
     getClientRects: () => ({ length: 1 }),
-    getAttribute: (name: string) => ({
-      "data-codex-intelligence-trigger": "true",
-      "data-composer-navigation-target": "reasoning",
-      "data-selected-reasoning-effort": currentEffort ?? null
-    })[name] ?? null,
+    getAttribute: (name: string) => {
+      if (metadataReadsFail && name === "data-selected-reasoning-effort") {
+        throw new Error("metadata read failed");
+      }
+      return ({
+        "data-codex-intelligence-trigger": "true",
+        "data-composer-navigation-target": "reasoning",
+        "data-selected-reasoning-effort": currentEffort ?? null
+      })[name] ?? null;
+    },
     "__reactProps$test": { selectedValue: { props: { model: modelId } } }
   });
   const triggers = Array.from({ length: options.visibleTriggerCount ?? 1 }, trigger);
@@ -87,20 +96,8 @@ function createGuardedRendererHarness(options: {
         : []
   };
   const performance = { getEntriesByType: () => [] };
-  let fetchCount = 0;
-  const fetchWaiters: Array<{ count: number; resolve: () => void }> = [];
-  let releaseFetch = () => {};
-  const fetchBarrier = options.holdFetch
-    ? new Promise<void>((resolve) => { releaseFetch = resolve; })
-    : Promise.resolve();
   const fetch = async (url: string) => {
     assert.equal(url, bridgeUrl);
-    fetchCount++;
-    for (const waiter of fetchWaiters.splice(0)) {
-      if (fetchCount >= waiter.count) waiter.resolve();
-      else fetchWaiters.push(waiter);
-    }
-    await fetchBarrier;
     return { text: async () => bridgeSource };
   };
   const getComputedStyle = () => ({ display: "block", visibility: "visible" });
@@ -109,12 +106,10 @@ function createGuardedRendererHarness(options: {
   return {
     runnerCalls,
     currentEffort: () => currentEffort,
-    waitForFetchCount: (count) => fetchCount >= count
-      ? Promise.resolve()
-      : new Promise((resolve) => { fetchWaiters.push({ count, resolve }); }),
-    releaseFetch,
+    restoreMetadataReads: () => { metadataReadsFail = false; },
     evaluate: async <T>(expression: string): Promise<T> => {
       activeEvaluations++;
+      runtime[globalKey] ??= runnerState;
       try {
         const run = new Function(
           "document", "performance", "fetch", "getComputedStyle",
@@ -551,6 +546,116 @@ test("reasoning metadata uses only own data properties without invoking accessor
   assert.equal(accessorReads, 0, "metadata inspection must not execute accessors");
 });
 
+test("transparent proxy-backed reasoning metadata cannot authorize", () => {
+  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
+    element: Record<string, unknown>
+  ) => string | undefined;
+  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
+    queryClients: Iterable<unknown>, modelId: string
+  ) => string[] | undefined;
+  const liveModel = "gpt-5.6-sol";
+  const effortRecords = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }));
+  const makeQueryClient = (record: unknown) => ({
+    getQueryCache: () => ({
+      getAll: () => [{
+        queryKey: ["models", "list", "local", "chatgpt", 100],
+        state: { data: { data: [record] } }
+      }]
+    }),
+    getQueryData: () => undefined
+  });
+
+  const selectedModelProps = new Proxy({ model: liveModel }, {});
+  const modelRecord = new Proxy({ model: liveModel, supportedReasoningEfforts: effortRecords }, {});
+  const effortArray = new Proxy(effortRecords, {});
+  const results = [
+    readModelId({
+      getAttribute: () => null,
+      "__reactProps$test": { selectedValue: { props: selectedModelProps } }
+    }),
+    readEfforts([makeQueryClient(modelRecord)], liveModel),
+    readEfforts([makeQueryClient({ model: liveModel, supportedReasoningEfforts: effortArray })], liveModel)
+  ];
+
+  assert.deepEqual(results, [undefined, undefined, undefined]);
+});
+
+test("reasoning metadata arrays never invoke index accessors", () => {
+  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
+    queryClients: Iterable<unknown>, modelId: string
+  ) => string[] | undefined;
+  const liveModel = "gpt-5.6-sol";
+  const validEfforts = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }));
+  const validRecord = { model: liveModel, supportedReasoningEfforts: validEfforts };
+  let accessorReads = 0;
+  const makeQueryClient = (queryKey: unknown, records: unknown) => ({
+    getQueryCache: () => ({
+      getAll: () => [{ queryKey, state: { data: { data: records } } }]
+    }),
+    getQueryData: () => undefined
+  });
+
+  const accessorQueryKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(accessorQueryKey, "0", {
+    enumerable: true,
+    configurable: true,
+    get() { accessorReads++; return "models"; }
+  });
+  const accessorRecords: unknown[] = [validRecord];
+  Object.defineProperty(accessorRecords, "0", {
+    enumerable: true,
+    configurable: true,
+    get() { accessorReads++; return validRecord; }
+  });
+  const accessorEfforts: unknown[] = [...validEfforts];
+  Object.defineProperty(accessorEfforts, "1", {
+    enumerable: true,
+    configurable: true,
+    get() { accessorReads++; return { reasoningEffort: "high" }; }
+  });
+
+  const results = [
+    readEfforts([makeQueryClient(accessorQueryKey, [validRecord])], liveModel),
+    readEfforts([makeQueryClient(["models", "list", "local", "chatgpt", 100], accessorRecords)], liveModel),
+    readEfforts([makeQueryClient(["models", "list", "local", "chatgpt", 100], [{
+      model: liveModel,
+      supportedReasoningEfforts: accessorEfforts
+    }])], liveModel)
+  ];
+
+  assert.equal(accessorReads, 0, "query keys, model arrays, and effort arrays must use data descriptors");
+  assert.deepEqual(results, [undefined, undefined, undefined]);
+});
+
+test("oversized reasoning effort arrays fail before visiting later indices", () => {
+  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
+    queryClients: Iterable<unknown>, modelId: string
+  ) => string[] | undefined;
+  const liveModel = "gpt-5.6-sol";
+  const oversized = Array.from({ length: 64 }, (_, index) => ({ reasoningEffort: `effort-${index}` }));
+  let hostileReads = 0;
+  Object.defineProperty(oversized, "64", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      hostileReads++;
+      throw new Error("hostile late index");
+    }
+  });
+  const queryClient = {
+    getQueryCache: () => ({
+      getAll: () => [{
+        queryKey: ["models", "list", "local", "chatgpt", 100],
+        state: { data: { data: [{ model: liveModel, supportedReasoningEfforts: oversized }] } }
+      }]
+    }),
+    getQueryData: () => undefined
+  };
+
+  assert.equal(readEfforts([queryClient], liveModel), undefined);
+  assert.equal(hostileReads, 0, "the >64 bound must be checked before any effort index traversal");
+});
+
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
   const predicate = Reflect.get(microBridgeModule, "hasApplicableResetCredit") as unknown;
   assert.equal(typeof predicate, "function");
@@ -858,12 +963,19 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
     const runnerResolution = expression.indexOf("const commandRunner = await resolveCommandRunner");
     assert.ok(blockedReturn >= 0 && runnerResolution > blockedReturn,
       "the blocked result returns before resolving or importing a command runner");
-    const finalDecision = expression.indexOf("const finalDecision = readLiveDecision()");
+    const finalDecision = expression.indexOf("const finalDecision = decideFromMetadata(metadata)");
     const commandInvocation = expression.indexOf("commandRunner(command, 'codex_micro_hid')");
     assert.ok(runnerResolution < finalDecision && finalDecision < commandInvocation,
       "the final live decision follows runner resolution and immediately precedes invocation");
     assert.doesNotMatch(expression.slice(finalDecision, commandInvocation), /\bawait\b/,
       "no await may separate the final live decision from command invocation");
+    const mutexAppend = expression.indexOf("guardState.tail = new Promise");
+    const mutexAwait = expression.indexOf("await predecessor");
+    assert.ok(mutexAppend >= 0 && mutexAppend < mutexAwait,
+      "the renderer-global mutex is appended synchronously before its first await");
+    assert.match(expression, /guardNamespace/);
+    assert.match(expression, /guardState\.uncertain/);
+    assert.match(expression, /finally\s*\{\s*releaseGuard\(\)/);
     assert.doesNotMatch(expression,
       /enabled-reasoning-efforts|show-ultra-in-model-picker-slider|model_picker_persists_ultra_effort|dialog|confirm\(|dismiss/i);
   }
@@ -975,8 +1087,7 @@ test("concurrent serialized guarded increases recheck live effort immediately be
   const harness = createGuardedRendererHarness({
     currentEffort: "xhigh",
     supportedEfforts: ["xhigh", "max", "ultra"],
-    advanceEffortOnCommand: true,
-    holdFetch: true
+    advanceEffortOnCommand: true
   });
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
@@ -987,13 +1098,61 @@ test("concurrent serialized guarded increases recheck live effort immediately be
 
   const first = bridge.adjustReasoning("increase", { includeUltra: false });
   const second = bridge.adjustReasoning("increase", { includeUltra: false });
-  await harness.waitForFetchCount(2);
-  harness.releaseFetch();
   const results = await Promise.all([first, second]);
 
   assert.deepEqual([...results].sort(), ["applied", "blocked-ultra"]);
   assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
   assert.equal(harness.currentEffort(), "max");
+});
+
+test("an unconfirmed guarded transition reserves its prior state against later increases", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({
+    currentEffort: "xhigh",
+    supportedEfforts: ["xhigh", "max", "ultra"]
+  });
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /Codex reasoning metadata is unavailable\./
+  );
+  assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
+  assert.equal(harness.currentEffort(), "xhigh");
+});
+
+test("a failed confirmation read reserves the prior state before releasing the guard", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({
+    currentEffort: "xhigh",
+    supportedEfforts: ["xhigh", "max", "ultra"],
+    failConfirmationReadAfterCommand: true
+  });
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /metadata read failed/
+  );
+  assert.equal(harness.runnerCalls.length, 1);
+
+  harness.restoreMetadataReads();
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /Codex reasoning metadata is unavailable\./
+  );
+  assert.equal(harness.runnerCalls.length, 1);
 });
 
 test("guarded reasoning expression serializes every helper dependency into renderer scope", async () => {
@@ -1014,6 +1173,8 @@ test("guarded reasoning expression serializes every helper dependency into rende
   for (const helper of [
     "isSafeReasoningIdentifier",
     "readOwnDataProperty",
+    "readBoundedOwnDataArray",
+    "isStructuredCloneSafePlainData",
     "normalizeReasoningEffortOrder",
     "isVisibleReasoningTrigger",
     "readSelectedReasoningModelId",
