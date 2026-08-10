@@ -59,6 +59,12 @@ export function resolveAgentDispatch(
 }
 
 type CommandRunner = (command: string, source: string) => unknown;
+type ReasoningCommand = "composer.increaseReasoningEffort" | "composer.decreaseReasoningEffort";
+
+const REASONING_COMMANDS = Object.freeze([
+  "composer.increaseReasoningEffort",
+  "composer.decreaseReasoningEffort"
+] as const);
 
 export async function resolveCommandRunner(
   bridgeSource: string,
@@ -595,7 +601,38 @@ export class CodexMicroRendererBridge {
   }
 
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
-    await this.runKeycap(direction === "increase" ? "MIND+" : "MIND-");
+    await this.runReasoningCommand(direction === "increase"
+      ? "composer.increaseReasoningEffort"
+      : "composer.decreaseReasoningEffort");
+  }
+
+  private async runReasoningCommand(command: ReasoningCommand): Promise<void> {
+    if (!REASONING_COMMANDS.includes(command)) throw new Error("Unsupported reasoning command.");
+    await this.ensureConnected();
+    const expression = `(async () => {
+      const command = ${JSON.stringify(command)};
+      const allowedCommands = new Set(${JSON.stringify(REASONING_COMMANDS)});
+      if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
+      const urls = [...new Set([
+        ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
+        ...performance.getEntriesByType('resource').map((entry) => entry.name)
+      ])];
+      const bridgeUrl = urls.find((value) => value.includes('/assets/codex-micro-bridge-'));
+      if (!bridgeUrl) throw new Error('Codex Micro bridge module is unavailable.');
+      const bridgeSource = await (await fetch(bridgeUrl)).text();
+      const resolveCommandRunner = (${resolveCommandRunner.toString()});
+      const commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
+      if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
+      const handled = commandRunner(command, 'codex_micro_hid');
+      if (!handled) throw new Error('This Codex command is not active in the current view.');
+      return true;
+    })()`;
+    try {
+      await this.evaluate(expression);
+    } catch (error) {
+      this.disconnect();
+      throw error;
+    }
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
@@ -630,8 +667,22 @@ export class CodexMicroRendererBridge {
         }
         if (!commandRunner && bridgeUrl) {
           const bridgeSource = await (await fetch(bridgeUrl)).text();
-          const resolveCommandRunner = (${resolveCommandRunner.toString()});
-          commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
+          const runnerMatch = bridgeSource.match(/([A-Za-z_$][\\w$]*)\\(\\s*[A-Za-z_$][\\w$]*\\??\\.command\\s*,["'\\x60]codex_micro_hid["'\\x60]\\)/);
+          const runnerLocal = runnerMatch?.[1];
+          const importPattern = /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g;
+          let importMatch;
+          while (runnerLocal && (importMatch = importPattern.exec(bridgeSource))) {
+            for (const specifier of importMatch[1].split(',')) {
+              const parts = specifier.trim().split(/\\s+as\\s+/);
+              const exportName = parts[0];
+              const localName = parts[1] ?? parts[0];
+              if (localName !== runnerLocal) continue;
+              const namespace = await import(new URL(importMatch[2], bridgeUrl).href);
+              if (typeof namespace[exportName] === 'function') commandRunner = namespace[exportName];
+              break;
+            }
+            if (commandRunner) break;
+          }
         }
         if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
         const handled = commandRunner(action.command, 'codex_micro_hid');

@@ -384,25 +384,57 @@ test("agent routing follows the stable thread identity when a cross-host slot is
   });
 });
 
-test("reasoning controls invoke dedicated commands without native encoder dispatch", async () => {
+test("reasoning controls invoke only the dedicated command path", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
-  const keycaps: string[] = [];
+  const reasoningCommands: string[] = [];
+  const genericKeycaps: string[] = [];
   const dispatches: unknown[][] = [];
   const testBridge = bridge as unknown as {
+    runReasoningCommand: (command: string) => Promise<void>;
     runKeycap: (keycapId: "MIND+" | "MIND-") => Promise<void>;
     dispatch: (...args: unknown[]) => Promise<void>;
   };
-  testBridge.runKeycap = async (keycapId) => { keycaps.push(keycapId); };
+  testBridge.runReasoningCommand = async (command) => { reasoningCommands.push(command); };
+  testBridge.runKeycap = async (keycapId) => { genericKeycaps.push(keycapId); };
   testBridge.dispatch = async (...args) => { dispatches.push(args); };
 
   await bridge.adjustReasoning("increase");
   await bridge.adjustReasoning("decrease");
 
-  assert.deepEqual(keycaps, ["MIND+", "MIND-"]);
+  assert.deepEqual(reasoningCommands, [
+    "composer.increaseReasoningEffort",
+    "composer.decreaseReasoningEffort"
+  ]);
+  assert.deepEqual(genericKeycaps, []);
   assert.deepEqual(dispatches, []);
   const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
   const adjustment = source.match(/async adjustReasoning\([\s\S]*?\n  }/)?.[0] ?? "";
   assert.doesNotMatch(adjustment, /ENC_CW|ENC_CC|this\.dispatch/);
+});
+
+test("protected generic keycaps cannot reach the low-level reasoning runner", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const expressions: string[] = [];
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expressions.push(source);
+    return true as T;
+  };
+
+  await bridge.runKeycap("TERM");
+  await bridge.adjustReasoning("increase");
+  await bridge.adjustReasoning("decrease");
+
+  assert.equal(expressions.length, 3);
+  assert.doesNotMatch(expressions[0]!, /resolveCommandRunner/);
+  assert.match(expressions[1]!, /composer\.increaseReasoningEffort/);
+  assert.match(expressions[2]!, /composer\.decreaseReasoningEffort/);
+  assert.match(expressions[1]!, /resolveCommandRunner/);
+  assert.match(expressions[2]!, /resolveCommandRunner/);
 });
 
 test("command runner discovery resolves imported two-argument guarded calls and rejects contextual branches", async () => {
