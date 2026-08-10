@@ -11,7 +11,7 @@ import {
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
-import type { CodexHost } from "./types.js";
+import type { CodexHost, ReasoningAdjustmentResult } from "./types.js";
 
 export type RelayServerConfig = {
   enabled: boolean;
@@ -204,9 +204,9 @@ export class CodexRelayServer {
       : command.kind;
     this.log(`Relay command ${commandLabel} received.`);
     try {
-      await executeRelayCommand(this.control, command);
+      const outcome = validatedReasoningOutcome(await executeRelayCommand(this.control, command));
       if (command.kind === "usage-refresh") await this.publishSnapshot(undefined, true);
-      this.sendResult(socket, message.requestId, true);
+      this.sendResult(socket, message.requestId, true, undefined, outcome);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
       if (command.kind !== "usage-refresh") await this.publishSnapshot();
     } catch (error) {
@@ -216,9 +216,23 @@ export class CodexRelayServer {
     }
   }
 
-  private sendResult(socket: WebSocket, requestId: string, ok: boolean, error?: string): void {
+  private sendResult(
+    socket: WebSocket,
+    requestId: string,
+    ok: boolean,
+    error?: string,
+    outcome?: ReasoningAdjustmentResult
+  ): void {
     if (socket.readyState !== WebSocket.OPEN) return;
-    const result: RelayResultMessage = { type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok, ...(error ? { error } : {}) };
+    const result: RelayResultMessage = ok
+      ? {
+          type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: true,
+          ...(outcome === undefined ? {} : { outcome })
+        }
+      : {
+          type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: false,
+          ...(error ? { error } : {})
+        };
     socket.send(JSON.stringify(result));
   }
 
@@ -356,18 +370,44 @@ export function relayDiscoveryTxt(
   };
 }
 
-async function executeRelayCommand(control: RelayControl, command: RelayCommand): Promise<void> {
-  if (command.kind === "agent") return control.sendAgent(command.slot, command.act, command.threadKey);
-  if (command.kind === "action") return control.sendAction(command.slot, command.act);
-  if (command.kind === "joystick") return control.sendJoystick(command.direction, command.distance);
-  if (command.kind === "encoder") return control.sendEncoder(command.act);
-  if (command.kind === "reasoning") {
-    await control.adjustReasoning(command.direction);
-    return;
+async function executeRelayCommand(
+  control: RelayControl,
+  command: RelayCommand
+): Promise<ReasoningAdjustmentResult | undefined> {
+  if (command.kind === "agent") {
+    await control.sendAgent(command.slot, command.act, command.threadKey);
+    return undefined;
   }
-  if (command.kind === "usage-refresh") return control.refreshUsage();
-  if (command.kind === "rate-limit-reset") return control.consumeRateLimitReset();
-  return control.runKeycap(command.keycapId as OfficialKeycapId);
+  if (command.kind === "action") {
+    await control.sendAction(command.slot, command.act);
+    return undefined;
+  }
+  if (command.kind === "joystick") {
+    await control.sendJoystick(command.direction, command.distance);
+    return undefined;
+  }
+  if (command.kind === "encoder") {
+    await control.sendEncoder(command.act);
+    return undefined;
+  }
+  if (command.kind === "reasoning") {
+    return control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
+  }
+  if (command.kind === "usage-refresh") {
+    await control.refreshUsage();
+    return undefined;
+  }
+  if (command.kind === "rate-limit-reset") {
+    await control.consumeRateLimitReset();
+    return undefined;
+  }
+  await control.runKeycap(command.keycapId as OfficialKeycapId);
+  return undefined;
+}
+
+function validatedReasoningOutcome(value: unknown): ReasoningAdjustmentResult | undefined {
+  if (value === undefined || value === "applied" || value === "blocked-ultra") return value;
+  throw new Error("Invalid reasoning adjustment result.");
 }
 
 function secureEqual(left: unknown, right: string): boolean {

@@ -4,7 +4,10 @@ import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck"
 import { DeckController } from "../src/controller.js";
 import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
 import type { CodexDialSettings, DialRuntimeState } from "../src/dial-types.js";
-import type { CodexHost, HostHealth, MicroSnapshot, RoutedAgentSlot } from "../src/types.js";
+import type {
+  CodexHost, HostHealth, MicroSnapshot, ReasoningAdjustmentPolicy,
+  ReasoningAdjustmentResult, RoutedAgentSlot
+} from "../src/types.js";
 
 type FakeDial = DialAction<CodexDialSettings> & {
   feedbackCalls: unknown[];
@@ -29,15 +32,18 @@ type ControllerProbe = {
   relayClient?: {
     currentHost(): CodexHost | undefined;
     currentHealth(): HostHealth;
-    currentSnapshot(): undefined;
-    send(command: unknown): Promise<void>;
+    currentSnapshot(): { host: CodexHost; observedAt: number; snapshot: MicroSnapshot } | undefined;
+    send(command: unknown): Promise<void | ReasoningAdjustmentResult>;
   };
   microBridge: {
     sendAgent(slot: number, act: 0 | 1, threadKey?: string): Promise<void>;
     sendAction?(slot: string, act: 0 | 1): Promise<void>;
     sendEncoder?(act: 0 | 1): Promise<void>;
     sendJoystick?(direction: string, distance: 0 | 1): Promise<void>;
-    adjustReasoning?(direction: string): Promise<void>;
+    adjustReasoning?(
+      direction: string,
+      policy?: ReasoningAdjustmentPolicy
+    ): Promise<void | ReasoningAdjustmentResult>;
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
     refresh?(): Promise<MicroSnapshot>;
@@ -101,6 +107,7 @@ function fakeDial(
   options: {
     rejectDescriptions?: boolean;
     rejectSuccessFeedback?: boolean;
+    rejectUltraFeedback?: boolean;
     descriptionError?: string;
   } = {}
 ): FakeDial {
@@ -113,6 +120,9 @@ function fakeDial(
       this.feedbackCalls.push(payload);
       if (options.rejectSuccessFeedback && JSON.stringify(payload).includes("RESET COMPLETE")) {
         throw new Error("success feedback unavailable");
+      }
+      if (options.rejectUltraFeedback && JSON.stringify(payload).includes("ULTRA OFF")) {
+        throw new Error("Ultra feedback unavailable");
       }
     },
     async setTriggerDescription(payload: unknown) {
@@ -615,6 +625,279 @@ test("reasoning dial maps each direction to one dedicated adjustment without enc
 
   assert.deepEqual(adjustments, ["increase", "decrease"]);
   assert.deepEqual(encoderClicks, []);
+});
+
+test("local reasoning detents capture and pass each dial's explicit Ultra policy", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-local-policy");
+  const policies: Array<[string, ReasoningAdjustmentPolicy | undefined]> = [];
+  const backlog = deferred<void>();
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning(direction, policy) {
+      policies.push([direction, policy]);
+      return "applied";
+    }
+  };
+
+  controller.registerDial(action, { ...expandDialPreset("reasoning"), includeUltraReasoning: false });
+  probe(controller).dials.get(action.id)!.queue.enqueue(() => backlog.promise);
+  controller.rotateDial(action, 1);
+  controller.updateDialSettings(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: true
+  });
+  backlog.resolve();
+  await idle(controller, action.id);
+  controller.rotateDial(action, -1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(policies, [
+    ["increase", { includeUltra: false }],
+    ["decrease", { includeUltra: true }]
+  ]);
+});
+
+test("remote reasoning detents carry each dial's explicit Ultra policy", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-remote-policy");
+  const commands: unknown[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => undefined,
+    async send(command) { commands.push(command); return "applied"; }
+  };
+
+  controller.registerDial(action, { ...expandDialPreset("reasoning"), includeUltraReasoning: false });
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+  controller.updateDialSettings(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: true
+  });
+  controller.rotateDial(action, -1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(commands, [
+    { kind: "reasoning", direction: "increase", includeUltra: false },
+    { kind: "reasoning", direction: "decrease", includeUltra: true }
+  ]);
+});
+
+test("public reasoning actions remain unrestricted locally and remotely", async () => {
+  const controller = new DeckController();
+  const localPolicies: Array<[string, ReasoningAdjustmentPolicy | undefined]> = [];
+  const remoteCommands: unknown[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning(direction, policy) {
+      localPolicies.push([direction, policy]);
+      return "applied";
+    }
+  };
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => undefined,
+    async send(command) { remoteCommands.push(command); return "applied"; }
+  };
+
+  await controller.adjustReasoning("increase");
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  await controller.adjustReasoning("decrease");
+
+  assert.deepEqual(localPolicies, [["increase", { includeUltra: true }]]);
+  assert.deepEqual(remoteCommands, [
+    { kind: "reasoning", direction: "decrease", includeUltra: true }
+  ]);
+});
+
+test("blocked local and remote reasoning show identical registration-safe Ultra feedback without alerts", async () => {
+  const expected = {
+    title: "REASONING",
+    value: "ULTRA OFF",
+    detail: "ENABLE IN DIAL SETTINGS",
+    indicator: 100,
+    accent: { value: 100, bar_fill_c: "#FF9A3D" }
+  };
+  for (const route of ["local", "remote"] as const) {
+    const controller = new DeckController();
+    const action = fakeDial(`reasoning-blocked-${route}`);
+    const state = probe(controller);
+    state.localHost = HOST;
+    state.targetHostId = route === "local" ? HOST.hostId : REMOTE_HOST.hostId;
+    state.targetPlatform = route === "local" ? HOST.platform : REMOTE_HOST.platform;
+    state.localSnapshot = {
+      host: HOST, observedAt: 1_000,
+      snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+    };
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.microBridge = {
+      async sendAgent() {},
+      async adjustReasoning() { return "blocked-ultra"; }
+    };
+    state.relayClient = {
+      currentHost: () => REMOTE_HOST,
+      currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+      currentSnapshot: () => ({
+        host: REMOTE_HOST, observedAt: 1_000,
+        snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+      }),
+      async send() { return "blocked-ultra"; }
+    };
+    controller.registerDial(action, {
+      ...expandDialPreset("reasoning"), includeUltraReasoning: false
+    });
+    await settle();
+
+    controller.rotateDial(action, 1);
+    await idle(controller, action.id);
+
+    assert.deepEqual(action.feedbackCalls.at(-1), expected, route);
+    assert.equal(action.alerts, 0, route);
+    controller.unregisterDial(action);
+  }
+});
+
+test("blocked reasoning restores the latest authoritative feedback after 1.2 seconds", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-blocked-restore");
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "medium" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return "blocked-ultra"; }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  });
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "ULTRA OFF");
+  state.localSnapshot = {
+    host: HOST, observedAt: 2_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "xhigh" }
+  };
+  await state.renderAll();
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "ULTRA OFF");
+
+  await new Promise((resolve) => setTimeout(resolve, 1_250));
+  await settle();
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "XHIGH");
+  controller.unregisterDial(action);
+});
+
+test("Ultra notices are canceled safely by settings changes, disposal, and registration replacement", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return "blocked-ultra"; }
+  };
+  const blockedSettings = {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  };
+
+  const changed = fakeDial("notice-settings-change");
+  controller.registerDial(changed, blockedSettings);
+  await settle();
+  controller.rotateDial(changed, 1);
+  await idle(controller, changed.id);
+  assert.equal((changed.feedbackCalls.at(-1) as { value: string }).value, "ULTRA OFF");
+  controller.updateDialSettings(changed, {
+    ...blockedSettings, includeUltraReasoning: true
+  });
+  await settle();
+  assert.equal((changed.feedbackCalls.at(-1) as { value: string }).value, "HIGH");
+
+  const disposed = fakeDial("notice-disposed");
+  controller.registerDial(disposed, blockedSettings);
+  await settle();
+  controller.rotateDial(disposed, 1);
+  await idle(controller, disposed.id);
+  assert.equal((disposed.feedbackCalls.at(-1) as { value: string }).value, "ULTRA OFF");
+  const disposedCalls = disposed.feedbackCalls.length;
+  controller.unregisterDial(disposed);
+
+  const oldAction = fakeDial("notice-replaced");
+  const newAction = fakeDial("notice-replaced");
+  controller.registerDial(oldAction, blockedSettings);
+  await settle();
+  controller.rotateDial(oldAction, 1);
+  await idle(controller, oldAction.id);
+  assert.equal((oldAction.feedbackCalls.at(-1) as { value: string }).value, "ULTRA OFF");
+  const oldCalls = oldAction.feedbackCalls.length;
+  controller.registerDial(newAction, blockedSettings);
+  await settle();
+  const newCalls = newAction.feedbackCalls.length;
+
+  await new Promise((resolve) => setTimeout(resolve, 1_250));
+  await settle();
+  assert.equal(disposed.feedbackCalls.length, disposedCalls);
+  assert.equal(oldAction.feedbackCalls.length, oldCalls);
+  assert.equal(newAction.feedbackCalls.length, newCalls);
+  controller.unregisterDial(changed);
+  controller.unregisterDial(newAction);
+});
+
+test("failed Ultra notice feedback clears suppression and falls back to authoritative rendering", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-blocked-feedback-failure", { rejectUltraFeedback: true });
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return "blocked-ultra"; }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  });
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+
+  assert.match(JSON.stringify(action.feedbackCalls), /ULTRA OFF/);
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "HIGH");
+  assert.equal(action.alerts, 0);
+  controller.unregisterDial(action);
 });
 
 test("rotation rejects malformed or oversized events and atomically bounds one-shot backlog", async () => {

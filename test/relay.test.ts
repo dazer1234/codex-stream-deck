@@ -110,7 +110,14 @@ test("optional mobile relay config is absent-safe and validates before startup",
 test("relay command parser permits only the narrow native command surface", () => {
   const threadKey = "00000000-0000-4000-8000-000000000005";
   assert.deepEqual(parseRelayCommand({ kind: "agent", slot: 5, threadKey, act: 1 }), { kind: "agent", slot: 5, threadKey, act: 1 });
-  assert.deepEqual(parseRelayCommand({ kind: "reasoning", direction: "increase" }), { kind: "reasoning", direction: "increase" });
+  assert.deepEqual(
+    parseRelayCommand({ kind: "reasoning", direction: "increase", includeUltra: true }),
+    { kind: "reasoning", direction: "increase", includeUltra: true }
+  );
+  assert.deepEqual(
+    parseRelayCommand({ kind: "reasoning", direction: "decrease", includeUltra: false }),
+    { kind: "reasoning", direction: "decrease", includeUltra: false }
+  );
   assert.deepEqual(parseRelayCommand({ kind: "rate-limit-reset" }), { kind: "rate-limit-reset" });
   assert.equal(parseRelayCommand({ kind: "rate-limit-reset", force: true }), null);
   assert.deepEqual(parseRelayCommand({ kind: "usage-refresh" }), { kind: "usage-refresh" });
@@ -122,6 +129,33 @@ test("relay command parser permits only the narrow native command surface", () =
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "local:client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.equal(parseRelayCommand({ kind: "agent", slot: 1, threadKey: "local:../../secret", act: 1 }), null);
+});
+
+test("relay reasoning commands require an explicit literal Ultra policy and exact own keys", () => {
+  const inherited = Object.create({ includeUltra: true }) as Record<string, unknown>;
+  inherited.kind = "reasoning";
+  inherited.direction = "increase";
+  let coercedDirection = false;
+  const executableDirection = {
+    toString() {
+      coercedDirection = true;
+      return "increase";
+    }
+  };
+  for (const invalid of [
+    { kind: "reasoning", direction: "increase" },
+    inherited,
+    { kind: "reasoning", direction: "increase", includeUltra: null },
+    { kind: "reasoning", direction: "increase", includeUltra: 1 },
+    { kind: "reasoning", direction: "increase", includeUltra: "true" },
+    { kind: "reasoning", direction: "increase", includeUltra: {} },
+    { kind: "reasoning", direction: "sideways", includeUltra: true },
+    { kind: "reasoning", direction: executableDirection, includeUltra: true },
+    { kind: "reasoning", direction: "increase", includeUltra: true, expression: "process.exit()" }
+  ]) {
+    assert.equal(parseRelayCommand(invalid), null, JSON.stringify(invalid));
+  }
+  assert.equal(coercedDirection, false, "strict parsing must not execute direction coercion hooks");
 });
 
 test("relay snapshots accept an optional bounded reasoning effort", async () => {
@@ -298,6 +332,33 @@ test("relay parser bounds host identity and ready capabilities", () => {
   assert.equal(parseRelayServerMessage({
     type: "result", protocol: 1, requestId: "request", ok: false, error: null
   }), null);
+});
+
+test("relay result parser accepts only typed successful outcomes and exact result shapes", () => {
+  const success = { type: "result", protocol: 1, requestId: "request", ok: true };
+  assert.deepEqual(parseRelayServerMessage(success), success);
+  for (const outcome of ["applied", "blocked-ultra"] as const) {
+    const result = { ...success, outcome };
+    assert.deepEqual(parseRelayServerMessage(result), result);
+  }
+  const failure = { type: "result", protocol: 1, requestId: "request", ok: false, error: "failed" };
+  assert.deepEqual(parseRelayServerMessage(failure), failure);
+  assert.deepEqual(parseRelayServerMessage({ ...failure, error: undefined }), { ...failure, error: undefined });
+
+  for (const invalid of [
+    { ...success, outcome: "unknown" },
+    { ...success, outcome: null },
+    { ...success, outcome: 1 },
+    { ...success, outcome: {} },
+    { ...failure, outcome: "blocked-ultra" },
+    { ...success, error: "success cannot carry an error" },
+    { ...success, requestId: "" },
+    { ...success, requestId: "x".repeat(129) },
+    { ...failure, error: "x".repeat(513) },
+    { ...success, extra: true }
+  ]) {
+    assert.equal(parseRelayServerMessage(invalid), null, JSON.stringify(invalid));
+  }
 });
 
 test("relay snapshot layouts accept official keycaps and reject filesystem-shaped identifiers", () => {
@@ -957,6 +1018,77 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
   assert.equal(refreshResult.ok, true);
   socket.close();
   await server.close();
+});
+
+test("relay client and server round-trip typed reasoning outcomes without inventing non-reasoning results", async (t) => {
+  const port = await freePort();
+  const policies: unknown[] = [];
+  const control = {
+    refresh: async () => snapshot,
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {},
+    adjustReasoning: async (_direction: string, policy?: { includeUltra: boolean }) => {
+      policies.push(policy);
+      return policy?.includeUltra ? "applied" as const : "blocked-ultra" as const;
+    },
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    await server.close();
+  });
+  await server.start();
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+
+  assert.equal(await client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true
+  }), "applied");
+  assert.equal(await client.send({
+    kind: "reasoning", direction: "increase", includeUltra: false
+  }), "blocked-ultra");
+  assert.equal(await client.send({ kind: "action", slot: "ACT06", act: 1 }), undefined);
+  assert.deepEqual(policies, [{ includeUltra: true }, { includeUltra: false }]);
+});
+
+test("relay server fails closed when a reasoning control returns an invalid outcome", async (t) => {
+  const port = await freePort();
+  const control = {
+    refresh: async () => snapshot,
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "unexpected" as never,
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => {
+    socket.close();
+    await server.close();
+  });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await messages.next()).type, "ready");
+  assert.equal((await messages.next()).type, "snapshot");
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "invalid-outcome",
+    command: { kind: "reasoning", direction: "increase", includeUltra: true }
+  }));
+
+  const result = await messages.next();
+  assert.equal(result.type, "result");
+  assert.equal(result.ok, false);
+  assert.equal("outcome" in result, false);
+  assert.match(String(result.error), /invalid reasoning adjustment result/i);
 });
 
 test("usage refresh publishes a new post-command snapshot before acknowledging success", async (t) => {

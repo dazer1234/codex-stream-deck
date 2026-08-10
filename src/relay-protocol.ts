@@ -1,6 +1,7 @@
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import type {
-  CodexHost, HostSessionPresence, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, RoutedAgentSlot
+  CodexHost, HostSessionPresence, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
+  ReasoningAdjustmentResult, RoutedAgentSlot
 } from "./types.js";
 
 export const RELAY_PROTOCOL_VERSION = 1;
@@ -10,7 +11,7 @@ export type RelayCommand =
   | { kind: "action"; slot: MicroActionSlot; act: 0 | 1 }
   | { kind: "joystick"; direction: MicroDirection; distance: 0 | 1 }
   | { kind: "encoder"; act: 0 | 1 }
-  | { kind: "reasoning"; direction: ReasoningAdjustment }
+  | { kind: "reasoning"; direction: ReasoningAdjustment; includeUltra: boolean }
   | { kind: "usage-refresh" }
   | { kind: "rate-limit-reset" }
   | { kind: "keycap"; keycapId: OfficialKeycapId };
@@ -42,7 +43,15 @@ export type RelayHealthMessage = {
   observedAt: number;
 };
 export type RelayCommandMessage = { type: "command"; protocol: 1; requestId: string; command: RelayCommand };
-export type RelayResultMessage = { type: "result"; protocol: 1; requestId: string; ok: boolean; error?: string };
+export type RelayResultMessage =
+  | {
+      type: "result";
+      protocol: 1;
+      requestId: string;
+      ok: true;
+      outcome?: ReasoningAdjustmentResult;
+    }
+  | { type: "result"; protocol: 1; requestId: string; ok: false; error?: string };
 export type RelayServerMessage = RelayReadyMessage | RelaySnapshotMessage | RelayHealthMessage | RelayResultMessage;
 
 export type HostSnapshot = { host: CodexHost; snapshot: MicroSnapshot; observedAt: number };
@@ -250,9 +259,21 @@ export function parseRelayServerMessage(value: unknown): RelayServerMessage | nu
       value.reason === "native-signals-unavailable" && validProtocolTimestamp(value.observedAt) != null) {
     return value as RelayHealthMessage;
   }
-  if (value.type === "result" && boundedNonblankString(value.requestId, 128) && typeof value.ok === "boolean" &&
-      (value.error === undefined || (typeof value.error === "string" && value.error.length <= 512))) {
-    return value as RelayResultMessage;
+  if (value.type === "result" && boundedNonblankString(value.requestId, 128)) {
+    if (value.ok === true &&
+        (value.outcome === undefined || value.outcome === "applied" || value.outcome === "blocked-ultra") &&
+        exactOwnKeys(value, value.outcome === undefined
+          ? ["type", "protocol", "requestId", "ok"]
+          : ["type", "protocol", "requestId", "ok", "outcome"])) {
+      return value as RelayResultMessage;
+    }
+    if (value.ok === false &&
+        (value.error === undefined || (typeof value.error === "string" && value.error.length <= 512)) &&
+        exactOwnKeys(value, Object.prototype.hasOwnProperty.call(value, "error")
+          ? ["type", "protocol", "requestId", "ok", "error"]
+          : ["type", "protocol", "requestId", "ok"])) {
+      return value as RelayResultMessage;
+    }
   }
   return null;
 }
@@ -263,7 +284,9 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
   if (value.kind === "action" && ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"].includes(String(value.slot)) && binary(value.act)) return value as RelayCommand;
   if (value.kind === "joystick" && ["up", "right", "down", "left"].includes(String(value.direction)) && binary(value.distance)) return value as RelayCommand;
   if (value.kind === "encoder" && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "reasoning" && ["decrease", "increase"].includes(String(value.direction))) return value as RelayCommand;
+  if (value.kind === "reasoning" && (value.direction === "decrease" || value.direction === "increase") &&
+      typeof value.includeUltra === "boolean" &&
+      exactOwnKeys(value, ["kind", "direction", "includeUltra"])) return value as RelayCommand;
   if (value.kind === "usage-refresh" && Object.keys(value).length === 1) return value as RelayCommand;
   if (value.kind === "rate-limit-reset" && Object.keys(value).length === 1) return value as RelayCommand;
   if (value.kind === "keycap" && typeof value.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(value.keycapId as OfficialKeycapId)) return value as RelayCommand;
@@ -329,6 +352,12 @@ function isHost(value: unknown): value is CodexHost {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactOwnKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) =>
+    Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function binary(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }

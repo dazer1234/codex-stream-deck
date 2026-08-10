@@ -41,7 +41,7 @@ import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
-  ReasoningAdjustmentPolicy, RoutedAgentSlot, UsageLimitMode, UsageWindowKind
+  ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot, UsageLimitMode, UsageWindowKind
 } from "./types.js";
 import { selectAccountUsageSource, selectUsageWindow, type AccountUsageSource } from "./usage.js";
 
@@ -73,6 +73,7 @@ type DialGesturePhase = "pending" | "active" | "completed" | "failed" | "releasi
 type DialGesture = {
   binding: DialBindingId;
   route: DialRoute;
+  includeUltraReasoning: boolean;
   lifecycle: ReturnType<typeof bindingLifecycle>;
   startedAt: number;
   endedAt?: number;
@@ -89,8 +90,16 @@ type DialRegistration = {
   lastFeedback?: string;
   renderAgain?: boolean;
   rendering?: Promise<void>;
-  successActive?: boolean;
-  successTimer?: NodeJS.Timeout;
+  noticeActive?: boolean;
+  noticeTimer?: NodeJS.Timeout;
+  noticeRevision: number;
+};
+type DialNotice = {
+  title: string;
+  value: string;
+  detail: string;
+  indicator: number;
+  accent: { value: number; bar_fill_c: string };
 };
 type ResetHold = { startedAt: number; sourceHostId?: string };
 
@@ -98,6 +107,7 @@ const USER_ICON_ROOT = join(codexDeckStateRoot(), "icons");
 const LOCAL_MOBILE_CONFIG = "mobile-local-relay-server.json";
 const RESET_HOLD_MS = 1_200;
 const DIAL_SUCCESS_MS = 350;
+const DIAL_ULTRA_NOTICE_MS = 1_200;
 const MAX_DIAL_ERROR_DEDUPE = 100;
 
 function rememberDialError(errors: Set<string>, message: string): boolean {
@@ -248,6 +258,7 @@ export class DeckController {
     this.stopped = true;
     if (this.poll) clearInterval(this.poll);
     if (this.animation) clearInterval(this.animation);
+    for (const registration of this.dials.values()) this.clearDialNotice(registration);
     this.relayClient?.close();
     void this.mobileRelayServer?.close();
     void this.localMobileRelayServer?.close();
@@ -306,7 +317,8 @@ export class DeckController {
       state: initialDialRuntimeState(),
       queue: new DialCommandQueue(),
       generation: ++this.nextDialGeneration,
-      disposed: false
+      disposed: false,
+      noticeRevision: 0
     };
     this.dials.set(action.id, registration);
     this.updateDialDescription(registration);
@@ -326,8 +338,10 @@ export class DeckController {
       state: initialDialRuntimeState(),
       queue: new DialCommandQueue(),
       generation: ++this.nextDialGeneration,
-      disposed: false
+      disposed: false,
+      noticeRevision: 0
     };
+    this.clearDialNotice(registration);
     registration.action = action;
     registration.settings = settings;
     this.dials.set(action.id, registration);
@@ -346,9 +360,7 @@ export class DeckController {
     registration.disposed = true;
     registration.generation = -Math.abs(registration.generation);
     registration.renderAgain = false;
-    if (registration.successTimer) clearTimeout(registration.successTimer);
-    registration.successActive = false;
-    registration.successTimer = undefined;
+    this.clearDialNotice(registration);
     this.resetHolds.delete(registration.action.id);
     if (this.dials.get(registration.action.id) === registration) {
       this.dials.delete(registration.action.id);
@@ -631,8 +643,8 @@ export class DeckController {
   }
 
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
-    await this.sendToTarget({ kind: "reasoning", direction }, async () => {
-      await this.microBridge.adjustReasoning(direction);
+    await this.sendToTarget({ kind: "reasoning", direction, includeUltra: true }, async () => {
+      await this.microBridge.adjustReasoning(direction, { includeUltra: true });
     });
   }
 
@@ -851,7 +863,7 @@ export class DeckController {
   }
 
   private async renderDial(registration: DialRegistration): Promise<void> {
-    if (!this.isCurrentDialRegistration(registration) || registration.successActive) return;
+    if (!this.isCurrentDialRegistration(registration) || registration.noticeActive) return;
     registration.settings = normalizeDialSettings(registration.settings);
     const view = this.dialRuntimeView(registration.settings, registration.state);
     if (registration.settings.rotation.kind === "selector") {
@@ -919,36 +931,77 @@ export class DeckController {
     });
   }
 
-  private async showDialSuccess(registration: DialRegistration): Promise<void> {
+  private clearDialNotice(registration: DialRegistration): void {
+    if (!registration.noticeActive && !registration.noticeTimer) return;
+    if (registration.noticeTimer) clearTimeout(registration.noticeTimer);
+    registration.noticeTimer = undefined;
+    registration.noticeActive = false;
+    registration.noticeRevision += 1;
+    registration.lastFeedback = undefined;
+  }
+
+  private async showDialNotice(
+    registration: DialRegistration,
+    notice: DialNotice,
+    durationMs: number
+  ): Promise<void> {
     if (!this.isCurrentDialRegistration(registration)) return;
-    if (registration.successTimer) clearTimeout(registration.successTimer);
-    registration.successActive = true;
+    if (registration.noticeTimer) clearTimeout(registration.noticeTimer);
+    registration.noticeTimer = undefined;
+    const revision = ++registration.noticeRevision;
+    registration.noticeActive = true;
     try {
-      await registration.action.setFeedback({
-        title: "RATE LIMIT",
-        value: "RESET COMPLETE",
-        detail: "CREDIT APPLIED",
-        indicator: 100,
-        accent: { value: 100, bar_fill_c: "#35D86B" }
-      });
+      await registration.action.setFeedback(notice);
     } catch (error) {
-      registration.successActive = false;
+      if (!this.isCurrentDialRegistration(registration)) return;
+      if (registration.noticeRevision !== revision) {
+        registration.lastFeedback = undefined;
+        await this.renderDialSafely(registration);
+        return;
+      }
+      registration.noticeActive = false;
       const message = String(error);
       if (rememberDialError(this.dialSuccessErrors, message)) {
-        streamDeck.logger.warn(`Codex dial success feedback unavailable: ${message}`);
+        streamDeck.logger.warn(`Codex dial temporary feedback unavailable: ${message}`);
       }
       registration.lastFeedback = undefined;
       await this.renderDialSafely(registration);
       return;
     }
     if (!this.isCurrentDialRegistration(registration)) return;
-    registration.successTimer = setTimeout(() => {
-      if (!this.isCurrentDialRegistration(registration)) return;
-      registration.successTimer = undefined;
-      registration.successActive = false;
+    if (registration.noticeRevision !== revision) {
+      registration.lastFeedback = undefined;
+      await this.renderDialSafely(registration);
+      return;
+    }
+    registration.noticeTimer = setTimeout(() => {
+      if (!this.isCurrentDialRegistration(registration) ||
+          registration.noticeRevision !== revision) return;
+      registration.noticeTimer = undefined;
+      registration.noticeActive = false;
       registration.lastFeedback = undefined;
       void this.renderDialSafely(registration);
+    }, durationMs);
+  }
+
+  private async showDialSuccess(registration: DialRegistration): Promise<void> {
+    await this.showDialNotice(registration, {
+      title: "RATE LIMIT",
+      value: "RESET COMPLETE",
+      detail: "CREDIT APPLIED",
+      indicator: 100,
+      accent: { value: 100, bar_fill_c: "#35D86B" }
     }, DIAL_SUCCESS_MS);
+  }
+
+  private async showDialUltraOff(registration: DialRegistration): Promise<void> {
+    await this.showDialNotice(registration, {
+      title: "REASONING",
+      value: "ULTRA OFF",
+      detail: "ENABLE IN DIAL SETTINGS",
+      indicator: 100,
+      accent: { value: 100, bar_fill_c: "#FF9A3D" }
+    }, DIAL_ULTRA_NOTICE_MS);
   }
 
   private resolveDialPress(registration: DialRegistration, startedAt: number): DialGesture {
@@ -1000,6 +1053,7 @@ export class DeckController {
     return {
       binding,
       route,
+      includeUltraReasoning: registration.settings.includeUltraReasoning,
       lifecycle: route.kind === "agent" ? "momentary" : bindingLifecycle(binding),
       startedAt,
       phase: "pending"
@@ -1186,25 +1240,40 @@ export class DeckController {
     const lifecycle = bindingLifecycle(binding);
     if (act === 0 && lifecycle !== "momentary") return;
     if (binding === "reasoning.decrease") {
-      return this.sendDialToHost(
+      const outcome = await this.sendDialToHost(
         route,
-        { kind: "reasoning", direction: "decrease" },
-        async () => { await this.microBridge.adjustReasoning("decrease"); }
+        {
+          kind: "reasoning", direction: "decrease",
+          includeUltra: gesture.includeUltraReasoning
+        },
+        () => this.microBridge.adjustReasoning("decrease", {
+          includeUltra: gesture.includeUltraReasoning
+        })
       );
+      if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+      return;
     }
     if (binding === "reasoning.increase") {
-      return this.sendDialToHost(
+      const outcome = await this.sendDialToHost(
         route,
-        { kind: "reasoning", direction: "increase" },
-        async () => { await this.microBridge.adjustReasoning("increase"); }
+        {
+          kind: "reasoning", direction: "increase",
+          includeUltra: gesture.includeUltraReasoning
+        },
+        () => this.microBridge.adjustReasoning("increase", {
+          includeUltra: gesture.includeUltraReasoning
+        })
       );
+      if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+      return;
     }
     if (binding === "new-task") {
-      return this.sendDialToHost(
+      await this.sendDialToHost(
         route,
         { kind: "keycap", keycapId: "NEW" },
         () => openCodexThread("new")
       );
+      return;
     }
     if (binding === "host.toggle") return this.toggleTargetHost();
     if (binding === "usage.refresh") return this.refreshDialUsage(route);
@@ -1221,29 +1290,32 @@ export class DeckController {
     }
     if (binding.startsWith("micro.")) {
       const slot = binding.slice(6) as MicroActionSlot;
-      return this.sendDialToHost(
+      await this.sendDialToHost(
         route,
         { kind: "action", slot, act },
         () => this.runLocalMicroAction(slot, act),
         act === 1
       );
+      return;
     }
     if (binding.startsWith("joystick.")) {
       const direction = binding.slice(9) as MicroDirection;
-      return this.sendDialToHost(
+      await this.sendDialToHost(
         route,
         { kind: "joystick", direction, distance: act },
         () => this.microBridge.sendJoystick(direction, act),
         act === 1
       );
+      return;
     }
     if (binding.startsWith("keycap.") && act === 1) {
       const keycapId = binding.slice(7) as OfficialKeycapId;
-      return this.sendDialToHost(
+      await this.sendDialToHost(
         route,
         { kind: "keycap", keycapId },
         () => this.runLocalKeycap(keycapId)
       );
+      return;
     }
     throw new Error("Unsupported Codex dial binding.");
   }
@@ -1266,9 +1338,9 @@ export class DeckController {
   private async sendDialToHost(
     route: DialHostRoute,
     command: RelayCommand,
-    local: () => Promise<void>,
+    local: () => Promise<void | ReasoningAdjustmentResult>,
     requireReady = true
-  ): Promise<void> {
+  ): Promise<ReasoningAdjustmentResult | undefined> {
     const localHost = this.localHost;
     const localRequested = route.hostId != null
       ? route.hostId === localHost?.hostId
@@ -1277,8 +1349,8 @@ export class DeckController {
       if (requireReady && this.localHealth.state !== "ready") {
         throw new Error("The captured Codex host is not ready.");
       }
-      await local();
-      return;
+      const outcome = await local();
+      return outcome === "applied" || outcome === "blocked-ultra" ? outcome : undefined;
     }
     const remote = this.relayClient?.currentHost();
     if (!remote || (route.hostId != null
@@ -1289,7 +1361,7 @@ export class DeckController {
     if (requireReady && this.relayClient?.currentHealth().state !== "ready") {
       throw new Error("The captured Codex host is not ready.");
     }
-    await this.sendRemote(command);
+    return this.sendRemote(command);
   }
 
   private async refreshDialUsage(route: DialHostRoute): Promise<void> {
@@ -1496,9 +1568,9 @@ export class DeckController {
     return this.localHost != null && this.targetPlatform !== this.localHost.platform;
   }
 
-  private async sendRemote(command: RelayCommand): Promise<void> {
+  private async sendRemote(command: RelayCommand): Promise<ReasoningAdjustmentResult | undefined> {
     if (!this.relayClient) throw new Error("Remote Codex relay is not configured.");
-    await this.relayClient.send(command);
+    return this.relayClient.send(command);
   }
 
   private async sendToTarget(command: RelayCommand, local: () => Promise<void>): Promise<void> {

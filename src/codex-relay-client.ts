@@ -8,7 +8,7 @@ import {
   RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
   type HostSnapshot, type RelayCommand, type RelayResultMessage
 } from "./relay-protocol.js";
-import type { CodexHost, HostHealth } from "./types.js";
+import type { CodexHost, HostHealth, ReasoningAdjustmentResult } from "./types.js";
 
 export type RelayClientConfig = { enabled: boolean; url: string; token: string };
 
@@ -37,7 +37,11 @@ export class CodexRelayClient {
   private readyHostId?: string;
   private snapshotGeneration = 0;
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
-  private readonly pending = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly pending = new Map<string, {
+    resolve: (outcome: ReasoningAdjustmentResult | undefined) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
   constructor(
     private readonly config: RelayClientConfig,
@@ -78,7 +82,7 @@ export class CodexRelayClient {
       this.capabilities.has(capability);
   }
 
-  async send(command: RelayCommand): Promise<void> {
+  async send(command: RelayCommand): Promise<ReasoningAdjustmentResult | undefined> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN ||
         this.readyGeneration !== this.connectionGeneration || this.readyHostId == null ||
@@ -86,7 +90,7 @@ export class CodexRelayClient {
       throw new Error("Remote Codex host is offline.");
     }
     const requestId = randomUUID();
-    await new Promise<void>((resolve, reject) => {
+    return new Promise<ReasoningAdjustmentResult | undefined>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error("Remote Codex command timed out."));
@@ -154,7 +158,7 @@ export class CodexRelayClient {
     if (!pending) return;
     this.pending.delete(message.requestId);
     clearTimeout(pending.timer);
-    if (message.ok) pending.resolve();
+    if (message.ok) pending.resolve(message.outcome);
     else pending.reject(new Error(message.error || "Remote Codex command failed."));
   }
 
