@@ -25,6 +25,8 @@ The Fast key uses authoritative composer state: green means Fast Mode is enabled
 
 Reasoning changes apply once per detent through Codex's dedicated increase and decrease commands. Rotation does not move keyboard focus through composer controls and does not require a press or confirmation.
 
+**Include Ultra** is configured per knob and defaults off. When Include Ultra is off, clockwise reasoning stops before Ultra and the dial briefly shows `ULTRA OFF`. When Include Ultra is on, the knob can enter Ultra and Codex may show its native Full-access confirmation. Manual Codex selection and the keypad Reasoning Up action stay unrestricted. The plugin never confirms or dismisses that native dialog.
+
 The six action names are the default slot labels for the six configured Codex Micro action slots. Feedback labels follow the current Codex Micro assignments, so a customized slot is identified by its current assignment rather than a hardcoded default name.
 
 ## Gesture behavior
@@ -55,6 +57,7 @@ Holding the dial while rotating does not reveal a second binding layer. A held t
 | Selector source | Choose occupied agents, configured actions, or usage windows. |
 | Wrap at ends | Allow the selector to continue from the last item to the first and vice versa. |
 | Configured actions | Enable and reorder the allow-listed actions available to an Actions selector. |
+| Include Ultra | Allow this knob's clockwise Reasoning control to enter Ultra. It is off by default. |
 | Press | Choose an independent dial-down/dial-up action or Activate Selection. |
 | Touch tap | Choose an independent tap action. |
 | Feedback | Choose Automatic, Current reasoning, Selected agent, Selected action, Navigation pair, Usage window / overview, or Static label. |
@@ -69,6 +72,8 @@ Changing an individual field marks only that dial as customized. Settings contai
 ## Feedback and routing
 
 Current reasoning is read from Codex's live composer state, not inferred from the last turn of the knob. If that value is not confidently available in the current Codex build, the dial honestly shows `REASONING · UNAVAILABLE`.
+
+Usage reset detail uses compact day/hour/minute units, such as `RESETS IN 5D 5H 48M`. The same formatter applies to Auto, 5-hour, and Weekly modes.
 
 In single-host mode, controls and feedback use the local Codex instance. In multi-host mode:
 

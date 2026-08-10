@@ -783,11 +783,18 @@ test("Stream Deck Plus guide documents the supported dial contract without overs
   for (const gesture of ["rotate", "press", "touch"]) assert.match(guide, new RegExp(`\\b${gesture}\\b`, "i"));
   for (const state of ["NO ITEMS", "OFFLINE", "DEGRADED", "CONNECTING"]) assert.match(guide, new RegExp(state));
   assert.match(guide, /Reasoning[^\n]*decrease[^\n]*increase/i);
+  assert.match(guide, /Include Ultra[^.\n]*per knob[^.\n]*defaults off/i);
+  assert.match(guide, /When Include Ultra is off[^.\n]*stops before Ultra[^.\n]*`ULTRA OFF`/i);
+  assert.match(guide, /When Include Ultra is on[^.\n]*Ultra[^.\n]*native Full-access confirmation/i);
+  assert.match(guide, /Manual Codex selection[^.\n]*keypad Reasoning Up[^.\n]*unrestricted/i);
+  assert.match(guide, /never confirms or dismisses[^.\n]*native dialog/i);
   assert.match(guide, /Agents[^\n]*occupied agent[^\n]*focus[^\n]*M\/W host badge/i);
   assert.match(guide, /Actions[^\n]*Fast[^\n]*Approve[^\n]*Reject[^\n]*Fork[^\n]*Dictation[^\n]*Send[^\n]*Settings/i);
   assert.match(guide, /six action names[^.\n]*default slot labels/i);
   assert.match(guide, /feedback labels follow[^.\n]*current Codex Micro assignments/i);
   assert.match(guide, /Usage[^\n]*Auto[^\n]*5h[^\n]*Weekly/i);
+  assert.match(guide, /day\/hour\/minute[^.\n]*`RESETS IN 5D 5H 48M`/i);
+  assert.match(guide, /same formatter[^.\n]*Auto[^.\n]*5-hour[^.\n]*Weekly/i);
   assert.match(guide, /empty selector shows `NO ITEMS`/i);
   assert.doesNotMatch(guide, /empty selector[^.\n]*(?:may|UNAVAILABLE)/i);
   assert.match(guide, /1\.2.second hold/i);
