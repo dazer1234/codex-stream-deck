@@ -772,6 +772,69 @@ test("blocked local and remote reasoning show identical registration-safe Ultra 
   }
 });
 
+test("Ultra notice serializes behind an in-flight authoritative render for its full duration", async (t) => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const highStarted = deferred<void>();
+  const releaseHigh = deferred<void>();
+  const blockedReturned = deferred<void>();
+  const completedWrites: string[] = [];
+  const feedbackCalls: unknown[] = [];
+  let blockHigh = true;
+  const action = {
+    id: "reasoning-blocked-render-race",
+    feedbackCalls,
+    triggerCalls: [],
+    alerts: 0,
+    async setFeedback(payload: unknown) {
+      const value = String((payload as { value?: unknown }).value);
+      feedbackCalls.push(payload);
+      if (value === "HIGH" && blockHigh) {
+        blockHigh = false;
+        highStarted.resolve();
+        await releaseHigh.promise;
+      }
+      completedWrites.push(value);
+    },
+    async setTriggerDescription() {},
+    async showAlert(this: { alerts: number }) { this.alerts += 1; }
+  } as unknown as FakeDial;
+  t.after(() => controller.unregisterDial(action));
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() {
+      blockedReturned.resolve();
+      return "blocked-ultra";
+    }
+  };
+
+  controller.registerDial(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  });
+  await highStarted.promise;
+  controller.rotateDial(action, 1);
+  await blockedReturned.promise;
+  await settle();
+  releaseHigh.resolve();
+  await idle(controller, action.id);
+
+  assert.deepEqual(completedWrites, ["HIGH", "ULTRA OFF"]);
+  await new Promise((resolve) => setTimeout(resolve, 1_150));
+  assert.equal(completedWrites.at(-1), "ULTRA OFF");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await settle();
+  assert.equal(completedWrites.at(-1), "HIGH");
+  assert.equal(action.alerts, 0);
+});
+
 test("blocked reasoning restores the latest authoritative feedback after 1.2 seconds", async () => {
   const controller = new DeckController();
   const action = fakeDial("reasoning-blocked-restore");

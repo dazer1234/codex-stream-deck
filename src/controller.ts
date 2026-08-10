@@ -957,6 +957,16 @@ export class DeckController {
     registration.noticeTimer = undefined;
     const revision = ++registration.noticeRevision;
     registration.noticeActive = true;
+    if (registration.rendering) await registration.rendering;
+    if (!this.isCurrentDialRegistration(registration)) {
+      await this.restoreDialAfterStaleNotice(registration);
+      return;
+    }
+    if (registration.noticeRevision !== revision) {
+      registration.lastFeedback = undefined;
+      await this.renderDialSafely(registration);
+      return;
+    }
     try {
       await registration.action.setFeedback(notice);
     } catch (error) {
