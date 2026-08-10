@@ -252,17 +252,32 @@ export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value
     /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
+export function readOwnDataProperty(
+  object: unknown,
+  key: string
+): { exists: boolean; value?: unknown } | undefined {
+  if (!object || (typeof object !== "object" && typeof object !== "function")) return { exists: false };
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (!descriptor) return { exists: false };
+    if (!Object.prototype.hasOwnProperty.call(descriptor, "value")) return undefined;
+    return { exists: true, value: descriptor.value };
+  } catch { return undefined; }
+}
+
 export function normalizeReasoningEffortOrder(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length === 0 || value.length > 64) return undefined;
   const efforts: string[] = [];
   const seen = new Set<string>();
   let ultraCount = 0;
   for (const item of value) {
-    const effort = typeof item === "string"
-      ? item
-      : item && typeof item === "object" && !Array.isArray(item)
-        ? (item as Record<string, unknown>).reasoningEffort
-        : undefined;
+    let effort: unknown;
+    if (typeof item === "string") effort = item;
+    else if (item && typeof item === "object" && !Array.isArray(item)) {
+      const property = readOwnDataProperty(item, "reasoningEffort");
+      if (!property?.exists) return undefined;
+      effort = property.value;
+    }
     if (!isSafeReasoningIdentifier(effort) || seen.has(effort)) return undefined;
     if (effort === "ultra" && ++ultraCount > 1) return undefined;
     seen.add(effort);
@@ -276,8 +291,10 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
   try {
     for (const key of Object.getOwnPropertyNames(element)) {
       if (key.startsWith("__reactProps$")) {
+        const property = readOwnDataProperty(element, key);
+        if (!property?.exists) return undefined;
         pending.push({
-          value: (element as unknown as Record<string, unknown>)[key],
+          value: property.value,
           selectedValue: false,
           propsObject: false,
           depth: 0
@@ -302,30 +319,71 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
     if (seen.has(object)) continue;
     seen.add(object);
     visited++;
-    const props = object.props && typeof object.props === "object" && !Array.isArray(object.props)
-      ? object.props as Record<string, unknown>
+    let props: Record<string, unknown> | undefined;
+    let hidden = false;
+    const propsProperty = readOwnDataProperty(object, "props");
+    if (!propsProperty) {
+      malformed = true;
+      continue;
+    }
+    const rawProps = propsProperty.exists ? propsProperty.value : undefined;
+    props = rawProps && typeof rawProps === "object" && !Array.isArray(rawProps)
+      ? rawProps as Record<string, unknown>
       : undefined;
-    const hidden = [object, props].filter((value): value is Record<string, unknown> => value != null).some((value) => {
-      const style = value.style && typeof value.style === "object" && !Array.isArray(value.style)
-        ? value.style as Record<string, unknown>
+    let hiddenInspectionFailed = false;
+    for (const value of [object, props].filter((item): item is Record<string, unknown> => item != null)) {
+      const styleProperty = readOwnDataProperty(value, "style");
+      const classNameProperty = readOwnDataProperty(value, "className");
+      const hiddenProperty = readOwnDataProperty(value, "hidden");
+      const ariaHiddenProperty = readOwnDataProperty(value, "aria-hidden");
+      if (!styleProperty || !classNameProperty || !hiddenProperty || !ariaHiddenProperty) {
+        hiddenInspectionFailed = true;
+        break;
+      }
+      const rawStyle = styleProperty.exists ? styleProperty.value : undefined;
+      const style = rawStyle && typeof rawStyle === "object" && !Array.isArray(rawStyle)
+        ? rawStyle as Record<string, unknown>
         : undefined;
-      const className = typeof value.className === "string" ? value.className : "";
-      return value.hidden === true || value["aria-hidden"] === true || value["aria-hidden"] === "true" ||
-        style?.display === "none" || style?.visibility === "hidden" ||
+      const displayProperty = style ? readOwnDataProperty(style, "display") : { exists: false };
+      const visibilityProperty = style ? readOwnDataProperty(style, "visibility") : { exists: false };
+      if (!displayProperty || !visibilityProperty) {
+        hiddenInspectionFailed = true;
+        break;
+      }
+      const classNameValue = classNameProperty.exists ? classNameProperty.value : undefined;
+      const className = typeof classNameValue === "string" ? classNameValue : "";
+      const hiddenValue = hiddenProperty.exists ? hiddenProperty.value : undefined;
+      const ariaHiddenValue = ariaHiddenProperty.exists ? ariaHiddenProperty.value : undefined;
+      hidden ||= hiddenValue === true || ariaHiddenValue === true || ariaHiddenValue === "true" ||
+        displayProperty.value === "none" || visibilityProperty.value === "hidden" ||
         /(^|[\s_-])measurement([\s_-]|$)/i.test(className);
-    });
+    }
+    if (hiddenInspectionFailed) {
+      malformed = true;
+      continue;
+    }
     if (hidden) continue;
-    if (current.selectedValue && current.propsObject && Object.prototype.hasOwnProperty.call(object, "model")) {
-      const rawModel = object.model;
+    const modelProperty = readOwnDataProperty(object, "model");
+    if (!modelProperty) {
+      malformed = true;
+      continue;
+    }
+    if (current.selectedValue && current.propsObject && modelProperty.exists) {
+      const rawModel = modelProperty.value;
       const model = typeof rawModel === "string" ? rawModel.trim() : "";
       if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model)) malformed = true;
       else modelIds.add(model);
     }
     try {
-      for (const [key, child] of Object.entries(object)) {
+      for (const key of Object.keys(object)) {
         if (key === "model" && current.selectedValue && current.propsObject) continue;
+        const property = readOwnDataProperty(object, key);
+        if (!property?.exists) {
+          malformed = true;
+          continue;
+        }
         pending.push({
-          value: child,
+          value: property.value,
           selectedValue: current.selectedValue || key === "selectedValue",
           propsObject: key === "props",
           depth: current.depth + 1
@@ -376,7 +434,7 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
 
 export function readReasoningModelEfforts(queryClients: Iterable<unknown>, modelId: string): string[] | undefined {
   if (!modelId || modelId.length > 128 || /[\s\u0000-\u001f\u007f]/.test(modelId)) return undefined;
-  const modelQueries: Array<Record<string, any>> = [];
+  const candidates: string[][] = [];
   let visitedQueries = 0;
   try {
     for (const candidate of queryClients) {
@@ -386,24 +444,52 @@ export function readReasoningModelEfforts(queryClients: Iterable<unknown>, model
       if (!Array.isArray(queries)) return undefined;
       for (const query of queries) {
         if (++visitedQueries > 30000) return undefined;
-        const queryKey = query?.queryKey;
-        if (Array.isArray(queryKey) && queryKey[0] === "models" && queryKey[1] === "list") modelQueries.push(query);
+        if (!query || typeof query !== "object") return undefined;
+        const queryKeyProperty = readOwnDataProperty(query, "queryKey");
+        if (!queryKeyProperty) return undefined;
+        const queryKey = queryKeyProperty.value;
+        if (!Array.isArray(queryKey) || queryKey[0] !== "models" || queryKey[1] !== "list") continue;
+        const stateProperty = readOwnDataProperty(query, "state");
+        if (!stateProperty) return undefined;
+        if (!stateProperty.exists || !stateProperty.value || typeof stateProperty.value !== "object") continue;
+        const dataProperty = readOwnDataProperty(stateProperty.value, "data");
+        if (!dataProperty) return undefined;
+        if (!dataProperty.exists || dataProperty.value === undefined) continue;
+        if (!dataProperty.value || typeof dataProperty.value !== "object") return undefined;
+        const recordsProperty = readOwnDataProperty(dataProperty.value, "data");
+        if (!recordsProperty?.exists) return undefined;
+        const records = recordsProperty.value;
+        if (!Array.isArray(records) || records.length === 0 || records.length > 1000) return undefined;
+        const matches: unknown[] = [];
+        for (const record of records) {
+          if (!record || typeof record !== "object" || Array.isArray(record)) return undefined;
+          const modelProperty = readOwnDataProperty(record, "model");
+          if (!modelProperty?.exists || !isSafeReasoningIdentifier(modelProperty.value, 128)) return undefined;
+          if (modelProperty.value === modelId) matches.push(record);
+        }
+        if (matches.length === 0) continue;
+        if (matches.length !== 1) return undefined;
+        const effortsProperty = readOwnDataProperty(matches[0], "supportedReasoningEfforts");
+        if (!effortsProperty?.exists) return undefined;
+        const effortRecords = effortsProperty.value;
+        if (!Array.isArray(effortRecords)) return undefined;
+        const liveEfforts: unknown[] = [];
+        for (const effortRecord of effortRecords) {
+          if (!effortRecord || typeof effortRecord !== "object" || Array.isArray(effortRecord)) return undefined;
+          const effortProperty = readOwnDataProperty(effortRecord, "reasoningEffort");
+          if (!effortProperty?.exists) return undefined;
+          liveEfforts.push(effortProperty.value);
+        }
+        const efforts = normalizeReasoningEffortOrder(liveEfforts);
+        if (!efforts) return undefined;
+        candidates.push(efforts);
       }
     }
   } catch { return undefined; }
-  if (modelQueries.length !== 1) return undefined;
-  const records = modelQueries[0]?.state?.data?.data;
-  if (!Array.isArray(records) || records.length === 0 || records.length > 1000) return undefined;
-  const matches = records.filter((record) =>
-    record && typeof record === "object" && !Array.isArray(record) && record.model === modelId
-  );
-  if (matches.length !== 1) return undefined;
-  const effortRecords = matches[0].supportedReasoningEfforts;
-  if (!Array.isArray(effortRecords) || !effortRecords.every((record) =>
-    record && typeof record === "object" && !Array.isArray(record) &&
-    Object.prototype.hasOwnProperty.call(record, "reasoningEffort")
-  )) return undefined;
-  return normalizeReasoningEffortOrder(effortRecords);
+  if (candidates.length === 0) return undefined;
+  const expected = candidates[0]!;
+  return candidates.every((efforts) => efforts.length === expected.length &&
+    efforts.every((effort, index) => effort === expected[index])) ? expected : undefined;
 }
 
 export function readActiveReasoningMetadata(
@@ -814,6 +900,7 @@ export class CodexMicroRendererBridge {
       const allowedCommands = new Set(${JSON.stringify(REASONING_COMMANDS)});
       if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
       const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
+      const readOwnDataProperty = (${readOwnDataProperty.toString()});
       const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
       const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
       const readSelectedReasoningModelId = (${readSelectedReasoningModelId.toString()});
@@ -821,15 +908,19 @@ export class CodexMicroRendererBridge {
       const readReasoningModelEfforts = (${readReasoningModelEfforts.toString()});
       const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
       const decideReasoningAdjustment = (${decideReasoningAdjustment.toString()});
-      const root = document.getElementById('root');
-      const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactContainer$'));
-      const metadata = root && reactKey ? readActiveReasoningMetadata(document.querySelectorAll(
-        '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
-      ), root[reactKey]) : undefined;
-      const decision = decideReasoningAdjustment(
-        'increase', { includeUltra: false }, metadata?.currentEffort, metadata?.supportedEfforts
-      );
-      if (decision === 'unavailable') throw new Error('Codex reasoning metadata is unavailable.');
+      const readLiveDecision = () => {
+        const root = document.getElementById('root');
+        const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactContainer$'));
+        const reactRootProperty = root && reactKey ? readOwnDataProperty(root, reactKey) : undefined;
+        const metadata = reactRootProperty?.exists ? readActiveReasoningMetadata(document.querySelectorAll(
+          '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+        ), reactRootProperty.value) : undefined;
+        return decideReasoningAdjustment(
+          'increase', { includeUltra: false }, metadata?.currentEffort, metadata?.supportedEfforts
+        );
+      };
+      const decision = readLiveDecision();
+      if (decision === 'unavailable') return 'metadata-unavailable';
       if (decision === 'blocked-ultra') return 'blocked-ultra';
 
       const urls = [...new Set([
@@ -842,16 +933,22 @@ export class CodexMicroRendererBridge {
       const resolveCommandRunner = (${resolveCommandRunner.toString()});
       const commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
       if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
+      const finalDecision = readLiveDecision();
+      if (finalDecision === 'unavailable') return 'metadata-unavailable';
+      if (finalDecision === 'blocked-ultra') return 'blocked-ultra';
       const handled = commandRunner(command, 'codex_micro_hid');
       if (!handled) throw new Error('This Codex command is not active in the current view.');
       return 'applied';
     })()`;
+    let result: ReasoningAdjustmentResult | "metadata-unavailable";
     try {
-      return await this.evaluate<ReasoningAdjustmentResult>(expression);
+      result = await this.evaluate<ReasoningAdjustmentResult | "metadata-unavailable">(expression);
     } catch (error) {
       this.disconnect();
       throw error;
     }
+    if (result === "metadata-unavailable") throw new Error("Codex reasoning metadata is unavailable.");
+    return result;
   }
 
   private async runReasoningCommand(command: ReasoningCommand): Promise<void> {
