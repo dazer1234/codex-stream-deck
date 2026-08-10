@@ -41,7 +41,7 @@ import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
-  RoutedAgentSlot, UsageLimitMode, UsageWindowKind
+  ReasoningAdjustmentPolicy, RoutedAgentSlot, UsageLimitMode, UsageWindowKind
 } from "./types.js";
 import { selectAccountUsageSource, selectUsageWindow, type AccountUsageSource } from "./usage.js";
 
@@ -184,10 +184,11 @@ export class DeckController {
       ]);
       if (mobileRelayConfig || localMobileRelayConfig) {
         let mobileSnapshotDirty = false;
-        const runAndInvalidate = async (operation: () => Promise<void>): Promise<void> => {
-          await operation();
+        const runAndInvalidate = async <Result>(operation: () => Promise<Result>): Promise<Result> => {
+          const result = await operation();
           // The relay server publishes a fresh snapshot after the command.
           mobileSnapshotDirty = true;
+          return result;
         };
         const mobileControl = {
           refresh: async () => {
@@ -208,8 +209,8 @@ export class DeckController {
           sendJoystick: (direction: MicroDirection, distance: 0 | 1) => runAndInvalidate(
             () => this.microBridge.sendJoystick(direction, distance)),
           sendEncoder: (act: 0 | 1) => runAndInvalidate(() => this.microBridge.sendEncoder(act)),
-          adjustReasoning: (direction: ReasoningAdjustment) => runAndInvalidate(
-            () => this.microBridge.adjustReasoning(direction)),
+          adjustReasoning: (direction: ReasoningAdjustment, policy?: ReasoningAdjustmentPolicy) => runAndInvalidate(
+            () => this.microBridge.adjustReasoning(direction, policy)),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
           refreshUsage: async () => {
@@ -630,7 +631,9 @@ export class DeckController {
   }
 
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
-    await this.sendToTarget({ kind: "reasoning", direction }, () => this.microBridge.adjustReasoning(direction));
+    await this.sendToTarget({ kind: "reasoning", direction }, async () => {
+      await this.microBridge.adjustReasoning(direction);
+    });
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
@@ -1186,14 +1189,14 @@ export class DeckController {
       return this.sendDialToHost(
         route,
         { kind: "reasoning", direction: "decrease" },
-        () => this.microBridge.adjustReasoning("decrease")
+        async () => { await this.microBridge.adjustReasoning("decrease"); }
       );
     }
     if (binding === "reasoning.increase") {
       return this.sendDialToHost(
         route,
         { kind: "reasoning", direction: "increase" },
-        () => this.microBridge.adjustReasoning("increase")
+        async () => { await this.microBridge.adjustReasoning("increase"); }
       );
     }
     if (binding === "new-task") {

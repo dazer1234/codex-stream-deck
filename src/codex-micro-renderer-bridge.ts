@@ -8,7 +8,8 @@ import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import type {
-  MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, UsageSnapshot, UsageWindow
+  MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
+  ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
 } from "./types.js";
 
 type DebugTarget = {
@@ -244,6 +245,197 @@ export function readActiveReasoningEffort(
     if (value && value.length <= 64) candidates.add(value);
   }
   return candidates.size === 1 ? candidates.values().next().value : undefined;
+}
+
+export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+export function normalizeReasoningEffortOrder(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return undefined;
+  const efforts: string[] = [];
+  const seen = new Set<string>();
+  let ultraCount = 0;
+  for (const item of value) {
+    const effort = typeof item === "string"
+      ? item
+      : item && typeof item === "object" && !Array.isArray(item)
+        ? (item as Record<string, unknown>).reasoningEffort
+        : undefined;
+    if (!isSafeReasoningIdentifier(effort) || seen.has(effort)) return undefined;
+    if (effort === "ultra" && ++ultraCount > 1) return undefined;
+    seen.add(effort);
+    efforts.push(effort);
+  }
+  return efforts;
+}
+
+export function readSelectedReasoningModelId(element: ReasoningTriggerElement): string | undefined {
+  const pending: Array<{ value: unknown; selectedValue: boolean; propsObject: boolean; depth: number }> = [];
+  try {
+    for (const key of Object.getOwnPropertyNames(element)) {
+      if (key.startsWith("__reactProps$")) {
+        pending.push({
+          value: (element as unknown as Record<string, unknown>)[key],
+          selectedValue: false,
+          propsObject: false,
+          depth: 0
+        });
+      }
+    }
+  } catch { return undefined; }
+  const seenOutside = new Set<object>();
+  const seenSelected = new Set<object>();
+  const modelIds = new Set<string>();
+  let malformed = false;
+  let visited = 0;
+  while (pending.length && visited < 3000) {
+    const current = pending.pop()!;
+    if (!current.value || typeof current.value !== "object" || current.depth > 32) continue;
+    const object = current.value as Record<string, unknown>;
+    const seen = current.selectedValue ? seenSelected : seenOutside;
+    if (seen.has(object)) continue;
+    seen.add(object);
+    visited++;
+    const props = object.props && typeof object.props === "object" && !Array.isArray(object.props)
+      ? object.props as Record<string, unknown>
+      : undefined;
+    const hidden = [object, props].filter((value): value is Record<string, unknown> => value != null).some((value) => {
+      const style = value.style && typeof value.style === "object" && !Array.isArray(value.style)
+        ? value.style as Record<string, unknown>
+        : undefined;
+      const className = typeof value.className === "string" ? value.className : "";
+      return value.hidden === true || value["aria-hidden"] === true || value["aria-hidden"] === "true" ||
+        style?.display === "none" || style?.visibility === "hidden" ||
+        /(^|[\s_-])measurement([\s_-]|$)/i.test(className);
+    });
+    if (hidden) continue;
+    if (current.selectedValue && current.propsObject && Object.prototype.hasOwnProperty.call(object, "model")) {
+      const rawModel = object.model;
+      const model = typeof rawModel === "string" ? rawModel.trim() : "";
+      if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model)) malformed = true;
+      else modelIds.add(model);
+    }
+    try {
+      for (const [key, child] of Object.entries(object)) {
+        if (key === "model" && current.selectedValue && current.propsObject) continue;
+        pending.push({
+          value: child,
+          selectedValue: current.selectedValue || key === "selectedValue",
+          propsObject: key === "props",
+          depth: current.depth + 1
+        });
+      }
+    } catch { malformed = true; }
+  }
+  if (pending.length > 0) malformed = true;
+  return !malformed && modelIds.size === 1 ? modelIds.values().next().value : undefined;
+}
+
+export function findRendererQueryClients(rootFiber: unknown): unknown[] {
+  const queue = [rootFiber];
+  const seen = new Set<object>();
+  const seenContexts = new Set<object>();
+  const queryClients = new Set<object>();
+  let contextTraversalTruncated = false;
+  while (queue.length && seen.size < 30000) {
+    const value = queue.pop();
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    const fiber = value as Record<string, any>;
+    const contextValues: unknown[] = [fiber.memoizedProps?.value];
+    let dependency = fiber.dependencies?.firstContext;
+    while (dependency && typeof dependency === "object" && seenContexts.size < 30000 && !seenContexts.has(dependency)) {
+      seenContexts.add(dependency);
+      contextValues.push(dependency.memoizedValue);
+      dependency = dependency.next;
+    }
+    if (dependency && typeof dependency === "object" && !seenContexts.has(dependency)) {
+      contextTraversalTruncated = true;
+    }
+    for (const contextValue of contextValues) {
+      if (contextValue && typeof contextValue === "object" &&
+          typeof (contextValue as Record<string, unknown>).getQueryCache === "function" &&
+          typeof (contextValue as Record<string, unknown>).getQueryData === "function") {
+        queryClients.add(contextValue);
+      }
+    }
+    queue.push(fiber.child, fiber.sibling);
+  }
+  const fiberTraversalTruncated = queue.some((value) =>
+    value && typeof value === "object" && !seen.has(value)
+  );
+  if (contextTraversalTruncated || fiberTraversalTruncated) return [];
+  return [...queryClients];
+}
+
+export function readReasoningModelEfforts(queryClients: Iterable<unknown>, modelId: string): string[] | undefined {
+  if (!modelId || modelId.length > 128 || /[\s\u0000-\u001f\u007f]/.test(modelId)) return undefined;
+  const modelQueries: Array<Record<string, any>> = [];
+  let visitedQueries = 0;
+  try {
+    for (const candidate of queryClients) {
+      if (!candidate || typeof candidate !== "object") return undefined;
+      const client = candidate as Record<string, any>;
+      const queries = client.getQueryCache().getAll();
+      if (!Array.isArray(queries)) return undefined;
+      for (const query of queries) {
+        if (++visitedQueries > 30000) return undefined;
+        const queryKey = query?.queryKey;
+        if (Array.isArray(queryKey) && queryKey[0] === "models" && queryKey[1] === "list") modelQueries.push(query);
+      }
+    }
+  } catch { return undefined; }
+  if (modelQueries.length !== 1) return undefined;
+  const records = modelQueries[0]?.state?.data?.data;
+  if (!Array.isArray(records) || records.length === 0 || records.length > 1000) return undefined;
+  const matches = records.filter((record) =>
+    record && typeof record === "object" && !Array.isArray(record) && record.model === modelId
+  );
+  if (matches.length !== 1) return undefined;
+  const effortRecords = matches[0].supportedReasoningEfforts;
+  if (!Array.isArray(effortRecords) || !effortRecords.every((record) =>
+    record && typeof record === "object" && !Array.isArray(record) &&
+    Object.prototype.hasOwnProperty.call(record, "reasoningEffort")
+  )) return undefined;
+  return normalizeReasoningEffortOrder(effortRecords);
+}
+
+export function readActiveReasoningMetadata(
+  elements: Iterable<ReasoningTriggerElement>,
+  reactRootFiber: unknown,
+  isVisible = isVisibleReasoningTrigger
+): { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined {
+  const visibleTriggers: ReasoningTriggerElement[] = [];
+  for (const element of elements) {
+    if (element.getAttribute("data-codex-intelligence-trigger") !== "true" ||
+        element.getAttribute("data-composer-navigation-target") !== "reasoning" || !isVisible(element)) continue;
+    visibleTriggers.push(element);
+  }
+  if (visibleTriggers.length !== 1) return undefined;
+  const trigger = visibleTriggers[0]!;
+  const currentEffort = trigger.getAttribute("data-selected-reasoning-effort")?.trim();
+  if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
+  const modelId = readSelectedReasoningModelId(trigger);
+  if (!modelId) return undefined;
+  const supportedEfforts = readReasoningModelEfforts(findRendererQueryClients(reactRootFiber), modelId);
+  return supportedEfforts ? { currentEffort, modelId, supportedEfforts } : undefined;
+}
+
+export function decideReasoningAdjustment(
+  direction: ReasoningAdjustment,
+  policy: ReasoningAdjustmentPolicy,
+  currentEffort?: string,
+  supportedEfforts?: unknown
+): ReasoningAdjustmentResult | "unavailable" {
+  if (direction === "decrease" || policy.includeUltra) return "applied";
+  if (!isSafeReasoningIdentifier(currentEffort)) return "unavailable";
+  const effortOrder = normalizeReasoningEffortOrder(supportedEfforts);
+  if (!effortOrder) return "unavailable";
+  const currentIndex = effortOrder.indexOf(currentEffort);
+  if (currentIndex < 0) return "unavailable";
+  return effortOrder[currentIndex + 1] === "ultra" ? "blocked-ultra" : "applied";
 }
 
 export function hasFastModeIndicator(element: ReasoningTriggerElement): boolean {
@@ -600,10 +792,62 @@ export class CodexMicroRendererBridge {
     await this.dispatch("codex-micro-hid-event", { event: { key: "ENC", act, slot: null, threadKey: null } }, "codex-micro-hid-event");
   }
 
-  async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
+  async adjustReasoning(
+    direction: ReasoningAdjustment,
+    policy: ReasoningAdjustmentPolicy = { includeUltra: true }
+  ): Promise<ReasoningAdjustmentResult> {
+    if (direction === "increase" && !policy.includeUltra) return this.runGuardedReasoningIncrease();
     await this.runReasoningCommand(direction === "increase"
       ? "composer.increaseReasoningEffort"
       : "composer.decreaseReasoningEffort");
+    return "applied";
+  }
+
+  private async runGuardedReasoningIncrease(): Promise<ReasoningAdjustmentResult> {
+    await this.ensureConnected();
+    const expression = `(async () => {
+      const command = 'composer.increaseReasoningEffort';
+      const allowedCommands = new Set(${JSON.stringify(REASONING_COMMANDS)});
+      if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
+      const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
+      const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
+      const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
+      const readSelectedReasoningModelId = (${readSelectedReasoningModelId.toString()});
+      const findRendererQueryClients = (${findRendererQueryClients.toString()});
+      const readReasoningModelEfforts = (${readReasoningModelEfforts.toString()});
+      const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
+      const decideReasoningAdjustment = (${decideReasoningAdjustment.toString()});
+      const root = document.getElementById('root');
+      const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactContainer$'));
+      const metadata = root && reactKey ? readActiveReasoningMetadata(document.querySelectorAll(
+        '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+      ), root[reactKey]) : undefined;
+      const decision = decideReasoningAdjustment(
+        'increase', { includeUltra: false }, metadata?.currentEffort, metadata?.supportedEfforts
+      );
+      if (decision === 'unavailable') throw new Error('Codex reasoning metadata is unavailable.');
+      if (decision === 'blocked-ultra') return 'blocked-ultra';
+
+      const urls = [...new Set([
+        ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
+        ...performance.getEntriesByType('resource').map((entry) => entry.name)
+      ])];
+      const bridgeUrl = urls.find((value) => value.includes('/assets/codex-micro-bridge-'));
+      if (!bridgeUrl) throw new Error('Codex Micro bridge module is unavailable.');
+      const bridgeSource = await (await fetch(bridgeUrl)).text();
+      const resolveCommandRunner = (${resolveCommandRunner.toString()});
+      const commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
+      if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
+      const handled = commandRunner(command, 'codex_micro_hid');
+      if (!handled) throw new Error('This Codex command is not active in the current view.');
+      return 'applied';
+    })()`;
+    try {
+      return await this.evaluate<ReasoningAdjustmentResult>(expression);
+    } catch (error) {
+      this.disconnect();
+      throw error;
+    }
   }
 
   private async runReasoningCommand(command: ReasoningCommand): Promise<void> {

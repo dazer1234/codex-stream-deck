@@ -147,6 +147,160 @@ test("serialized Fast state helpers resolve their production dependencies in the
   assert.equal(run([trigger(true, true, false)]), undefined, "no verified trigger is omitted");
 });
 
+test("reasoning adjustment decisions block only a restricted next Ultra step", () => {
+  const candidate = Reflect.get(microBridgeModule, "decideReasoningAdjustment") as unknown;
+  assert.equal(typeof candidate, "function");
+  const decide = candidate as (
+    direction: "increase" | "decrease",
+    policy: { includeUltra: boolean },
+    currentEffort?: string,
+    supportedEfforts?: unknown
+  ) => "applied" | "blocked-ultra" | "unavailable";
+  const fullOrder = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+  assert.equal(decide("increase", { includeUltra: false }, "max", fullOrder), "blocked-ultra");
+  assert.equal(decide("increase", { includeUltra: false }, "xhigh", fullOrder), "applied");
+  assert.equal(decide("increase", { includeUltra: true }, "max", undefined), "applied");
+  assert.equal(decide("decrease", { includeUltra: false }, "ultra", undefined), "applied");
+  assert.equal(decide("increase", { includeUltra: false }, undefined, fullOrder), "unavailable");
+  assert.equal(decide("increase", { includeUltra: false }, "max", undefined), "unavailable");
+  assert.equal(decide("increase", { includeUltra: false }, "high", ["low", "high", "ultra"]), "blocked-ultra");
+  assert.equal(decide("increase", { includeUltra: false }, "high", ["low", "medium", "high", "xhigh"]), "applied");
+});
+
+test("active reasoning metadata uses the one visible composer and its current selectedValue model", () => {
+  const candidate = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as unknown;
+  assert.equal(typeof candidate, "function");
+  const read = candidate as (
+    elements: Iterable<Record<string, unknown>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, unknown>) => boolean
+  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const modelsQuery = {
+    queryKey: ["models", "list", "local", "chatgpt", 100],
+    state: { data: { data: [{
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
+    }] } }
+  };
+  const queryClient = {
+    getQueryCache: () => ({ getAll: () => [modelsQuery] }),
+    getQueryData: () => undefined
+  };
+  const reactRootFiber = {
+    dependencies: { firstContext: { memoizedValue: queryClient, next: null } },
+    child: null,
+    sibling: null
+  };
+  const trigger = {
+    visible: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": " max "
+    })[name] ?? null,
+    "__reactProps$live": {
+      children: [
+        {
+          props: {
+            className: "measurement",
+            selectedValue: { props: { model: "gpt-5.3-codex-spark" } }
+          }
+        },
+        { props: { "aria-hidden": "true", selectedValue: { props: { model: "stale-hidden-model" } } } },
+        { props: { selectedValue: { nested: { props: { model: "gpt-5.6-sol" } } } } }
+      ]
+    }
+  };
+
+  assert.deepEqual(read([trigger], reactRootFiber, (element) => element.visible === true), {
+    currentEffort: "max",
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: efforts
+  });
+  assert.equal(read([
+    trigger,
+    { ...trigger, "__reactProps$live": { selectedValue: { props: { model: "gpt-5.6-sol" } } } }
+  ], reactRootFiber, (element) => element.visible === true), undefined, "multiple visible semantic triggers are ambiguous");
+  assert.deepEqual(read([
+    { ...trigger, visible: false }, trigger
+  ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
+});
+
+test("active reasoning metadata fails closed on missing, malformed, duplicate, or ambiguous model data", () => {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, unknown>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, unknown>) => boolean
+  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  assert.equal(typeof read, "function");
+  const makeTrigger = (props: unknown = { selectedValue: { props: { model: "gpt-5.6-sol" } } }) => ({
+    visible: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "high"
+    })[name] ?? null,
+    "__reactProps$test": props
+  });
+  const makeRoot = (models: unknown[], extraQueries: unknown[] = []) => {
+    const query = {
+      queryKey: ["models", "list", "local", "chatgpt", 100],
+      state: { data: { data: models } }
+    };
+    const queryClient = {
+      getQueryCache: () => ({ getAll: () => [query, ...extraQueries] }),
+      getQueryData: () => undefined
+    };
+    return { memoizedProps: { value: queryClient }, child: null, sibling: null };
+  };
+  const model = (efforts: unknown[], id = "gpt-5.6-sol") => ({
+    model: id,
+    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
+  });
+  const visible = (element: Record<string, unknown>) => element.visible === true;
+
+  assert.equal(read([makeTrigger({ selectedValue: { model: "gpt-5.6-sol" } })],
+    makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "the model ID must come from props.model");
+  assert.equal(read([makeTrigger({ selectedValue: { label: "missing model" } })],
+    makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "selectedValue must contain a model ID");
+  assert.equal(read([makeTrigger({
+    selectedValue: {
+      first: { props: { model: "gpt-5.6-sol" } },
+      second: { props: { model: "other-model" } }
+    }
+  })], makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "disagreeing selectedValue models are ambiguous");
+  assert.equal(read([makeTrigger()], makeRoot([model(["low", "bad effort", "ultra"])]), visible), undefined,
+    "malformed effort identifiers are unavailable");
+  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "high", "ultra"])]), visible), undefined,
+    "duplicate effort identifiers are unavailable");
+  assert.equal(read([makeTrigger()], makeRoot([{
+    model: "gpt-5.6-sol",
+    supportedReasoningEfforts: ["low", "high", "ultra"]
+  }]), visible), undefined, "live effort metadata requires reasoningEffort records");
+  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "ultra"], "other-model")]), visible), undefined,
+    "the model list must exactly match the active model");
+  assert.equal(read([makeTrigger()], makeRoot([
+    model(["low", "high", "ultra"]), model(["low", "medium", "high"], "gpt-5.6-sol")
+  ]), visible), undefined, "duplicate active model records are ambiguous");
+  const duplicateQuery = {
+    queryKey: ["models", "list", "remote", "chatgpt", 100],
+    state: { data: { data: [model(["low", "high", "ultra"])] } }
+  };
+  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "ultra"])], [duplicateQuery]), visible), undefined,
+    "multiple current models/list queries are ambiguous");
+
+  const truncatedRoot = makeRoot([model(["low", "high", "ultra"])]) as Record<string, any>;
+  let fiber = truncatedRoot;
+  for (let index = 0; index < 30000; index++) {
+    fiber.child = {};
+    fiber = fiber.child;
+  }
+  assert.equal(read([makeTrigger()], truncatedRoot, visible), undefined,
+    "exhausting the bounded fiber traversal cannot return partial query metadata");
+});
+
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
   const predicate = Reflect.get(microBridgeModule, "hasApplicableResetCredit") as unknown;
   assert.equal(typeof predicate, "function");
@@ -384,7 +538,7 @@ test("agent routing follows the stable thread identity when a cross-host slot is
   });
 });
 
-test("reasoning controls invoke only the dedicated command path", async () => {
+test("unrestricted increases and every decrease invoke one dedicated command", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const reasoningCommands: string[] = [];
   const genericKeycaps: string[] = [];
@@ -398,18 +552,116 @@ test("reasoning controls invoke only the dedicated command path", async () => {
   testBridge.runKeycap = async (keycapId) => { genericKeycaps.push(keycapId); };
   testBridge.dispatch = async (...args) => { dispatches.push(args); };
 
-  await bridge.adjustReasoning("increase");
-  await bridge.adjustReasoning("decrease");
+  assert.equal(await bridge.adjustReasoning("increase"), "applied");
+  assert.equal(await bridge.adjustReasoning("decrease", { includeUltra: false }), "applied");
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: true }), "applied");
 
   assert.deepEqual(reasoningCommands, [
     "composer.increaseReasoningEffort",
-    "composer.decreaseReasoningEffort"
+    "composer.decreaseReasoningEffort",
+    "composer.increaseReasoningEffort"
   ]);
   assert.deepEqual(genericKeycaps, []);
   assert.deepEqual(dispatches, []);
   const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
   const adjustment = source.match(/async adjustReasoning\([\s\S]*?\n  }/)?.[0] ?? "";
   assert.doesNotMatch(adjustment, /ENC_CW|ENC_CC|this\.dispatch/);
+});
+
+test("restricted increases use one atomic renderer evaluation and lazily skip the command when blocked", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const expressions: string[] = [];
+  const directCommands: string[] = [];
+  const results = ["blocked-ultra", "applied"] as const;
+  let resultIndex = 0;
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+    runReasoningCommand: (command: string) => Promise<void>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expressions.push(source);
+    return results[resultIndex++] as T;
+  };
+  testBridge.runReasoningCommand = async (command) => { directCommands.push(command); };
+
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "blocked-ultra");
+  assert.deepEqual(directCommands, [], "blocked guarded increases do not enter the separate command path");
+  assert.equal(expressions.length, 1, "guard state and command path share one Runtime.evaluate");
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  assert.deepEqual(directCommands, [], "lower guarded increases run inside the atomic renderer evaluation");
+  assert.equal(expressions.length, 2);
+
+  for (const expression of expressions) {
+    assert.match(expression,
+      /\[data-codex-intelligence-trigger="true"\]\[data-composer-navigation-target="reasoning"\]/);
+    assert.match(expression, /data-selected-reasoning-effort/);
+    assert.match(expression, /__reactProps\$/);
+    assert.match(expression, /seen\.size\s*<\s*(?:30000|3e4)/);
+    assert.match(expression, /queryKey\[0\]\s*===\s*["']models["']/);
+    assert.match(expression, /queryKey\[1\]\s*===\s*["']list["']/);
+    assert.equal((expression.match(/commandRunner\(command, 'codex_micro_hid'\)/g) ?? []).length, 1,
+      "the applicable renderer branch issues exactly one reasoning command");
+    const blockedReturn = expression.indexOf("if (decision === 'blocked-ultra') return 'blocked-ultra'");
+    const runnerResolution = expression.indexOf("const commandRunner = await resolveCommandRunner");
+    assert.ok(blockedReturn >= 0 && runnerResolution > blockedReturn,
+      "the blocked result returns before resolving or importing a command runner");
+    assert.doesNotMatch(expression,
+      /enabled-reasoning-efforts|show-ultra-in-model-picker-slider|model_picker_persists_ultra_effort|dialog|confirm\(|dismiss/i);
+  }
+});
+
+test("restricted increases fail closed without renderer metadata and issue no separate command", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const expressions: string[] = [];
+  const directCommands: string[] = [];
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+    runReasoningCommand: (command: string) => Promise<void>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expressions.push(source);
+    throw new Error("Codex reasoning metadata is unavailable.");
+  };
+  testBridge.runReasoningCommand = async (command) => { directCommands.push(command); };
+
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /Codex reasoning metadata is unavailable\./
+  );
+  assert.equal(expressions.length, 1);
+  assert.deepEqual(directCommands, []);
+});
+
+test("guarded reasoning expression serializes every helper dependency into renderer scope", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  let expression = "";
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expression = source;
+    return "blocked-ultra" as T;
+  };
+
+  await bridge.adjustReasoning("increase", { includeUltra: false });
+
+  for (const helper of [
+    "isSafeReasoningIdentifier",
+    "normalizeReasoningEffortOrder",
+    "isVisibleReasoningTrigger",
+    "readSelectedReasoningModelId",
+    "findRendererQueryClients",
+    "readReasoningModelEfforts",
+    "readActiveReasoningMetadata",
+    "decideReasoningAdjustment",
+    "resolveCommandRunner"
+  ]) assert.match(expression, new RegExp(`const ${helper} = \\(`), `${helper} is defined in renderer scope`);
 });
 
 test("protected generic keycaps cannot reach the low-level reasoning runner", async () => {

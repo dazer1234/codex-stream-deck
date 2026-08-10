@@ -26,6 +26,8 @@ export type MicroAgentSlot = {
 export type MicroActionSlot = "ACT06" | "ACT07" | "ACT08" | "ACT09" | "ACT10_ACT11" | "ACT12";
 export type MicroDirection = "up" | "right" | "down" | "left";
 export type ReasoningAdjustment = "decrease" | "increase";
+export type ReasoningAdjustmentPolicy = { includeUltra: boolean };
+export type ReasoningAdjustmentResult = "applied" | "blocked-ultra";
 
 export type MicroLayout = {
   version: 1;

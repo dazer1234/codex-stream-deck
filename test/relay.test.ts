@@ -917,7 +917,7 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
     refresh: async () => snapshot,
     sendAgent: async (slot: number, act: 0 | 1) => { calls.push(["agent", slot, act]); },
     sendAction: async () => {}, sendJoystick: async () => {}, sendEncoder: async () => {},
-    adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    adjustReasoning: async () => "applied" as const, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
     refreshUsage: async () => { calls.push(["usage-refresh"]); }
   };
   const server = new CodexRelayServer(
@@ -972,7 +972,7 @@ test("usage refresh publishes a new post-command snapshot before acknowledging s
       return { ...structuredClone(snapshot), reasoningEffort: `snapshot-${refreshCall}` };
     },
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "applied" as const, runKeycap: async () => {},
     consumeRateLimitReset: async () => {}, refreshUsage: async () => { usageRefreshes += 1; }
   };
   const server = new CodexRelayServer(
@@ -1020,7 +1020,7 @@ test("running relay publishes refreshed Codex metadata without changing host ide
   const control = {
     refresh: async () => snapshot,
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "applied" as const, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
     refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
@@ -1053,7 +1053,7 @@ test("relay rejects a client with the wrong token before publishing state", asyn
   const control = {
     refresh: async () => { refreshes += 1; return snapshot; },
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "applied" as const, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
     refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
@@ -1075,7 +1075,7 @@ test("authenticated relay survives an unavailable Codex snapshot", async () => {
   const control = {
     refresh: async (): Promise<MicroSnapshot> => { throw new Error("bridge offline"); },
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "applied" as const, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
     refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
@@ -1103,7 +1103,7 @@ test("relay client preserves last-known tasks but marks their host offline after
   const control = {
     refresh: async () => snapshot,
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => {}, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => "applied" as const, runKeycap: async () => {}, consumeRateLimitReset: async () => {},
     refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(

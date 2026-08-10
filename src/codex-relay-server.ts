@@ -361,7 +361,10 @@ async function executeRelayCommand(control: RelayControl, command: RelayCommand)
   if (command.kind === "action") return control.sendAction(command.slot, command.act);
   if (command.kind === "joystick") return control.sendJoystick(command.direction, command.distance);
   if (command.kind === "encoder") return control.sendEncoder(command.act);
-  if (command.kind === "reasoning") return control.adjustReasoning(command.direction);
+  if (command.kind === "reasoning") {
+    await control.adjustReasoning(command.direction);
+    return;
+  }
   if (command.kind === "usage-refresh") return control.refreshUsage();
   if (command.kind === "rate-limit-reset") return control.consumeRateLimitReset();
   return control.runKeycap(command.keycapId as OfficialKeycapId);
