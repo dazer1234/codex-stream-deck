@@ -327,10 +327,12 @@ test("property inspector exposes presets and independent gesture controls", asyn
   const source = await text("static/property-inspector/codex-dial.html");
   for (const id of [
     "preset", "rotation-kind", "counter-clockwise", "clockwise", "selector-source",
-    "selector-items", "wrap", "press", "touch-tap", "feedback", "static-label"
+    "selector-items", "wrap", "include-ultra", "press", "touch-tap", "feedback", "static-label"
   ]) {
     assert.match(source, new RegExp(`id=["']${id}["']`));
   }
+  assert.match(source, />Include Ultra</);
+  assert.match(source, /When off, clockwise reasoning stops below Ultra\. Manual Codex selection is unchanged\./);
   assert.match(source, /setSettings/);
   assert.match(source, /version:\s*1/);
   assert.match(source, /customized:\s*true/);
@@ -402,6 +404,7 @@ test("incoming settings normalize exactly like the runtime before the next compl
     {
       version: 1,
       preset: "actions",
+      includeUltraReasoning: true,
       customized: true,
       rotation: { kind: "selector", source: "actions", wrap: "yes", items: ["micro.ACT07"] },
       press: "shell.command",
@@ -410,6 +413,7 @@ test("incoming settings normalize exactly like the runtime before the next compl
     {
       version: 1,
       preset: "usage",
+      includeUltraReasoning: "true",
       rotation: { kind: "paired", counterClockwise: "shell.command" },
       press: "usage.rate-limit-reset",
       touchTap: "usage.rate-limit-reset",
@@ -419,6 +423,7 @@ test("incoming settings normalize exactly like the runtime before the next compl
     {
       version: 1,
       preset: "custom",
+      includeUltraReasoning: false,
       customized: true,
       rotation: {
         kind: "selector",
@@ -439,6 +444,11 @@ test("incoming settings normalize exactly like the runtime before the next compl
       JSON.stringify({ context: `dial-normalize-${index}`, payload: { settings: input } })
     );
     sockets[0]?.open();
+    assert.equal(
+      field(document, "include-ultra").checked,
+      normalizeDialSettings(input).includeUltraReasoning,
+      `case ${index} applies the normalized Ultra setting`
+    );
     field(document, "press").dispatch("change");
     const last = decodedMessages(sockets[0]!).at(-1);
     assert.deepEqual(last, {
@@ -447,6 +457,64 @@ test("incoming settings normalize exactly like the runtime before the next compl
       payload: { ...normalizeDialSettings(input), customized: true }
     }, `case ${index} matches runtime normalization`);
   }
+});
+
+test("incoming Ultra settings update the checkbox and complete form payload", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-ultra", payload: { settings: expandDialPreset("reasoning") } })
+  );
+  sockets[0]?.open();
+
+  const checkbox = field(document, "include-ultra");
+  assert.equal(checkbox.checked, false);
+  sockets[0]?.message({
+    event: "didReceiveSettings",
+    payload: { settings: { ...expandDialPreset("reasoning"), includeUltraReasoning: true } }
+  });
+  assert.equal(checkbox.checked, true);
+
+  checkbox.checked = false;
+  checkbox.dispatch("change");
+  assert.deepEqual(decodedMessages(sockets[0]!).at(-1), {
+    event: "setSettings",
+    context: "dial-ultra",
+    payload: { ...expandDialPreset("reasoning"), includeUltraReasoning: false, customized: true }
+  });
+});
+
+test("Ultra preference survives unrelated edits and remains persisted while hidden", async () => {
+  const settings = { ...expandDialPreset("reasoning"), includeUltraReasoning: true };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-ultra-retain", payload: { settings } })
+  );
+  sockets[0]?.open();
+
+  const row = field(document, "include-ultra-row");
+  assert.equal(row.hidden, false);
+  field(document, "press").dispatch("change");
+  assert.equal((decodedMessages(sockets[0]!).at(-1)?.payload as { includeUltraReasoning: boolean }).includeUltraReasoning, true);
+
+  const clockwise = field(document, "clockwise");
+  clockwise.value = "joystick.right";
+  clockwise.dispatch("change");
+  assert.equal(row.hidden, true);
+  assert.equal(field(document, "include-ultra").checked, true);
+  assert.equal((decodedMessages(sockets[0]!).at(-1)?.payload as { includeUltraReasoning: boolean }).includeUltraReasoning, true);
+
+  const counterClockwise = field(document, "counter-clockwise");
+  counterClockwise.value = "reasoning.increase";
+  counterClockwise.dispatch("change");
+  assert.equal(row.hidden, false, "either paired direction may contain reasoning increase");
+
+  const preset = field(document, "preset");
+  preset.value = "navigation";
+  preset.dispatch("change");
+  assert.equal(field(document, "include-ultra").checked, false);
+  assert.equal((decodedMessages(sockets[0]!).at(-1)?.payload as { includeUltraReasoning: boolean }).includeUltraReasoning, false);
 });
 
 test("null, array, and primitive socket payloads are ignored without losing current settings", async () => {

@@ -43,6 +43,7 @@ export interface CodexDialSettings extends JsonObject {
   version: 1;
   preset: DialPreset;
   customized: boolean;
+  includeUltraReasoning: boolean;
   rotation: DialRotation;
   press: DialBindingId;
   touchTap: DialBindingId;

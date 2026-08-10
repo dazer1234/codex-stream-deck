@@ -272,6 +272,8 @@ export function normalizeDialSettings(input: unknown): CodexDialSettings {
     version: 1,
     preset: input.preset,
     customized: hasOwn(input, "customized") && input.customized === true,
+    includeUltraReasoning: hasOwn(input, "includeUltraReasoning") &&
+      input.includeUltraReasoning === true,
     rotation,
     press: rotation.kind === "paired" && requestedPress === "selector.activate" ? "none" : requestedPress,
     touchTap: hasOwn(input, "touchTap") && isDialBindingId(input.touchTap, "touch")
@@ -316,6 +318,7 @@ function pairedPreset(
     version: 1,
     preset,
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "paired", counterClockwise, clockwise },
     press,
     touchTap,
@@ -334,6 +337,7 @@ function selectorPreset(
     version: 1,
     preset,
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "selector", source: preset, wrap: true, items },
     press,
     touchTap,

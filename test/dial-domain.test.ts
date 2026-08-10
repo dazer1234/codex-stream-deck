@@ -729,6 +729,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "reasoning",
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "paired", counterClockwise: "reasoning.decrease", clockwise: "reasoning.increase" },
     press: "none",
     touchTap: "keycap.FAST",
@@ -738,6 +739,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "agents",
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "selector", source: "agents", wrap: true, items: [] },
     press: "selector.activate",
     touchTap: "keycap.TIME",
@@ -747,6 +749,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "actions",
     customized: false,
+    includeUltraReasoning: false,
     rotation: {
       kind: "selector", source: "actions", wrap: true, items: actionItems
     },
@@ -758,6 +761,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "navigation",
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "paired", counterClockwise: "joystick.left", clockwise: "joystick.right" },
     press: "joystick.up",
     touchTap: "joystick.down",
@@ -767,6 +771,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "usage",
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "selector", source: "usage", wrap: true, items: [] },
     press: "usage.toggle-overview",
     touchTap: "usage.refresh",
@@ -776,11 +781,39 @@ test("status-focused presets expand to the approved independent bindings", () =>
     version: 1,
     preset: "custom",
     customized: false,
+    includeUltraReasoning: false,
     rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
     press: "none",
     touchTap: "none",
     feedback: "static"
   });
+});
+
+test("every dial preset explicitly disables Ultra reasoning", () => {
+  for (const preset of DIAL_PRESETS) {
+    const settings = expandDialPreset(preset);
+    assert.equal(Object.hasOwn(settings, "includeUltraReasoning"), true, preset);
+    assert.equal(settings.includeUltraReasoning, false, preset);
+  }
+});
+
+test("Ultra reasoning normalization accepts only own literal booleans", () => {
+  const base = expandDialPreset("reasoning");
+  assert.equal(normalizeDialSettings({ ...base, includeUltraReasoning: true }).includeUltraReasoning, true);
+  assert.equal(normalizeDialSettings({ ...base, includeUltraReasoning: false }).includeUltraReasoning, false);
+  assert.equal(normalizeDialSettings(base).includeUltraReasoning, false, "the preset default remains false");
+
+  const inheritedTrue = Object.create({ includeUltraReasoning: true }) as Record<string, unknown>;
+  Object.assign(inheritedTrue, base);
+  delete inheritedTrue.includeUltraReasoning;
+  assert.equal(normalizeDialSettings(inheritedTrue).includeUltraReasoning, false);
+
+  for (const value of [
+    undefined, null, 0, 1, "false", "true", {}, [], () => true
+  ]) {
+    const normalized = normalizeDialSettings({ ...base, includeUltraReasoning: value });
+    assert.equal(normalized.includeUltraReasoning, false, String(value));
+  }
 });
 
 test("binding validation accepts only exact allow-listed commands for each gesture", () => {
@@ -840,6 +873,7 @@ test("malformed settings normalize to a safe preset and reject executable string
     version: 1,
     preset: "custom",
     customized: true,
+    includeUltraReasoning: false,
     rotation: { kind: "paired", counterClockwise: "shell.rm", clockwise: "reasoning.increase" },
     press: "usage.rate-limit-reset",
     touchTap: "usage.rate-limit-reset",
@@ -869,6 +903,7 @@ test("normalization ignores inherited top-level settings properties", () => {
     version: 1,
     preset: "custom",
     customized: true,
+    includeUltraReasoning: false,
     rotation: {
       kind: "paired", counterClockwise: "reasoning.decrease", clockwise: "reasoning.increase"
     },
@@ -888,12 +923,15 @@ test("normalization ignores inherited top-level settings properties", () => {
 
   const expectedByKey = {
     customized: false,
+    includeUltraReasoning: false,
     rotation: expandDialPreset("custom").rotation,
     press: "none",
     touchTap: "none",
     feedback: "static"
   } as const;
-  for (const key of ["customized", "rotation", "press", "touchTap", "feedback"] as const) {
+  for (const key of [
+    "customized", "includeUltraReasoning", "rotation", "press", "touchTap", "feedback"
+  ] as const) {
     assert.deepEqual(
       normalizeDialSettings(withInheritedProperty(values, key))[key],
       expectedByKey[key],

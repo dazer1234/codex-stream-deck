@@ -151,6 +151,14 @@
         </label>
       </div>
 
+      <div id="include-ultra-row" class="stack" hidden>
+        <label class="toggle">
+          <span>Include Ultra</span>
+          <input id="include-ultra" type="checkbox">
+        </label>
+        <p class="hint">When off, clockwise reasoning stops below Ultra. Manual Codex selection is unchanged.</p>
+      </div>
+
       <div id="selector-controls" class="stack" hidden>
         <label class="field">
           <span>Selector source</span>
@@ -218,6 +226,7 @@
         version: 1,
         preset: "reasoning",
         customized: false,
+        includeUltraReasoning: false,
         rotation: { kind: "paired", counterClockwise: "reasoning.decrease", clockwise: "reasoning.increase" },
         press: "none",
         touchTap: "keycap.FAST",
@@ -227,6 +236,7 @@
         version: 1,
         preset: "agents",
         customized: false,
+        includeUltraReasoning: false,
         rotation: { kind: "selector", source: "agents", wrap: true, items: [] },
         press: "selector.activate",
         touchTap: "keycap.TIME",
@@ -236,6 +246,7 @@
         version: 1,
         preset: "actions",
         customized: false,
+        includeUltraReasoning: false,
         rotation: {
           kind: "selector",
           source: "actions",
@@ -250,6 +261,7 @@
         version: 1,
         preset: "navigation",
         customized: false,
+        includeUltraReasoning: false,
         rotation: { kind: "paired", counterClockwise: "joystick.left", clockwise: "joystick.right" },
         press: "joystick.up",
         touchTap: "joystick.down",
@@ -259,6 +271,7 @@
         version: 1,
         preset: "usage",
         customized: false,
+        includeUltraReasoning: false,
         rotation: { kind: "selector", source: "usage", wrap: true, items: [] },
         press: "usage.toggle-overview",
         touchTap: "usage.refresh",
@@ -268,6 +281,7 @@
         version: 1,
         preset: "custom",
         customized: false,
+        includeUltraReasoning: false,
         rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
         press: "none",
         touchTap: "none",
@@ -386,6 +400,8 @@
         version: 1,
         preset: input.preset,
         customized: hasOwn(input, "customized") && input.customized === true,
+        includeUltraReasoning: hasOwn(input, "includeUltraReasoning") &&
+          input.includeUltraReasoning === true,
         rotation: normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation),
         press: hasOwn(input, "press") && bindingAllowed(input.press, "press")
           ? input.press : fallback.press,
@@ -435,6 +451,7 @@
 
       element("preset").value = settings.preset;
       element("rotation-kind").value = settings.rotation.kind;
+      element("include-ultra").checked = settings.includeUltraReasoning;
       if (settings.rotation.kind === "paired") {
         element("counter-clockwise").value = settings.rotation.counterClockwise;
         element("clockwise").value = settings.rotation.clockwise;
@@ -456,6 +473,9 @@
       element("paired-controls").hidden = selector;
       element("selector-controls").hidden = !selector;
       element("selector-items-row").hidden = !selector || element("selector-source").value !== "actions";
+      element("include-ultra-row").hidden = selector ||
+        (element("counter-clockwise").value !== "reasoning.increase" &&
+          element("clockwise").value !== "reasoning.increase");
       element("static-label-row").hidden = element("feedback").value !== "static";
     }
 
@@ -541,6 +561,7 @@
         version: 1,
         preset: element("preset").value,
         customized: true,
+        includeUltraReasoning: element("include-ultra").checked,
         rotation,
         press: element("press").value,
         touchTap: element("touch-tap").value,
@@ -585,7 +606,13 @@
           persistAndQueue(true);
         });
       }
-      for (const id of ["counter-clockwise", "clockwise", "press", "touch-tap", "wrap"]) {
+      for (const id of ["counter-clockwise", "clockwise"]) {
+        element(id).addEventListener("change", () => {
+          updateConditionalViews();
+          persistAndQueue(true);
+        });
+      }
+      for (const id of ["include-ultra", "press", "touch-tap", "wrap"]) {
         element(id).addEventListener("change", () => persistAndQueue(true));
       }
       element("static-label").addEventListener("input", () => persistAndQueue(true));
