@@ -38,6 +38,7 @@ export class CodexRelayClient {
   private snapshotGeneration = 0;
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
   private readonly pending = new Map<string, {
+    commandKind: RelayCommand["kind"];
     resolve: (outcome: ReasoningAdjustmentResult | undefined) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
@@ -95,7 +96,7 @@ export class CodexRelayClient {
         this.pending.delete(requestId);
         reject(new Error("Remote Codex command timed out."));
       }, RELAY_COMMAND_TIMEOUT_MS);
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { commandKind: command.kind, resolve, reject, timer });
       socket.send(JSON.stringify({ type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command }));
     });
   }
@@ -158,8 +159,16 @@ export class CodexRelayClient {
     if (!pending) return;
     this.pending.delete(message.requestId);
     clearTimeout(pending.timer);
-    if (message.ok) pending.resolve(message.outcome);
-    else pending.reject(new Error(message.error || "Remote Codex command failed."));
+    if (!message.ok) {
+      pending.reject(new Error(message.error || "Remote Codex command failed."));
+      return;
+    }
+    if (pending.commandKind === "reasoning" &&
+        message.outcome !== "applied" && message.outcome !== "blocked-ultra") {
+      pending.reject(new Error("Remote Codex returned an invalid reasoning adjustment result."));
+      return;
+    }
+    pending.resolve(message.outcome);
   }
 
   private disconnected(expected: WebSocket): void {

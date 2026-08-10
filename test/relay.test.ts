@@ -1209,6 +1209,44 @@ test("relay client receives an error when a reasoning control omits its mandator
   }), /invalid reasoning adjustment result/i);
 });
 
+test("relay client rejects an outcome-less reasoning success from a malformed peer", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  relay.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["action", "reasoning"], bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot
+        }));
+      } else if (message.type === "command") {
+        socket.send(JSON.stringify({
+          type: "result", protocol: 1, requestId: message.requestId, ok: true
+        }));
+      }
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+
+  await assert.rejects(client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true
+  }), /invalid reasoning adjustment result/i);
+  assert.equal(await client.send({ kind: "action", slot: "ACT06", act: 1 }), undefined);
+});
+
 test("usage refresh publishes a new post-command snapshot before acknowledging success", async (t) => {
   const port = await freePort();
   let refreshCall = 0;
