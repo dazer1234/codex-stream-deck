@@ -245,51 +245,55 @@ function emptyRoutedPosition(input: HostSnapshot, id: number): RoutedAgentSlot {
 }
 
 export function parseRelayServerMessage(value: unknown): RelayServerMessage | null {
-  if (!isRecord(value) || value.protocol !== RELAY_PROTOCOL_VERSION || typeof value.type !== "string") return null;
-  if (value.type === "ready" && isHost(value.host) &&
-      (value.bridge === undefined || value.bridge === "native-codex-micro") &&
-      (value.capabilities === undefined || (Array.isArray(value.capabilities) && value.capabilities.length <= 32 &&
-        value.capabilities.every((item) => boundedNonblankString(item, 64))))) {
-    return value as RelayReadyMessage;
+  const message = snapshotOwnDataRecord(value);
+  if (!message || message.protocol !== RELAY_PROTOCOL_VERSION || typeof message.type !== "string") return null;
+  if (message.type === "ready" && isHost(message.host) &&
+      (message.bridge === undefined || message.bridge === "native-codex-micro") &&
+      (message.capabilities === undefined || (Array.isArray(message.capabilities) && message.capabilities.length <= 32 &&
+        message.capabilities.every((item) => boundedNonblankString(item, 64))))) {
+    return message as RelayReadyMessage;
   }
-  if (value.type === "snapshot" && isHost(value.host) && validProtocolTimestamp(value.observedAt) != null && isSnapshot(value.snapshot)) {
-    return value as RelaySnapshotMessage;
+  if (message.type === "snapshot" && isHost(message.host) && validProtocolTimestamp(message.observedAt) != null && isSnapshot(message.snapshot)) {
+    return message as RelaySnapshotMessage;
   }
-  if (value.type === "health" && isHost(value.host) && value.state === "degraded" &&
-      value.reason === "native-signals-unavailable" && validProtocolTimestamp(value.observedAt) != null) {
-    return value as RelayHealthMessage;
+  if (message.type === "health" && isHost(message.host) && message.state === "degraded" &&
+      message.reason === "native-signals-unavailable" && validProtocolTimestamp(message.observedAt) != null) {
+    return message as RelayHealthMessage;
   }
-  if (value.type === "result" && boundedNonblankString(value.requestId, 128)) {
-    if (value.ok === true &&
-        (value.outcome === undefined || value.outcome === "applied" || value.outcome === "blocked-ultra") &&
-        exactOwnKeys(value, value.outcome === undefined
+  if (message.type === "result" && boundedNonblankString(message.requestId, 128)) {
+    if (message.ok === true &&
+        (message.outcome === undefined || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
+        exactOwnDataKeys(message, message.outcome === undefined
           ? ["type", "protocol", "requestId", "ok"]
           : ["type", "protocol", "requestId", "ok", "outcome"])) {
-      return value as RelayResultMessage;
+      return message as RelayResultMessage;
     }
-    if (value.ok === false &&
-        (value.error === undefined || (typeof value.error === "string" && value.error.length <= 512)) &&
-        exactOwnKeys(value, Object.prototype.hasOwnProperty.call(value, "error")
+    if (message.ok === false &&
+        (message.error === undefined || (typeof message.error === "string" && message.error.length <= 512)) &&
+        exactOwnDataKeys(message, Object.prototype.hasOwnProperty.call(message, "error")
           ? ["type", "protocol", "requestId", "ok", "error"]
           : ["type", "protocol", "requestId", "ok"])) {
-      return value as RelayResultMessage;
+      return message as RelayResultMessage;
     }
   }
   return null;
 }
 
 export function parseRelayCommand(value: unknown): RelayCommand | null {
-  if (!isRecord(value) || typeof value.kind !== "string") return null;
-  if (value.kind === "agent" && integerIn(value.slot, 0, 5) && isThreadKey(value.threadKey) && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "action" && ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"].includes(String(value.slot)) && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "joystick" && ["up", "right", "down", "left"].includes(String(value.direction)) && binary(value.distance)) return value as RelayCommand;
-  if (value.kind === "encoder" && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "reasoning" && (value.direction === "decrease" || value.direction === "increase") &&
-      typeof value.includeUltra === "boolean" &&
-      exactOwnKeys(value, ["kind", "direction", "includeUltra"])) return value as RelayCommand;
-  if (value.kind === "usage-refresh" && Object.keys(value).length === 1) return value as RelayCommand;
-  if (value.kind === "rate-limit-reset" && Object.keys(value).length === 1) return value as RelayCommand;
-  if (value.kind === "keycap" && typeof value.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(value.keycapId as OfficialKeycapId)) return value as RelayCommand;
+  const command = snapshotOwnDataRecord(value);
+  if (!command || typeof command.kind !== "string") return null;
+  if (command.kind === "agent" && integerIn(command.slot, 0, 5) && isThreadKey(command.threadKey) && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "action" && typeof command.slot === "string" &&
+      ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"].includes(command.slot) && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "joystick" && typeof command.direction === "string" &&
+      ["up", "right", "down", "left"].includes(command.direction) && binary(command.distance)) return command as RelayCommand;
+  if (command.kind === "encoder" && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "reasoning" && (command.direction === "decrease" || command.direction === "increase") &&
+      typeof command.includeUltra === "boolean" &&
+      exactOwnDataKeys(command, ["kind", "direction", "includeUltra"])) return command as RelayCommand;
+  if (command.kind === "usage-refresh" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
+  if (command.kind === "rate-limit-reset" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
+  if (command.kind === "keycap" && typeof command.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(command.keycapId as OfficialKeycapId)) return command as RelayCommand;
   return null;
 }
 
@@ -354,10 +358,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
-function exactOwnKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) =>
-    Object.prototype.hasOwnProperty.call(value, key));
+function snapshotOwnDataRecord(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    const snapshot: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (typeof key !== "string") return null;
+      const descriptor = descriptors[key];
+      if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return null;
+      Object.defineProperty(snapshot, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+function exactOwnDataKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Reflect.ownKeys(value);
+  return keys.length === expected.length && keys.every((key) =>
+    typeof key === "string" && expected.includes(key));
 }
 
 function binary(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }

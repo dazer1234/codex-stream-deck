@@ -870,6 +870,119 @@ test("Ultra notices are canceled safely by settings changes, disposal, and regis
   controller.unregisterDial(newAction);
 });
 
+test("a stale in-flight Ultra notice cannot overwrite replacement registration feedback", async () => {
+  for (const failsAfterWrite of [false, true]) {
+    const controller = new DeckController();
+    const state = probe(controller);
+    const writes: string[] = [];
+    const noticeStarted = deferred<void>();
+    const releaseNotice = deferred<void>();
+    const makeAction = (owner: "old" | "new"): FakeDial => ({
+      id: `notice-race-${failsAfterWrite}`,
+      feedbackCalls: [],
+      triggerCalls: [],
+      alerts: 0,
+      async setFeedback(payload: unknown) {
+        const value = String((payload as { value?: unknown }).value);
+        if (owner === "old" && value === "ULTRA OFF") {
+          noticeStarted.resolve();
+          await releaseNotice.promise;
+          writes.push(`${owner}:${value}`);
+          if (failsAfterWrite) throw new Error("stale notice write failed");
+          return;
+        }
+        writes.push(`${owner}:${value}`);
+      },
+      async setTriggerDescription() {},
+      async showAlert(this: { alerts: number }) { this.alerts += 1; }
+    } as unknown as FakeDial);
+    const oldAction = makeAction("old");
+    const newAction = makeAction("new");
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localSnapshot = {
+      host: HOST, observedAt: 1_000,
+      snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+    };
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.microBridge = {
+      async sendAgent() {},
+      async adjustReasoning() { return "blocked-ultra"; }
+    };
+    const settings = { ...expandDialPreset("reasoning"), includeUltraReasoning: false };
+
+    controller.registerDial(oldAction, settings);
+    await settle();
+    const oldRegistration = probe(controller).dials.get(oldAction.id)!;
+    controller.rotateDial(oldAction, 1);
+    await noticeStarted.promise;
+    controller.registerDial(newAction, settings);
+    await settle();
+    releaseNotice.resolve();
+    await oldRegistration.queue.idle();
+    await settle();
+
+    assert.deepEqual(writes, [
+      "old:HIGH", "new:HIGH", "old:ULTRA OFF", "new:HIGH"
+    ], failsAfterWrite ? "failed stale write" : "successful stale write");
+    assert.equal(oldAction.alerts, 0);
+    assert.equal(newAction.alerts, 0);
+    controller.unregisterDial(newAction);
+  }
+});
+
+test("disposing during an in-flight failed Ultra notice does not restore or reject", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const writes: string[] = [];
+  const noticeStarted = deferred<void>();
+  const releaseNotice = deferred<void>();
+  const action = {
+    id: "notice-disposal-race",
+    feedbackCalls: [],
+    triggerCalls: [],
+    alerts: 0,
+    async setFeedback(payload: unknown) {
+      const value = String((payload as { value?: unknown }).value);
+      if (value === "ULTRA OFF") {
+        noticeStarted.resolve();
+        await releaseNotice.promise;
+      }
+      writes.push(value);
+      if (value === "ULTRA OFF") throw new Error("disposed notice write failed");
+    },
+    async setTriggerDescription() {},
+    async showAlert(this: { alerts: number }) { this.alerts += 1; }
+  } as unknown as FakeDial;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return "blocked-ultra"; }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("reasoning"), includeUltraReasoning: false
+  });
+  await settle();
+  const registration = probe(controller).dials.get(action.id)!;
+  controller.rotateDial(action, 1);
+  await noticeStarted.promise;
+  controller.unregisterDial(action);
+  releaseNotice.resolve();
+
+  await assert.doesNotReject(registration.queue.idle());
+  await settle();
+  assert.deepEqual(writes, ["HIGH", "ULTRA OFF"]);
+  assert.equal(action.alerts, 0);
+});
+
 test("failed Ultra notice feedback clears suppression and falls back to authoritative rendering", async () => {
   const controller = new DeckController();
   const action = fakeDial("reasoning-blocked-feedback-failure", { rejectUltraFeedback: true });

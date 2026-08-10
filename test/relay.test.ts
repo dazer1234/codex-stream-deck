@@ -158,6 +158,48 @@ test("relay reasoning commands require an explicit literal Ultra policy and exac
   assert.equal(coercedDirection, false, "strict parsing must not execute direction coercion hooks");
 });
 
+test("relay reasoning command parsing accepts only exact own data properties without invoking getters", () => {
+  let getterReads = 0;
+  for (const [property, value] of [
+    ["kind", "reasoning"],
+    ["direction", "increase"],
+    ["includeUltra", true]
+  ] as const) {
+    const command: Record<string, unknown> = {
+      kind: "reasoning", direction: "increase", includeUltra: true
+    };
+    Object.defineProperty(command, property, {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return value;
+      }
+    });
+    assert.equal(parseRelayCommand(command), null, `${property} getter`);
+  }
+  const nonEnumerableExtra = { kind: "reasoning", direction: "increase", includeUltra: true };
+  Object.defineProperty(nonEnumerableExtra, "expression", { value: "process.exit()" });
+  assert.equal(parseRelayCommand(nonEnumerableExtra), null);
+  const symbolExtra = {
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    [Symbol("expression")]: "process.exit()"
+  };
+  assert.equal(parseRelayCommand(symbolExtra), null);
+  const inheritedKind = Object.assign(Object.create({
+    get kind() {
+      getterReads += 1;
+      return "reasoning";
+    }
+  }) as Record<string, unknown>, { direction: "increase", includeUltra: true });
+  assert.equal(parseRelayCommand(inheritedKind), null);
+  assert.equal(getterReads, 0);
+
+  assert.deepEqual(
+    parseRelayCommand(JSON.parse('{"kind":"reasoning","direction":"increase","includeUltra":false}')),
+    { kind: "reasoning", direction: "increase", includeUltra: false }
+  );
+});
+
 test("relay snapshots accept an optional bounded reasoning effort", async () => {
   const { parseRelayServerMessage } = await import("../src/relay-protocol.js");
   const message = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
@@ -359,6 +401,55 @@ test("relay result parser accepts only typed successful outcomes and exact resul
   ]) {
     assert.equal(parseRelayServerMessage(invalid), null, JSON.stringify(invalid));
   }
+});
+
+test("relay result parsing accepts only exact own data properties without invoking getters", () => {
+  let getterReads = 0;
+  const resultCases = [
+    [{ type: "result", protocol: 1, requestId: "request", ok: true, outcome: "applied" }, "type", "result"],
+    [{ type: "result", protocol: 1, requestId: "request", ok: true, outcome: "applied" }, "outcome", "applied"],
+    [{ type: "result", protocol: 1, requestId: "request", ok: false, error: "failed" }, "error", "failed"]
+  ] as const;
+  for (const [base, property, returned] of resultCases) {
+    const message = { ...base } as Record<string, unknown>;
+    Object.defineProperty(message, property, {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return returned;
+      }
+    });
+    assert.equal(parseRelayServerMessage(message), null, `${property} getter`);
+  }
+  const nonEnumerableExtra = {
+    type: "result", protocol: 1, requestId: "request", ok: true, outcome: "applied"
+  };
+  Object.defineProperty(nonEnumerableExtra, "error", { value: "hidden" });
+  assert.equal(parseRelayServerMessage(nonEnumerableExtra), null);
+  const symbolExtra = {
+    type: "result", protocol: 1, requestId: "request", ok: true, outcome: "applied",
+    [Symbol("error")]: "hidden"
+  };
+  assert.equal(parseRelayServerMessage(symbolExtra), null);
+  const inheritedOutcome = Object.assign(Object.create({ outcome: "applied" }) as Record<string, unknown>, {
+    type: "result", protocol: 1, requestId: "request", ok: true
+  });
+  assert.equal(parseRelayServerMessage(inheritedOutcome), null);
+  const inheritedType = Object.assign(Object.create({
+    get type() {
+      getterReads += 1;
+      return "result";
+    }
+  }) as Record<string, unknown>, { protocol: 1, requestId: "request", ok: true });
+  assert.equal(parseRelayServerMessage(inheritedType), null);
+  assert.equal(getterReads, 0);
+
+  assert.deepEqual(
+    parseRelayServerMessage(JSON.parse(
+      '{"type":"result","protocol":1,"requestId":"request","ok":true,"outcome":"blocked-ultra"}'
+    )),
+    { type: "result", protocol: 1, requestId: "request", ok: true, outcome: "blocked-ultra" }
+  );
 });
 
 test("relay snapshot layouts accept official keycaps and reject filesystem-shaped identifiers", () => {
@@ -1089,6 +1180,33 @@ test("relay server fails closed when a reasoning control returns an invalid outc
   assert.equal(result.ok, false);
   assert.equal("outcome" in result, false);
   assert.match(String(result.error), /invalid reasoning adjustment result/i);
+});
+
+test("relay client receives an error when a reasoning control omits its mandatory outcome", async (t) => {
+  const port = await freePort();
+  const control = {
+    refresh: async () => snapshot,
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => undefined as never,
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    await server.close();
+  });
+  await server.start();
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+
+  await assert.rejects(client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true
+  }), /invalid reasoning adjustment result/i);
 });
 
 test("usage refresh publishes a new post-command snapshot before acknowledging success", async (t) => {

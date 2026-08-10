@@ -204,7 +204,7 @@ export class CodexRelayServer {
       : command.kind;
     this.log(`Relay command ${commandLabel} received.`);
     try {
-      const outcome = validatedReasoningOutcome(await executeRelayCommand(this.control, command));
+      const outcome = validatedRelayOutcome(command, await executeRelayCommand(this.control, command));
       if (command.kind === "usage-refresh") await this.publishSnapshot(undefined, true);
       this.sendResult(socket, message.requestId, true, undefined, outcome);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
@@ -405,8 +405,12 @@ async function executeRelayCommand(
   return undefined;
 }
 
-function validatedReasoningOutcome(value: unknown): ReasoningAdjustmentResult | undefined {
-  if (value === undefined || value === "applied" || value === "blocked-ultra") return value;
+function validatedRelayOutcome(
+  command: RelayCommand,
+  value: unknown
+): ReasoningAdjustmentResult | undefined {
+  if (command.kind === "reasoning" && (value === "applied" || value === "blocked-ultra")) return value;
+  if (command.kind !== "reasoning" && value === undefined) return undefined;
   throw new Error("Invalid reasoning adjustment result.");
 }
 

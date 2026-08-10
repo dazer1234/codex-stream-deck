@@ -940,6 +940,13 @@ export class DeckController {
     registration.lastFeedback = undefined;
   }
 
+  private async restoreDialAfterStaleNotice(registration: DialRegistration): Promise<void> {
+    const current = this.dials.get(registration.action.id);
+    if (!current || current === registration || !this.isCurrentDialRegistration(current)) return;
+    current.lastFeedback = undefined;
+    await this.renderDialSafely(current);
+  }
+
   private async showDialNotice(
     registration: DialRegistration,
     notice: DialNotice,
@@ -953,7 +960,10 @@ export class DeckController {
     try {
       await registration.action.setFeedback(notice);
     } catch (error) {
-      if (!this.isCurrentDialRegistration(registration)) return;
+      if (!this.isCurrentDialRegistration(registration)) {
+        await this.restoreDialAfterStaleNotice(registration);
+        return;
+      }
       if (registration.noticeRevision !== revision) {
         registration.lastFeedback = undefined;
         await this.renderDialSafely(registration);
@@ -968,7 +978,10 @@ export class DeckController {
       await this.renderDialSafely(registration);
       return;
     }
-    if (!this.isCurrentDialRegistration(registration)) return;
+    if (!this.isCurrentDialRegistration(registration)) {
+      await this.restoreDialAfterStaleNotice(registration);
+      return;
+    }
     if (registration.noticeRevision !== revision) {
       registration.lastFeedback = undefined;
       await this.renderDialSafely(registration);
