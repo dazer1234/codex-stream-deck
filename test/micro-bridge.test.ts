@@ -9,6 +9,92 @@ import { ADDITIONAL_KEYCAPS, OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 import { visualStatusFromMicro } from "../src/status.js";
 import type { MicroSnapshot } from "../src/types.js";
 
+let guardedRendererHarnessId = 0;
+
+function createGuardedRendererHarness(options: {
+  currentEffort?: string;
+  visibleTriggerCount?: number;
+  modelId?: string;
+  supportedEfforts?: string[];
+}): {
+  evaluate: <T>(expression: string) => Promise<T>;
+  runnerCalls: Array<[string, string]>;
+} {
+  const runnerCalls: Array<[string, string]> = [];
+  const globalKey = `__codexDeckGuardedRunnerCalls${++guardedRendererHarnessId}`;
+  const runtime = globalThis as unknown as Record<string, unknown>;
+  runtime[globalKey] = runnerCalls;
+  const runnerSource = [
+    "export function guarded(command, source) {",
+    `  globalThis[${JSON.stringify(globalKey)}].push([command, source]);`,
+    "  return true;",
+    "}"
+  ].join("\n");
+  const runnerUrl = `data:text/javascript,${encodeURIComponent(runnerSource)}`;
+  const bridgeUrl = `https://codex.example/assets/codex-micro-bridge-guard-${guardedRendererHarnessId}.js`;
+  const bridgeSource = [
+    `import{guarded as he}from${JSON.stringify(runnerUrl)};`,
+    "enabled&&he('composer.increaseReasoningEffort','codex_micro_hid');"
+  ].join("");
+  const modelId = options.modelId ?? "gpt-5.6-sol";
+  const supportedEfforts = options.supportedEfforts ?? ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const queryClient = {
+    getQueryCache: () => ({
+      getAll: () => [{
+        queryKey: ["models", "list", "local", "chatgpt", 100],
+        state: { data: { data: [{
+          model: modelId,
+          supportedReasoningEfforts: supportedEfforts.map((reasoningEffort) => ({ reasoningEffort }))
+        }] } }
+      }]
+    }),
+    getQueryData: () => undefined
+  };
+  const root = {
+    "__reactContainer$test": { memoizedProps: { value: queryClient }, child: null, sibling: null }
+  };
+  const trigger = () => ({
+    isConnected: true,
+    getClientRects: () => ({ length: 1 }),
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": options.currentEffort ?? null
+    })[name] ?? null,
+    "__reactProps$test": { selectedValue: { props: { model: modelId } } }
+  });
+  const triggers = Array.from({ length: options.visibleTriggerCount ?? 1 }, trigger);
+  const document = {
+    getElementById: (id: string) => id === "root" ? root : null,
+    querySelectorAll: (selector: string) => selector === "link[href], script[src]"
+      ? [{ href: bridgeUrl, src: "" }]
+      : selector === '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+        ? triggers
+        : []
+  };
+  const performance = { getEntriesByType: () => [] };
+  const fetch = async (url: string) => {
+    assert.equal(url, bridgeUrl);
+    return { text: async () => bridgeSource };
+  };
+  const getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  return {
+    runnerCalls,
+    evaluate: async <T>(expression: string): Promise<T> => {
+      try {
+        const run = new Function(
+          "document", "performance", "fetch", "getComputedStyle",
+          `return (${expression});`
+        ) as (document: unknown, performance: unknown, fetch: unknown, getComputedStyle: unknown) => Promise<T>;
+        return await run(document, performance, fetch, getComputedStyle);
+      } finally {
+        delete runtime[globalKey];
+      }
+    }
+  };
+}
+
 test("official Micro statuses map to the Stream Deck color states", () => {
   assert.equal(visualStatusFromMicro("off"), "empty");
   assert.equal(visualStatusFromMicro("working"), "thinking");
@@ -260,6 +346,18 @@ test("active reasoning metadata fails closed on missing, malformed, duplicate, o
     supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
   });
   const visible = (element: Record<string, unknown>) => element.visible === true;
+
+  const overDepthProps: Record<string, any> = {
+    selectedValue: { props: { model: "gpt-5.6-sol" } }
+  };
+  let overDepthBranch = overDepthProps;
+  for (let depth = 0; depth < 33; depth++) {
+    overDepthBranch.nested = {};
+    overDepthBranch = overDepthBranch.nested;
+  }
+  overDepthBranch.selectedValue = { props: { model: "conflicting-model" } };
+  assert.equal(read([makeTrigger(overDepthProps)], makeRoot([model(["low", "high", "ultra"])]), visible), undefined,
+    "exhausting selectedValue depth cannot accept a partial shallow model");
 
   assert.equal(read([makeTrigger({ selectedValue: { model: "gpt-5.6-sol" } })],
     makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "the model ID must come from props.model");
@@ -634,6 +732,59 @@ test("restricted increases fail closed without renderer metadata and issue no se
   );
   assert.equal(expressions.length, 1);
   assert.deepEqual(directCommands, []);
+});
+
+test("serialized guarded reasoning blocks max to Ultra before executing the runner", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({ currentEffort: "max" });
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "blocked-ultra");
+  assert.deepEqual(harness.runnerCalls, []);
+});
+
+test("serialized guarded reasoning rejects unavailable metadata without executing the runner", async () => {
+  for (const options of [
+    { currentEffort: undefined },
+    { currentEffort: "max", visibleTriggerCount: 2 }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const harness = createGuardedRendererHarness(options);
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+
+    await assert.rejects(
+      bridge.adjustReasoning("increase", { includeUltra: false }),
+      (error: Error) => {
+        assert.equal(error.message, "Codex reasoning metadata is unavailable.");
+        return true;
+      }
+    );
+    assert.deepEqual(harness.runnerCalls, []);
+  }
+});
+
+test("serialized guarded reasoning executes the lazy runner exactly once below Ultra", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({ currentEffort: "xhigh" });
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
 });
 
 test("guarded reasoning expression serializes every helper dependency into renderer scope", async () => {

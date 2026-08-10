@@ -292,7 +292,11 @@ export function readSelectedReasoningModelId(element: ReasoningTriggerElement): 
   let visited = 0;
   while (pending.length && visited < 3000) {
     const current = pending.pop()!;
-    if (!current.value || typeof current.value !== "object" || current.depth > 32) continue;
+    if (!current.value || typeof current.value !== "object") continue;
+    if (current.depth > 32) {
+      malformed = true;
+      continue;
+    }
     const object = current.value as Record<string, unknown>;
     const seen = current.selectedValue ? seenSelected : seenOutside;
     if (seen.has(object)) continue;
