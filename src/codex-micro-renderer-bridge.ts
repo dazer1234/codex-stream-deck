@@ -287,10 +287,34 @@ export function readDataPropertyInPrototypeChain(
 export function isCloneableReasoningQueryClient(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   try {
-    const names = Object.getOwnPropertyNames(value);
-    if (names.length > 64) return false;
-    for (const name of names) {
-      if (!readOwnDataProperty(value, name)) return false;
+    const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+    const seen = new Set<object>();
+    let visitedProperties = 0;
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (typeof current.value === "string" && current.value.length > 4096) return false;
+      if (typeof current.value === "function" || typeof current.value === "symbol") return false;
+      if (!current.value || typeof current.value !== "object") continue;
+      if (seen.has(current.value)) continue;
+      if (current.depth > 8 || seen.size >= 256) return false;
+      seen.add(current.value);
+      const names = Object.getOwnPropertyNames(current.value);
+      if (names.length > 64 || Object.getOwnPropertySymbols(current.value).length > 0) return false;
+      if (Array.isArray(current.value)) {
+        const length = Object.getOwnPropertyDescriptor(current.value, "length");
+        if (!length || !Object.prototype.hasOwnProperty.call(length, "value") ||
+            !Number.isSafeInteger(length.value) || length.value < 0 || length.value > 64) return false;
+      }
+      if (current.depth > 0) {
+        const prototype = Object.getPrototypeOf(current.value);
+        if (prototype !== Object.prototype && prototype !== null && prototype !== Array.prototype) return false;
+      }
+      for (const name of names) {
+        if (++visitedProperties > 2048) return false;
+        const descriptor = Object.getOwnPropertyDescriptor(current.value, name);
+        if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return false;
+        if (descriptor.enumerable) pending.push({ value: descriptor.value, depth: current.depth + 1 });
+      }
     }
     if (typeof structuredClone !== "function") return false;
     structuredClone(value);
@@ -415,10 +439,25 @@ export function normalizeReasoningModelLabel(
   return tokens.length > 0 ? tokens.join("-") : undefined;
 }
 
-export function readVisibleReasoningModelLabel(
+export function isExplicitlyHiddenReasoningElement(element: ReasoningTriggerElement): boolean {
+  try {
+    if (typeof element.getAttribute !== "function") return true;
+    const ariaHidden = element.getAttribute("aria-hidden");
+    const hiddenAttribute = element.getAttribute("hidden");
+    const className = element.getAttribute("class");
+    if (ariaHidden === "true" || hiddenAttribute !== null ||
+        (typeof className === "string" && /ModelPickerTriggerMeasurement/i.test(className))) return true;
+    if (typeof getComputedStyle !== "function") return false;
+    const style = getComputedStyle(element as unknown as Element);
+    return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
+  } catch { return true; }
+}
+
+export function readVisibleReasoningModelLabels(
   trigger: ReasoningTriggerElement,
-  isVisible = isVisibleReasoningTrigger
-): string | undefined {
+  isVisible = isVisibleReasoningTrigger,
+  isExplicitlyHidden = isExplicitlyHiddenReasoningElement
+): string[] | undefined {
   try {
     const descendants = trigger.querySelectorAll?.("*");
     if (!descendants || !Number.isSafeInteger(descendants.length) || descendants.length > 256) return undefined;
@@ -429,6 +468,7 @@ export function readVisibleReasoningModelLabel(
       const children = descendant.children;
       if (!children || !Number.isSafeInteger(children.length) || children.length < 0) return undefined;
       if (children.length !== 0) continue;
+      if (!isVisible(descendant as ReasoningTriggerElement)) continue;
       let current: Record<string, any> | undefined = descendant;
       let reachedTrigger = false;
       let hidden = false;
@@ -437,16 +477,7 @@ export function readVisibleReasoningModelLabel(
           reachedTrigger = true;
           break;
         }
-        if (!isVisible(current as ReasoningTriggerElement)) {
-          hidden = true;
-          break;
-        }
-        if (typeof current.getAttribute !== "function") return undefined;
-        const ariaHidden = current.getAttribute("aria-hidden");
-        const hiddenAttribute = current.getAttribute("hidden");
-        const className = current.getAttribute("class");
-        if (ariaHidden === "true" || hiddenAttribute !== null ||
-            (typeof className === "string" && /ModelPickerTriggerMeasurement/i.test(className))) {
+        if (isExplicitlyHidden(current as ReasoningTriggerElement)) {
           hidden = true;
           break;
         }
@@ -460,9 +491,8 @@ export function readVisibleReasoningModelLabel(
       if (!label) continue;
       if (!normalizeReasoningModelLabel(label)) return undefined;
       candidates.push(label);
-      if (candidates.length > 1) return undefined;
     }
-    return candidates.length === 1 ? candidates[0] : undefined;
+    return candidates;
   } catch { return undefined; }
 }
 
@@ -471,7 +501,7 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
     const queue = [rootFiber];
     const seen = new Set<object>();
     const seenContexts = new Set<object>();
-    const queryClients = new Set<object>();
+    const candidateClients = new Set<object>();
     let contextTraversalTruncated = false;
     while (queue.length && seen.size < 30000) {
       const value = queue.pop();
@@ -509,12 +539,11 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
         contextTraversalTruncated = true;
       }
       for (const contextValue of contextValues) {
-        if (!isCloneableReasoningQueryClient(contextValue)) continue;
         const getQueriesData = readDataPropertyInPrototypeChain(contextValue, "getQueriesData");
         const getQueryData = readDataPropertyInPrototypeChain(contextValue, "getQueryData");
         if (getQueriesData?.exists && typeof getQueriesData.value === "function" &&
             getQueryData?.exists && typeof getQueryData.value === "function") {
-          queryClients.add(contextValue as object);
+          candidateClients.add(contextValue as object);
         }
       }
       queue.push(childProperty.value, siblingProperty.value);
@@ -523,16 +552,27 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
       value && typeof value === "object" && !seen.has(value)
     );
     if (contextTraversalTruncated || fiberTraversalTruncated) return [];
-    return [...queryClients];
+    const queryClients: object[] = [];
+    for (const candidate of candidateClients) {
+      if (!isCloneableReasoningQueryClient(candidate)) return [];
+      queryClients.push(candidate);
+    }
+    return queryClients;
   } catch { return []; }
 }
 
 export function readReasoningModelCatalogMatch(
   queryClients: Iterable<unknown>,
-  visibleLabel: string
+  visibleLabels: unknown
 ): { modelId: string; supportedEfforts: string[] } | undefined {
-  const normalizedLabel = normalizeReasoningModelLabel(visibleLabel);
-  if (!normalizedLabel) return undefined;
+  const labelItems = readBoundedOwnDataArray(visibleLabels, 256);
+  if (!labelItems) return undefined;
+  const normalizedLabels = new Set<string>();
+  for (const label of labelItems) {
+    const normalizedLabel = normalizeReasoningModelLabel(label);
+    if (!normalizedLabel) return undefined;
+    normalizedLabels.add(normalizedLabel);
+  }
   const matches: Array<{ modelId: string; supportedEfforts: string[] }> = [];
   let visitedClients = 0;
   try {
@@ -576,7 +616,7 @@ export function readReasoningModelCatalogMatch(
           const efforts = normalizeReasoningEffortOrder(effortsProperty.value);
           if (!efforts) return undefined;
           if (!isStructuredCloneSafePlainData(record, 5000, 32, 1000)) return undefined;
-          if (normalizedDisplayName === normalizedLabel) {
+          if (normalizedLabels.has(normalizedDisplayName)) {
             matches.push({ modelId: modelProperty.value, supportedEfforts: efforts });
             if (matches.length > 1) return undefined;
           }
@@ -592,7 +632,8 @@ export function readReasoningModelCatalogMatch(
 export function readActiveReasoningMetadata(
   elements: Iterable<ReasoningTriggerElement>,
   reactRootFiber: unknown,
-  isVisible = isVisibleReasoningTrigger
+  isVisible = isVisibleReasoningTrigger,
+  isExplicitlyHidden = isExplicitlyHiddenReasoningElement
 ): { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined {
   try {
     const visibleTriggers: ReasoningTriggerElement[] = [];
@@ -605,9 +646,9 @@ export function readActiveReasoningMetadata(
     const trigger = visibleTriggers[0]!;
     const currentEffort = trigger.getAttribute("data-selected-reasoning-effort")?.trim();
     if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
-    const visibleLabel = readVisibleReasoningModelLabel(trigger, isVisible);
-    if (!visibleLabel) return undefined;
-    const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabel);
+    const visibleLabels = readVisibleReasoningModelLabels(trigger, isVisible, isExplicitlyHidden);
+    if (!visibleLabels) return undefined;
+    const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabels);
     return match ? { currentEffort, modelId: match.modelId, supportedEfforts: match.supportedEfforts } : undefined;
   } catch { return undefined; }
 }
@@ -1019,7 +1060,8 @@ export class CodexMicroRendererBridge {
       const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
       const normalizeReasoningModelLabel = (${normalizeReasoningModelLabel.toString()});
       const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
-      const readVisibleReasoningModelLabel = (${readVisibleReasoningModelLabel.toString()});
+      const isExplicitlyHiddenReasoningElement = (${isExplicitlyHiddenReasoningElement.toString()});
+      const readVisibleReasoningModelLabels = (${readVisibleReasoningModelLabels.toString()});
       const findRendererQueryClients = (${findRendererQueryClients.toString()});
       const readReasoningModelCatalogMatch = (${readReasoningModelCatalogMatch.toString()});
       const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});

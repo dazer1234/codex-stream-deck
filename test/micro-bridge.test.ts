@@ -386,6 +386,152 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
   ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
 });
 
+test("reasoning metadata resolves the live display-contents model leaf and ignores its effort sibling", () => {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, any>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, any>) => boolean,
+    isExplicitlyHidden: (element: Record<string, any>) => boolean
+  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  const queryClient = new ReasoningQueryClientFixture([[['models', 'list', 'local', 'chatgpt', 100], {
+    data: [{
+      displayName: "GPT-5.6-Terra",
+      model: "gpt-5.6-terra",
+      supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({ reasoningEffort }))
+    }]
+  }]]);
+  const trigger: Record<string, any> = {
+    visibleGeometry: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "medium"
+    })[name] ?? null
+  };
+  const element = (parentElement: unknown, options: Record<string, unknown>) => ({
+    tagName: "SPAN",
+    children: [],
+    parentElement,
+    visibleGeometry: true,
+    display: "inline",
+    visibility: "visible",
+    getAttribute(name: string) {
+      if (name === "class") return options.className ?? null;
+      if (name === "aria-hidden") return options.ariaHidden ? "true" : null;
+      if (name === "hidden") return options.hidden ? "" : null;
+      return null;
+    },
+    ...options
+  });
+  const measurement = element(trigger, {
+    tagName: "DIV",
+    className: "ModelPickerTriggerMeasurement_probe",
+    ariaHidden: true,
+    children: [{}]
+  });
+  const hiddenModel = element(measurement, {
+    className: "ModelPickerTriggerModelText_probe",
+    textContent: "5.3 Codex Spark"
+  });
+  const dropdownLabel = element(trigger, {
+    tagName: "DIV",
+    className: "ComposerDropdownLabel_probe",
+    children: [{}, {}],
+    display: "contents",
+    visibleGeometry: false
+  });
+  const visibleModel = element(dropdownLabel, {
+    className: "ModelPickerTriggerModelText_probe",
+    textContent: "5.6 Terra"
+  });
+  const effort = element(dropdownLabel, {
+    className: "ModelPickerTriggerEffortLabel_probe",
+    textContent: "Medium"
+  });
+  trigger.querySelectorAll = (selector: string) => selector === "*"
+    ? [measurement, hiddenModel, dropdownLabel, visibleModel, effort]
+    : [];
+  const hasGeometry = (node: Record<string, any>) => node.visibleGeometry === true;
+  const isExplicitlyHidden = (node: Record<string, any>) => node.display === "none" ||
+    node.visibility === "hidden" || node.visibility === "collapse" ||
+    node.getAttribute?.("aria-hidden") === "true" || node.getAttribute?.("hidden") !== null ||
+    /ModelPickerTriggerMeasurement/i.test(node.getAttribute?.("class") ?? "");
+
+  assert.deepEqual(read([trigger], {
+    memoizedProps: { value: queryClient }, child: null, sibling: null
+  }, hasGeometry, isExplicitlyHidden), {
+    currentEffort: "medium",
+    modelId: "gpt-5.6-terra",
+    supportedEfforts: ["low", "medium", "high"]
+  });
+});
+
+test("reasoning metadata maps model and effort leaves without depending on their classes", () => {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, any>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, any>) => boolean,
+    isExplicitlyHidden: (element: Record<string, any>) => boolean
+  ) => { modelId: string } | undefined;
+  const queryClient = new ReasoningQueryClientFixture([[['models', 'list'], { data: [{
+    displayName: "GPT-5.6-Terra",
+    model: "gpt-5.6-terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }]
+  }] }]]);
+  const trigger: Record<string, any> = {
+    visibleGeometry: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "medium"
+    })[name] ?? null
+  };
+  const leaf = (textContent: string) => ({
+    visibleGeometry: true,
+    children: [],
+    parentElement: trigger,
+    textContent,
+    getAttribute: () => null
+  });
+  trigger.querySelectorAll = () => [leaf("5.6 Terra"), leaf("Medium")];
+
+  assert.equal(read([trigger], { memoizedProps: { value: queryClient }, child: null, sibling: null },
+    (node) => node.visibleGeometry === true, () => false)?.modelId, "gpt-5.6-terra");
+});
+
+test("reasoning discovery does not clone unrelated contexts or invoke nested accessors", () => {
+  let nestedGetterReads = 0;
+  const nested: Record<string, unknown> = {};
+  Object.defineProperty(nested, "hostile", {
+    enumerable: true,
+    get() {
+      nestedGetterReads++;
+      throw new Error("unrelated nested getter must not run");
+    }
+  });
+  const unrelatedContext = { nested };
+  const query = reasoningTrustQuery();
+  const queryClient = new ReasoningQueryClientFixture([[query.queryKey, query.state.data]]);
+  const read = reasoningTrustFixture({
+    memoizedProps: { value: unrelatedContext },
+    dependencies: { firstContext: { memoizedValue: queryClient, next: null } },
+    child: null,
+    sibling: null
+  });
+
+  assert.equal(read()?.modelId, "gpt-5.6-sol");
+  assert.equal(nestedGetterReads, 0);
+
+  class UnsafeQueryClient extends ReasoningQueryClientFixture {
+    unsafe = { nested };
+  }
+  const unsafeClient = new UnsafeQueryClient([[query.queryKey, query.state.data]]);
+  assert.equal(reasoningTrustFixture({
+    memoizedProps: { value: unsafeClient }, child: null, sibling: null
+  })(), undefined, "fingerprinted clients with unsafe enumerable state fail closed before cloning");
+  assert.equal(nestedGetterReads, 0, "nested client accessors are never invoked");
+});
+
 function reasoningTrustFixture(rootFiber: unknown) {
   const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
     elements: Iterable<Record<string, any>>,
@@ -555,8 +701,14 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   const goodRoot = () => root([record()]);
 
   assert.equal(read([trigger([])], goodRoot(), visible), undefined, "zero visible labels are unavailable");
-  assert.equal(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], goodRoot(), visible), undefined,
-    "multiple visible labels are unavailable");
+  assert.deepEqual(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], goodRoot(), visible), {
+    currentEffort: "high",
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high", "ultra"]
+  }, "unmatched visible text does not make one catalog match ambiguous");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], root([
+    record(), record("GPT-5.6-Pro", "gpt-5.6-pro")
+  ]), visible), undefined, "multiple distinct catalog-aware label matches are unavailable");
   assert.equal(read([trigger([{ text: "   " }])], goodRoot(), visible), undefined, "blank labels are ignored");
   assert.equal(read([trigger([{ text: "5.6 Sol", display: "none" }])], goodRoot(), visible), undefined,
     "display-none labels are unavailable");
@@ -1229,7 +1381,8 @@ test("guarded reasoning expression serializes every helper dependency into rende
     "normalizeReasoningEffortOrder",
     "normalizeReasoningModelLabel",
     "isVisibleReasoningTrigger",
-    "readVisibleReasoningModelLabel",
+    "isExplicitlyHiddenReasoningElement",
+    "readVisibleReasoningModelLabels",
     "findRendererQueryClients",
     "readReasoningModelCatalogMatch",
     "readActiveReasoningMetadata",
