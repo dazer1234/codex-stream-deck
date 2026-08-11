@@ -358,6 +358,18 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
   return null;
 }
 
+export function parseRelayCommandMessage(value: unknown): RelayCommandMessage | null {
+  const message = snapshotOwnDataRecord(value);
+  if (!message || !exactOwnDataKeys(message, ["type", "protocol", "requestId", "command"]) ||
+      message.type !== "command" || message.protocol !== RELAY_PROTOCOL_VERSION ||
+      !boundedNonblankString(message.requestId, 128)) return null;
+  const command = parseRelayCommand(message.command);
+  return command ? {
+    type: "command", protocol: RELAY_PROTOCOL_VERSION,
+    requestId: message.requestId, command
+  } : null;
+}
+
 function isSnapshot(value: unknown): value is MicroSnapshot {
   const snapshot = snapshotOwnDataRecord(value);
   if (!snapshot || !onlyAllowedOwnKeys(snapshot, [

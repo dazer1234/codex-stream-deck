@@ -7,7 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { OfficialKeycapId } from "./keycaps.js";
 import type { CodexMicroRendererBridge } from "./codex-micro-renderer-bridge.js";
 import {
-  RELAY_CAPABILITIES, RELAY_PROTOCOL_VERSION, parseRelayCommand,
+  RELAY_CAPABILITIES, RELAY_PROTOCOL_VERSION, parseRelayCommandMessage,
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
@@ -215,13 +215,9 @@ export class CodexRelayServer {
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
-    const message = safeJson(raw) as Partial<RelayCommandMessage> | null;
-    if (!message || message.type !== "command" || message.protocol !== RELAY_PROTOCOL_VERSION || typeof message.requestId !== "string") return;
-    const command = parseRelayCommand(message.command);
-    if (!command) {
-      this.sendResult(socket, message.requestId, false, "Invalid relay command.");
-      return;
-    }
+    const message = parseRelayCommandMessage(safeJson(raw));
+    if (!message) return;
+    const command = message.command;
     const startedAt = Date.now();
     const commandLabel = command.kind === "agent"
       ? `agent:${command.slot + 1}:${command.act === 1 ? "down" : "up"}`
@@ -267,7 +263,7 @@ export class CodexRelayServer {
         }
       : {
           type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: false,
-          ...(error ? { error } : {})
+          ...(error ? { error: error.slice(0, 512) } : {})
         };
     socket.send(JSON.stringify(result));
   }

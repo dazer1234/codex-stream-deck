@@ -17,7 +17,7 @@ import {
 } from "../src/codex-relay-server.js";
 import {
   HostActivityIndex, RELAY_PROTOCOL_VERSION, normalizeHostSnapshotAtReceipt,
-  parseRelayCommand, parseRelayServerMessage, type HostSnapshot
+  parseRelayCommand, parseRelayCommandMessage, parseRelayServerMessage, type HostSnapshot
 } from "../src/relay-protocol.js";
 import type { CodexHost, MicroSnapshot } from "../src/types.js";
 
@@ -163,6 +163,27 @@ test("relay command parser permits only the narrow native command surface", () =
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.notEqual(parseRelayCommand({ kind: "agent", slot: 0, threadKey: "local:client-new-thread:e3c18619-71ff-4a8d-8dd3-d475e9bcf162", act: 1 }), null);
   assert.equal(parseRelayCommand({ kind: "agent", slot: 1, threadKey: "local:../../secret", act: 1 }), null);
+});
+
+test("relay command envelopes require exact own bounded data without invoking getters", () => {
+  const valid = {
+    type: "command", protocol: 1, requestId: "r".repeat(128),
+    command: { kind: "action", slot: "ACT06", act: 1 }
+  };
+  assert.deepEqual(parseRelayCommandMessage(valid), valid);
+  assert.equal(parseRelayCommandMessage({ ...valid, requestId: "r".repeat(129) }), null);
+  assert.equal(parseRelayCommandMessage({ ...valid, extra: true }), null);
+  assert.equal(parseRelayCommandMessage({ ...valid, [Symbol("extra")]: true }), null);
+  let getterReads = 0;
+  const accessor = Object.create(null) as Record<string, unknown>;
+  Object.defineProperties(accessor, {
+    type: { enumerable: true, value: "command" },
+    protocol: { enumerable: true, value: 1 },
+    requestId: { enumerable: true, get() { getterReads += 1; return "request"; } },
+    command: { enumerable: true, value: valid.command }
+  });
+  assert.equal(parseRelayCommandMessage(accessor), null);
+  assert.equal(getterReads, 0);
 });
 
 test("relay reasoning commands require an explicit literal Ultra policy and exact own keys", () => {
@@ -2919,6 +2940,39 @@ test("model preset relay server rejects malformed or mismatched bridge confirmat
     assert.equal(result.ok, false, `invalid case ${index}`);
   }
   assert.equal(getterReads, 0);
+});
+
+test("relay bounds oversized bridge errors before writing a complete result frame", async (t) => {
+  const port = await freePort();
+  const control = {
+    refresh: async () => relayModelSnapshot(),
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    applyModelPreset: async () => { throw new Error("E".repeat(128 * 1024)); },
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => { socket.close(); await server.close(); });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await messages.next()).type, "ready");
+  assert.equal((await messages.next()).type, "snapshot");
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "r".repeat(128),
+    command: {
+      kind: "model-preset", modelId: "gpt-5.6-sol", reasoningEffort: "high",
+      includeUltra: false, includeModelPresetFeedback: true
+    }
+  }));
+  const result = await messages.next();
+  assert.equal(result.ok, false);
+  assert.ok(typeof result.error === "string" && result.error.length <= 512);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 64 * 1024);
 });
 
 test("model preset client patches an exact confirmed pair immutably after the snapshot barrier", async (t) => {
