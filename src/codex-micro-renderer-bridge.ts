@@ -225,6 +225,7 @@ type ReasoningTriggerElement = {
   getClientRects?: () => { length: number };
   getAttribute: (name: string) => string | null;
   querySelector?: (selectors: string) => unknown;
+  querySelectorAll?: (selectors: string) => ArrayLike<unknown>;
 };
 
 export function isVisibleReasoningTrigger(element: ReasoningTriggerElement): boolean {
@@ -368,150 +369,66 @@ export function normalizeReasoningEffortOrder(value: unknown): string[] | undefi
   return isStructuredCloneSafePlainData(value, 256, 8, 64) ? efforts : undefined;
 }
 
-export function readSelectedReasoningModelId(element: ReasoningTriggerElement): string | undefined {
-  const pending: Array<{
-    value: unknown;
-    selectedValue: boolean;
-    propsObject: boolean;
-    siblingGroups: object[];
-    depth: number;
-  }> = [];
+export function normalizeReasoningModelLabel(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || !/^[A-Za-z0-9.]+(?:[ -]+[A-Za-z0-9.]+)*$/.test(trimmed)) return undefined;
+  const tokens = trimmed.split(/[ -]+/).map((token) => token.replace(/[A-Z]/g, (character) =>
+    String.fromCharCode(character.charCodeAt(0) + 32)
+  ));
+  if (tokens[0] === "gpt") tokens.shift();
+  return tokens.length > 0 ? tokens.join("-") : undefined;
+}
+
+export function readVisibleReasoningModelLabel(
+  trigger: ReasoningTriggerElement,
+  isVisible = isVisibleReasoningTrigger
+): string | undefined {
   try {
-    for (const key of Object.getOwnPropertyNames(element)) {
-      if (key.startsWith("__reactProps$")) {
-        const property = readOwnDataProperty(element, key);
-        if (!property?.exists) return undefined;
-        pending.push({
-          value: property.value,
-          selectedValue: false,
-          propsObject: false,
-          siblingGroups: [],
-          depth: 0
-        });
+    const descendants = trigger.querySelectorAll?.("*");
+    if (!descendants || !Number.isSafeInteger(descendants.length) || descendants.length > 256) return undefined;
+    const candidates: string[] = [];
+    for (let index = 0; index < descendants.length; index++) {
+      const descendant = descendants[index] as Record<string, any> | undefined;
+      if (!descendant || typeof descendant !== "object") return undefined;
+      const children = descendant.children;
+      if (!children || !Number.isSafeInteger(children.length) || children.length < 0) return undefined;
+      if (children.length !== 0) continue;
+      let current: Record<string, any> | undefined = descendant;
+      let reachedTrigger = false;
+      let hidden = false;
+      for (let depth = 0; current && depth <= 32; depth++) {
+        if (current === trigger) {
+          reachedTrigger = true;
+          break;
+        }
+        if (!isVisible(current as ReasoningTriggerElement)) {
+          hidden = true;
+          break;
+        }
+        if (typeof current.getAttribute !== "function") return undefined;
+        const ariaHidden = current.getAttribute("aria-hidden");
+        const hiddenAttribute = current.getAttribute("hidden");
+        const className = current.getAttribute("class");
+        if (ariaHidden === "true" || hiddenAttribute !== null ||
+            (typeof className === "string" && /ModelPickerTriggerMeasurement/i.test(className))) {
+          hidden = true;
+          break;
+        }
+        current = current.parentElement;
       }
+      if (hidden) continue;
+      if (!reachedTrigger) return undefined;
+      const text = descendant.textContent;
+      if (typeof text !== "string") return undefined;
+      const label = text.trim();
+      if (!label) continue;
+      if (!normalizeReasoningModelLabel(label)) return undefined;
+      candidates.push(label);
+      if (candidates.length > 1) return undefined;
     }
+    return candidates.length === 1 ? candidates[0] : undefined;
   } catch { return undefined; }
-  const seenOutside = new Set<object>();
-  const seenSelected = new Set<object>();
-  const legacyModelIds = new Set<string>();
-  const selectedValueGroups = new Set<object>();
-  const siblingModelIds = new Map<object, { model: string; groups: Set<object> }>();
-  let malformed = false;
-  let visited = 0;
-  while (pending.length && visited < 3000) {
-    const current = pending.pop()!;
-    if (!current.value || typeof current.value !== "object") continue;
-    if (current.depth > 32) {
-      malformed = true;
-      continue;
-    }
-    const object = current.value as Record<string, unknown>;
-    const seen = current.selectedValue ? seenSelected : seenOutside;
-    if (seen.has(object)) continue;
-    seen.add(object);
-    visited++;
-    let props: Record<string, unknown> | undefined;
-    let hidden = false;
-    const propsProperty = readOwnDataProperty(object, "props");
-    if (!propsProperty) {
-      malformed = true;
-      continue;
-    }
-    const rawProps = propsProperty.exists ? propsProperty.value : undefined;
-    props = rawProps && typeof rawProps === "object" && !Array.isArray(rawProps)
-      ? rawProps as Record<string, unknown>
-      : undefined;
-    let hiddenInspectionFailed = false;
-    for (const value of [object, props].filter((item): item is Record<string, unknown> => item != null)) {
-      const styleProperty = readOwnDataProperty(value, "style");
-      const classNameProperty = readOwnDataProperty(value, "className");
-      const hiddenProperty = readOwnDataProperty(value, "hidden");
-      const ariaHiddenProperty = readOwnDataProperty(value, "aria-hidden");
-      if (!styleProperty || !classNameProperty || !hiddenProperty || !ariaHiddenProperty) {
-        hiddenInspectionFailed = true;
-        break;
-      }
-      const rawStyle = styleProperty.exists ? styleProperty.value : undefined;
-      const style = rawStyle && typeof rawStyle === "object" && !Array.isArray(rawStyle)
-        ? rawStyle as Record<string, unknown>
-        : undefined;
-      const displayProperty = style ? readOwnDataProperty(style, "display") : { exists: false };
-      const visibilityProperty = style ? readOwnDataProperty(style, "visibility") : { exists: false };
-      if (!displayProperty || !visibilityProperty) {
-        hiddenInspectionFailed = true;
-        break;
-      }
-      const classNameValue = classNameProperty.exists ? classNameProperty.value : undefined;
-      const className = typeof classNameValue === "string" ? classNameValue : "";
-      const hiddenValue = hiddenProperty.exists ? hiddenProperty.value : undefined;
-      const ariaHiddenValue = ariaHiddenProperty.exists ? ariaHiddenProperty.value : undefined;
-      hidden ||= hiddenValue === true || ariaHiddenValue === true || ariaHiddenValue === "true" ||
-        displayProperty.value === "none" || visibilityProperty.value === "hidden" ||
-        /(^|[\s_-])measurement([\s_-]|$)/i.test(className);
-    }
-    if (hiddenInspectionFailed) {
-      malformed = true;
-      continue;
-    }
-    if (hidden) continue;
-    const modelProperty = readOwnDataProperty(object, "model");
-    if (!modelProperty) {
-      malformed = true;
-      continue;
-    }
-    if (current.propsObject && modelProperty.exists) {
-      const rawModel = modelProperty.value;
-      const model = typeof rawModel === "string" ? rawModel.trim() : "";
-      if (!model || model.length > 128 || model !== rawModel || /[\s\u0000-\u001f\u007f]/.test(model) ||
-          !isStructuredCloneSafePlainData(object, 3000, 32, 1000)) malformed = true;
-      else if (current.selectedValue) legacyModelIds.add(model);
-      else {
-        const existing = siblingModelIds.get(object);
-        if (existing) {
-          if (existing.model !== model) malformed = true;
-          for (const group of current.siblingGroups) existing.groups.add(group);
-        } else siblingModelIds.set(object, { model, groups: new Set(current.siblingGroups) });
-      }
-    }
-    try {
-      for (const key of Object.keys(object)) {
-        if (key === "model" && current.propsObject) continue;
-        const property = readOwnDataProperty(object, key);
-        if (!property?.exists) {
-          malformed = true;
-          continue;
-        }
-        if (current.propsObject && key === "selectedValue") {
-          const group = current.siblingGroups[current.siblingGroups.length - 1];
-          if (group) selectedValueGroups.add(group);
-        }
-        let siblingGroups = current.siblingGroups;
-        if (key === "children" && property.value && typeof property.value === "object" &&
-            !current.siblingGroups.includes(property.value)) {
-          if (current.siblingGroups.length >= 32) {
-            malformed = true;
-            continue;
-          }
-          siblingGroups = [...current.siblingGroups, property.value];
-        }
-        pending.push({
-          value: property.value,
-          selectedValue: current.selectedValue || key === "selectedValue",
-          propsObject: key === "props",
-          siblingGroups,
-          depth: current.depth + 1
-        });
-      }
-    } catch { malformed = true; }
-  }
-  if (pending.length > 0) malformed = true;
-  const eligibleSiblingModels = [...siblingModelIds.values()].filter((candidate) =>
-    [...candidate.groups].some((group) => selectedValueGroups.has(group))
-  );
-  if (malformed || legacyModelIds.size > 1 || eligibleSiblingModels.length > 1) return undefined;
-  const legacyModel = legacyModelIds.values().next().value as string | undefined;
-  const siblingModel = eligibleSiblingModels[0]?.model;
-  return legacyModel && siblingModel && legacyModel !== siblingModel ? undefined : legacyModel ?? siblingModel;
 }
 
 export function findRendererQueryClients(rootFiber: unknown): unknown[] {
@@ -551,12 +468,18 @@ export function findRendererQueryClients(rootFiber: unknown): unknown[] {
   return [...queryClients];
 }
 
-export function readReasoningModelEfforts(queryClients: Iterable<unknown>, modelId: string): string[] | undefined {
-  if (!modelId || modelId.length > 128 || /[\s\u0000-\u001f\u007f]/.test(modelId)) return undefined;
-  const candidates: string[][] = [];
+export function readReasoningModelCatalogMatch(
+  queryClients: Iterable<unknown>,
+  visibleLabel: string
+): { modelId: string; supportedEfforts: string[] } | undefined {
+  const normalizedLabel = normalizeReasoningModelLabel(visibleLabel);
+  if (!normalizedLabel) return undefined;
+  const matches: Array<{ modelId: string; supportedEfforts: string[] }> = [];
+  let visitedClients = 0;
   let visitedQueries = 0;
   try {
     for (const candidate of queryClients) {
+      if (++visitedClients > 64) return undefined;
       if (!candidate || typeof candidate !== "object") return undefined;
       const client = candidate as Record<string, any>;
       const queries = client.getQueryCache().getAll();
@@ -583,40 +506,34 @@ export function readReasoningModelEfforts(queryClients: Iterable<unknown>, model
         if (!recordsProperty?.exists) return undefined;
         const records = readBoundedOwnDataArray(recordsProperty.value, 1000);
         if (!records || records.length === 0) return undefined;
-        const matches: string[][] = [];
         for (const record of records) {
           if (!record || typeof record !== "object" || Array.isArray(record)) return undefined;
+          const displayNameProperty = readOwnDataProperty(record, "displayName");
           const modelProperty = readOwnDataProperty(record, "model");
-          if (!modelProperty?.exists || !isSafeReasoningIdentifier(modelProperty.value, 128)) return undefined;
+          if (!displayNameProperty?.exists || !modelProperty?.exists ||
+              !isSafeReasoningIdentifier(modelProperty.value, 128)) return undefined;
+          const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value);
+          if (!normalizedDisplayName) return undefined;
           const effortsProperty = readOwnDataProperty(record, "supportedReasoningEfforts");
-          if (!effortsProperty) return undefined;
-          let efforts: string[] | undefined;
-          if (effortsProperty.exists) {
-            const effortItems = readBoundedOwnDataArray(effortsProperty.value, 64);
-            if (!effortItems || effortItems.length === 0 || effortItems.some((effortRecord) =>
-              !effortRecord || typeof effortRecord !== "object" || Array.isArray(effortRecord)
-            )) return undefined;
-            efforts = normalizeReasoningEffortOrder(effortsProperty.value);
-            if (!efforts) return undefined;
-          }
+          if (!effortsProperty?.exists) return undefined;
+          const effortItems = readBoundedOwnDataArray(effortsProperty.value, 64);
+          if (!effortItems || effortItems.length === 0 || effortItems.some((effortRecord) =>
+            !effortRecord || typeof effortRecord !== "object" || Array.isArray(effortRecord)
+          )) return undefined;
+          const efforts = normalizeReasoningEffortOrder(effortsProperty.value);
+          if (!efforts) return undefined;
           if (!isStructuredCloneSafePlainData(record, 5000, 32, 1000)) return undefined;
-          if (modelProperty.value === modelId) {
-            if (!efforts) return undefined;
-            matches.push(efforts);
+          if (normalizedDisplayName === normalizedLabel) {
+            matches.push({ modelId: modelProperty.value, supportedEfforts: efforts });
+            if (matches.length > 1) return undefined;
           }
         }
         if (!isStructuredCloneSafePlainData(recordsProperty.value, 70000, 32, 1000) ||
             !isStructuredCloneSafePlainData(dataProperty.value, 70001, 32, 1000)) return undefined;
-        if (matches.length === 0) continue;
-        if (matches.length !== 1) return undefined;
-        candidates.push(matches[0]!);
       }
     }
   } catch { return undefined; }
-  if (candidates.length === 0) return undefined;
-  const expected = candidates[0]!;
-  return candidates.every((efforts) => efforts.length === expected.length &&
-    efforts.every((effort, index) => effort === expected[index])) ? expected : undefined;
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function readActiveReasoningMetadata(
@@ -634,10 +551,10 @@ export function readActiveReasoningMetadata(
   const trigger = visibleTriggers[0]!;
   const currentEffort = trigger.getAttribute("data-selected-reasoning-effort")?.trim();
   if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
-  const modelId = readSelectedReasoningModelId(trigger);
-  if (!modelId) return undefined;
-  const supportedEfforts = readReasoningModelEfforts(findRendererQueryClients(reactRootFiber), modelId);
-  return supportedEfforts ? { currentEffort, modelId, supportedEfforts } : undefined;
+  const visibleLabel = readVisibleReasoningModelLabel(trigger, isVisible);
+  if (!visibleLabel) return undefined;
+  const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabel);
+  return match ? { currentEffort, modelId: match.modelId, supportedEfforts: match.supportedEfforts } : undefined;
 }
 
 export function decideReasoningAdjustment(
@@ -1043,10 +960,11 @@ export class CodexMicroRendererBridge {
       const readBoundedOwnDataArray = (${readBoundedOwnDataArray.toString()});
       const isStructuredCloneSafePlainData = (${isStructuredCloneSafePlainData.toString()});
       const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
+      const normalizeReasoningModelLabel = (${normalizeReasoningModelLabel.toString()});
       const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
-      const readSelectedReasoningModelId = (${readSelectedReasoningModelId.toString()});
+      const readVisibleReasoningModelLabel = (${readVisibleReasoningModelLabel.toString()});
       const findRendererQueryClients = (${findRendererQueryClients.toString()});
-      const readReasoningModelEfforts = (${readReasoningModelEfforts.toString()});
+      const readReasoningModelCatalogMatch = (${readReasoningModelCatalogMatch.toString()});
       const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
       const decideReasoningAdjustment = (${decideReasoningAdjustment.toString()});
       const readLiveMetadata = () => {

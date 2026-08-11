@@ -61,6 +61,7 @@ function createGuardedRendererHarness(options: {
       getAll: () => [{
         queryKey: ["models", "list", "local", "chatgpt", 100],
         state: { data: { data: [{
+          displayName: modelId === "gpt-5.6-sol" ? "GPT-5.6-Sol" : modelId,
           model: modelId,
           supportedReasoningEfforts: supportedEfforts.map((reasoningEffort) => ({ reasoningEffort }))
         }] } }
@@ -71,21 +72,32 @@ function createGuardedRendererHarness(options: {
   const root = {
     "__reactContainer$test": { memoizedProps: { value: queryClient }, child: null, sibling: null }
   };
-  const trigger = () => ({
-    isConnected: true,
-    getClientRects: () => ({ length: 1 }),
-    getAttribute: (name: string) => {
-      if (metadataReadsFail && name === "data-selected-reasoning-effort") {
-        throw new Error("metadata read failed");
+  const trigger = () => {
+    const result: Record<string, any> = {
+      isConnected: true,
+      getClientRects: () => ({ length: 1 }),
+      getAttribute: (name: string) => {
+        if (metadataReadsFail && name === "data-selected-reasoning-effort") {
+          throw new Error("metadata read failed");
+        }
+        return ({
+          "data-codex-intelligence-trigger": "true",
+          "data-composer-navigation-target": "reasoning",
+          "data-selected-reasoning-effort": currentEffort ?? null
+        })[name] ?? null;
       }
-      return ({
-        "data-codex-intelligence-trigger": "true",
-        "data-composer-navigation-target": "reasoning",
-        "data-selected-reasoning-effort": currentEffort ?? null
-      })[name] ?? null;
-    },
-    "__reactProps$test": { selectedValue: { props: { model: modelId } } }
-  });
+    };
+    const label = {
+      isConnected: true,
+      getClientRects: () => ({ length: 1 }),
+      getAttribute: () => null,
+      parentElement: result,
+      children: [],
+      textContent: modelId === "gpt-5.6-sol" ? "5.6 Sol" : modelId
+    };
+    result.querySelectorAll = (selector: string) => selector === "*" ? [label] : [];
+    return result;
+  };
   const triggers = Array.from({ length: options.visibleTriggerCount ?? 1 }, trigger);
   const document = {
     getElementById: (id: string) => id === "root" ? root : null,
@@ -282,7 +294,7 @@ test("reasoning adjustment decisions block only a restricted next Ultra step", (
   assert.equal(decide("increase", { includeUltra: false }, "high", ["low", "medium", "high", "xhigh"]), "applied");
 });
 
-test("active reasoning metadata uses the one visible composer and its current selectedValue model", () => {
+test("active reasoning metadata resolves the unique visible reasoning model label", () => {
   const candidate = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as unknown;
   assert.equal(typeof candidate, "function");
   const read = candidate as (
@@ -290,13 +302,21 @@ test("active reasoning metadata uses the one visible composer and its current se
     reactRootFiber: unknown,
     isVisible: (element: Record<string, unknown>) => boolean
   ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
-  const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const efforts = ["medium", "low", "high", "xhigh", "max", "ultra"];
   const modelsQuery = {
     queryKey: ["models", "list", "local", "chatgpt", 100],
-    state: { data: { data: [{
-      model: "gpt-5.6-sol",
-      supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
-    }] } }
+    state: { data: { data: [
+      {
+        displayName: "GPT-5.3-Codex-Spark",
+        model: "gpt-5.3-codex-spark",
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort }))
+      },
+      {
+        displayName: "GPT-5.6-Sol",
+        model: "gpt-5.6-sol",
+        supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
+      }
+    ] } }
   };
   const queryClient = {
     getQueryCache: () => ({ getAll: () => [modelsQuery] }),
@@ -312,24 +332,40 @@ test("active reasoning metadata uses the one visible composer and its current se
     getAttribute: (name: string) => ({
       "data-codex-intelligence-trigger": "true",
       "data-composer-navigation-target": "reasoning",
-      "data-selected-reasoning-effort": " max "
+      "data-selected-reasoning-effort": " high "
     })[name] ?? null,
-    "__reactProps$live": {
-      children: [
-        {
-          props: {
-            className: "measurement",
-            selectedValue: { props: { model: "gpt-5.3-codex-spark" } }
-          }
-        },
-        { props: { "aria-hidden": "true", selectedValue: { props: { model: "stale-hidden-model" } } } },
-        { props: { selectedValue: { nested: { props: { model: "gpt-5.6-sol" } } } } }
-      ]
-    }
+    "__reactProps$live": { selectedValue: { props: { model: "gpt-5.3-codex-spark" } } }
   };
+  const measurement = {
+    visible: true,
+    parentElement: trigger,
+    children: [{}],
+    getAttribute: (name: string) => name === "class" ? "ModelPickerTriggerMeasurement_live" :
+      name === "aria-hidden" ? "true" : null
+  };
+  const hiddenLabel = {
+    visible: true,
+    parentElement: measurement,
+    children: [],
+    textContent: "5.3 Codex Spark",
+    getAttribute: () => null
+  };
+  const visibleLabel = {
+    visible: true,
+    parentElement: trigger,
+    children: [],
+    textContent: "5.6 Sol",
+    getAttribute: () => null
+  };
+  Object.assign(trigger, {
+    querySelectorAll: (selector: string) => {
+      assert.equal(selector, "*");
+      return [measurement, hiddenLabel, visibleLabel];
+    }
+  });
 
   assert.deepEqual(read([trigger], reactRootFiber, (element) => element.visible === true), {
-    currentEffort: "max",
+    currentEffort: "high",
     modelId: "gpt-5.6-sol",
     supportedEfforts: efforts
   });
@@ -342,486 +378,212 @@ test("active reasoning metadata uses the one visible composer and its current se
   ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
 });
 
-test("reasoning metadata reads the unique visible Codex sibling model when selectedValue has no model", () => {
-  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
-    element: Record<string, unknown>
-  ) => string | undefined;
-  const liveModel = "gpt-5.3-codex-spark";
-  const trigger = {
-    getAttribute: () => null,
-    "__reactProps$live": {
-      children: [
-        null,
-        [
-          {
-            props: {
-              children: [{
-                props: {
-                  children: [{ props: { children: { props: { model: liveModel } } } }]
-                }
-              }]
-            }
-          },
-          { props: { selectedValue: "high" } }
-        ]
-      ]
-    }
-  };
-
-  assert.equal(readModelId(trigger), liveModel);
-});
-
-test("reasoning sibling model candidates fail closed on ambiguity and unsafe data", () => {
-  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
-    element: Record<string, unknown>
-  ) => string | undefined;
-  const liveModel = "gpt-5.3-codex-spark";
-  const read = (props: unknown) => readModelId({ getAttribute: () => null, "__reactProps$live": props });
-  const sibling = (model: unknown) => ({ props: { children: { props: { model } } } });
-  const currentShape = (siblings: unknown[]) => ({
-    children: [null, [...siblings, { props: { selectedValue: "high" } }]]
-  });
-
-  assert.equal(read({
-    selectedValue: { props: { model: liveModel } },
-    ...currentShape([sibling(liveModel)])
-  }), liveModel, "the legacy selectedValue and current sibling may agree");
-  assert.equal(read({
-    selectedValue: { props: { model: "gpt-5.6-sol" } }, ...currentShape([sibling(liveModel)])
-  }), undefined, "conflicting legacy and sibling models are ambiguous");
-  assert.equal(read(currentShape([sibling(liveModel), sibling("gpt-5.6-sol")])), undefined,
-    "multiple visible sibling models are ambiguous");
-  assert.equal(read(currentShape([sibling(liveModel), sibling(liveModel)])), undefined,
-    "distinct visible sibling nodes are ambiguous even when their model IDs agree");
-  assert.equal(read(currentShape([
-    sibling(liveModel), { props: { hidden: true, children: { props: { model: "stale-model" } } } }
-  ])), liveModel, "hidden sibling candidates are excluded");
-  assert.equal(read(currentShape([
-    { props: { hidden: true, children: { props: { model: liveModel } } } }
-  ])), undefined, "hidden-only sibling candidates cannot authorize");
-  assert.equal(read(currentShape([
-    { props: { className: "measurement", children: { props: { model: liveModel } } } }
-  ])), undefined,
-    "measurement-only candidates are excluded");
-
-  assert.equal(read({ children: [sibling(liveModel)] }), undefined,
-    "a current-shape sibling model requires a local selectedValue anchor");
-  assert.equal(read({ props: { model: liveModel } }), undefined,
-    "a direct props.model is not a current-shape candidate");
-  assert.equal(read({
-    children: [{ props: { selectedValue: "high" } }],
-    unrelated: { deeply: { props: { model: liveModel } } }
-  }), undefined, "an unrelated nested model cannot use a global selectedValue anchor");
-  assert.equal(read({
-    children: [
-      sibling(liveModel),
-      { props: { children: [{ props: { selectedValue: "high" } }] } }
-    ]
-  }), undefined, "a model must share the selectedValue anchor's nearest children group");
-
-  const reactElement = { $$typeof: Symbol.for("react.element"), props: { onClick: () => {} } };
-  assert.equal(read(currentShape([
-    sibling(liveModel), { props: { hidden: true, children: reactElement } }
-  ])), liveModel, "hidden React element wrappers are excluded without recursive validation");
-  assert.equal(read(currentShape([
-    sibling(liveModel), { props: { className: "measurement", children: reactElement } }
-  ])), liveModel, "measurement React element wrappers are excluded without recursive validation");
-
-  let hiddenProxyDescriptorTraps = 0;
-  let hiddenProxyGetterReads = 0;
-  const hiddenProxyTarget: Record<string, unknown> = { props: { hidden: true } };
-  Object.defineProperty(hiddenProxyTarget, "model", {
-    enumerable: true,
-    get() { hiddenProxyGetterReads++; return "hidden-model"; }
-  });
-  const hiddenProxy = new Proxy(hiddenProxyTarget, {
-    getOwnPropertyDescriptor(target, key) {
-      hiddenProxyDescriptorTraps++;
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    }
-  });
-  assert.equal(read(currentShape([sibling(liveModel), hiddenProxy])), liveModel,
-    "a hidden proxy branch is excluded and cannot authorize itself");
-  assert.equal(hiddenProxyGetterReads, 0, "hidden proxy inspection must not invoke property getters");
-  assert.ok(hiddenProxyDescriptorTraps > 0 && hiddenProxyDescriptorTraps <= 32,
-    "proxy descriptor traps are bounded even though reflection cannot avoid them entirely");
-
-  let accessorReads = 0;
-  const accessorProps: Record<string, unknown> = {};
-  Object.defineProperty(accessorProps, "model", {
-    enumerable: true,
-    get() { accessorReads++; return liveModel; }
-  });
-  assert.equal(read(currentShape([{ props: accessorProps }])), undefined);
-  assert.equal(accessorReads, 0, "sibling candidates must not invoke model accessors");
-  assert.equal(read(currentShape([{ props: new Proxy({ model: liveModel }, {}) }])), undefined,
-    "proxy-backed sibling candidates cannot authorize");
-  assert.equal(read(currentShape([sibling(` ${liveModel}`)])), undefined,
-    "malformed sibling model IDs cannot authorize");
-
-  const overDepth: Record<string, unknown> = {};
-  let branch = overDepth;
-  for (let depth = 0; depth < 33; depth++) {
-    const children: Record<string, unknown>[] = [{}];
-    branch.children = children;
-    branch = children[0]!;
-  }
-  branch.props = { model: liveModel };
-  assert.equal(read(overDepth), undefined, "sibling candidates beyond the depth bound cannot authorize");
-
-  const overNodes: Record<string, unknown> = { children: [] };
-  const nodes = overNodes.children as Record<string, unknown>[];
-  for (let index = 0; index < 3000; index++) nodes.push({});
-  nodes.push({ props: { model: liveModel } });
-  assert.equal(read(overNodes), undefined, "sibling candidates beyond the node bound cannot authorize");
-});
-
-test("active reasoning metadata cannot use an unanchored props.model to select matching query data", () => {
-  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
-    element: Record<string, unknown>
-  ) => string | undefined;
+test("visible reasoning model labels and catalog records fail closed on ambiguity and unsafe data", () => {
   const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
-    elements: Iterable<Record<string, unknown>>,
+    elements: Iterable<Record<string, any>>,
     reactRootFiber: unknown,
-    isVisible: (element: Record<string, unknown>) => boolean
+    isVisible: (element: Record<string, any>) => boolean
   ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
-  const wrongModel = "gpt-5.3-codex-spark";
-  const queryClient = {
-    getQueryCache: () => ({ getAll: () => [{
-      queryKey: ["models", "list", "local", "chatgpt", 100],
-      state: { data: { data: [{
-        model: wrongModel,
-        supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({ reasoningEffort }))
-      }] } }
-    }] }),
-    getQueryData: () => undefined
-  };
-  const trigger = {
-    visible: true,
-    getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "high" : null,
-    "__reactProps$live": {
-      children: [{ props: { selectedValue: "high" } }],
-      unrelated: { deeply: { props: { model: wrongModel } } }
-    }
-  };
-
-  assert.equal(readModelId(trigger), undefined, "the wrong model must not become an active candidate");
-  assert.equal(read([trigger], { memoizedProps: { value: queryClient }, child: null, sibling: null },
-    (element) => element.visible === true), undefined);
-});
-
-test("active reasoning metadata fails closed on missing, malformed, duplicate, or ambiguous model data", () => {
-  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
-    elements: Iterable<Record<string, unknown>>,
-    reactRootFiber: unknown,
-    isVisible: (element: Record<string, unknown>) => boolean
-  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
-  assert.equal(typeof read, "function");
-  const makeTrigger = (props: unknown = { selectedValue: { props: { model: "gpt-5.6-sol" } } }) => ({
-    visible: true,
-    getAttribute: (name: string) => ({
-      "data-codex-intelligence-trigger": "true",
-      "data-composer-navigation-target": "reasoning",
-      "data-selected-reasoning-effort": "high"
-    })[name] ?? null,
-    "__reactProps$test": props
-  });
-  const makeRoot = (models: unknown[], extraQueries: unknown[] = []) => {
-    const query = {
-      queryKey: ["models", "list", "local", "chatgpt", 100],
-      state: { data: { data: models } }
-    };
+  const visible = (element: Record<string, any>) => element.visible === true &&
+    element.display !== "none" && element.visibility !== "hidden";
+  const record = (
+    displayName: unknown = "GPT-5.6-Sol",
+    model: unknown = "gpt-5.6-sol",
+    efforts: unknown = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }))
+  ) => ({ displayName, model, supportedReasoningEfforts: efforts });
+  const root = (records: unknown[], extraQueries: unknown[] = []) => {
     const queryClient = {
-      getQueryCache: () => ({ getAll: () => [query, ...extraQueries] }),
+      getQueryCache: () => ({ getAll: () => [{
+        queryKey: ["models", "list", "local", "chatgpt", 100],
+        state: { data: { data: records } }
+      }, ...extraQueries] }),
       getQueryData: () => undefined
     };
     return { memoizedProps: { value: queryClient }, child: null, sibling: null };
   };
-  const model = (efforts: unknown[], id = "gpt-5.6-sol") => ({
-    model: id,
-    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
-  });
-  const visible = (element: Record<string, unknown>) => element.visible === true;
-
-  const pendingQuery = {
-    queryKey: ["models", "list", "local", "no-auth", 100],
-    state: { data: undefined, fetchStatus: "fetching", status: "pending" }
-  };
-  assert.deepEqual(
-    read([makeTrigger()], makeRoot([model(["low", "high", "ultra"])], [pendingQuery]), visible),
-    {
-      currentEffort: "high",
-      modelId: "gpt-5.6-sol",
-      supportedEfforts: ["low", "high", "ultra"]
-    },
-    "a pending models/list sibling with no data does not hide valid live metadata"
-  );
-
-  const overDepthProps: Record<string, any> = {
-    selectedValue: { props: { model: "gpt-5.6-sol" } }
-  };
-  let overDepthBranch = overDepthProps;
-  for (let depth = 0; depth < 33; depth++) {
-    overDepthBranch.nested = {};
-    overDepthBranch = overDepthBranch.nested;
-  }
-  overDepthBranch.selectedValue = { props: { model: "conflicting-model" } };
-  assert.equal(read([makeTrigger(overDepthProps)], makeRoot([model(["low", "high", "ultra"])]), visible), undefined,
-    "exhausting selectedValue depth cannot accept a partial shallow model");
-
-  assert.equal(read([makeTrigger({ selectedValue: { model: "gpt-5.6-sol" } })],
-    makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "the model ID must come from props.model");
-  assert.equal(read([makeTrigger({ selectedValue: { label: "missing model" } })],
-    makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "selectedValue must contain a model ID");
-  assert.equal(read([makeTrigger({
-    selectedValue: {
-      first: { props: { model: "gpt-5.6-sol" } },
-      second: { props: { model: "other-model" } }
+  const trigger = (
+    labels: Array<{
+      text: unknown;
+      ariaHidden?: boolean;
+      measurement?: boolean;
+      visible?: boolean;
+      display?: string;
+      visibility?: string;
+      depth?: number;
+    }>,
+    reactProps: unknown = undefined
+  ) => {
+    const result: Record<string, any> = {
+      visible: true,
+      getAttribute: (name: string) => ({
+        "data-codex-intelligence-trigger": "true",
+        "data-composer-navigation-target": "reasoning",
+        "data-selected-reasoning-effort": "high"
+      })[name] ?? null,
+      ...(reactProps === undefined ? {} : { "__reactProps$ignored": reactProps })
+    };
+    const descendants: Record<string, any>[] = [];
+    for (const label of labels) {
+      let parent = result;
+      const depth = label.depth ?? 0;
+      for (let index = 0; index < depth; index++) {
+        const wrapper: Record<string, any> = {
+          visible: true,
+          parentElement: parent,
+          children: [{}],
+          getAttribute: () => null
+        };
+        descendants.push(wrapper);
+        parent = wrapper;
+      }
+      if (label.ariaHidden || label.measurement) {
+        const wrapper: Record<string, any> = {
+          visible: true,
+          parentElement: parent,
+          children: [{}],
+          getAttribute: (name: string) => label.ariaHidden && name === "aria-hidden" ? "true" :
+            label.measurement && name === "class" ? "ModelPickerTriggerMeasurement_probe" : null
+        };
+        descendants.push(wrapper);
+        parent = wrapper;
+      }
+      descendants.push({
+        visible: label.visible ?? true,
+        display: label.display,
+        visibility: label.visibility,
+        parentElement: parent,
+        children: [],
+        textContent: label.text,
+        getAttribute: () => null
+      });
     }
-  })], makeRoot([model(["low", "high", "ultra"])]), visible), undefined, "disagreeing selectedValue models are ambiguous");
-  assert.equal(read([makeTrigger()], makeRoot([model(["low", "bad effort", "ultra"])]), visible), undefined,
-    "malformed effort identifiers are unavailable");
-  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "high", "ultra"])]), visible), undefined,
-    "duplicate effort identifiers are unavailable");
-  assert.equal(read([makeTrigger()], makeRoot([{
-    model: "gpt-5.6-sol",
-    supportedReasoningEfforts: ["low", "high", "ultra"]
-  }]), visible), undefined, "live effort metadata requires reasoningEffort records");
-  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "ultra"], "other-model")]), visible), undefined,
-    "the model list must exactly match the active model");
-  assert.equal(read([makeTrigger()], makeRoot([
-    model(["low", "high", "ultra"]), model(["low", "medium", "high"], "gpt-5.6-sol")
-  ]), visible), undefined, "duplicate active model records are ambiguous");
+    result.querySelectorAll = (selector: string) => selector === "*" ? descendants : [];
+    return result;
+  };
+  const goodRoot = () => root([record()]);
+
+  assert.equal(read([trigger([])], goodRoot(), visible), undefined, "zero visible labels are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], goodRoot(), visible), undefined,
+    "multiple visible labels are unavailable");
+  assert.equal(read([trigger([{ text: "   " }])], goodRoot(), visible), undefined, "blank labels are ignored");
+  assert.equal(read([trigger([{ text: "5.6 Sol", display: "none" }])], goodRoot(), visible), undefined,
+    "display-none labels are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol", visibility: "hidden" }])], goodRoot(), visible), undefined,
+    "visibility-hidden labels are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol", ariaHidden: true }])], goodRoot(), visible), undefined,
+    "aria-hidden ancestors are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol", measurement: true }])], goodRoot(), visible), undefined,
+    "measurement ancestors are unavailable");
+  assert.equal(read([trigger([{ text: "x".repeat(129) }])], goodRoot(), visible), undefined,
+    "oversized labels are unavailable");
+  assert.equal(read([trigger([], { selectedValue: { props: { model: "gpt-5.6-sol" } } })], goodRoot(), visible),
+    undefined, "React-only model values cannot authorize");
+  assert.equal(read([trigger([{ text: "5.6 Sol", depth: 33 }])], goodRoot(), visible), undefined,
+    "DOM ancestor depth exhaustion is unavailable");
+  assert.equal(read([trigger(Array.from({ length: 257 }, () => ({ text: "" })))], goodRoot(), visible), undefined,
+    "DOM node exhaustion is unavailable");
+
+  assert.deepEqual(read([trigger([{ text: " gPt  5.6-sol " }])], goodRoot(), visible), {
+    currentEffort: "high",
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high", "ultra"]
+  }, "normalization permits only case, optional GPT, and space-hyphen equivalence");
+  assert.equal(read([trigger([{ text: "5.6 Sol Plus" }])], goodRoot(), visible), undefined,
+    "substring matches are not accepted");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.7-Sol")]), visible), undefined,
+    "zero normalized catalog matches are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
+    record("GPT-5.6-Sol"), record("5.6 Sol", "gpt-5.6-sol-copy")
+  ]), visible), undefined, "multiple normalized catalog matches are unavailable");
   const duplicateQuery = {
     queryKey: ["models", "list", "remote", "chatgpt", 100],
-    state: { data: { data: [model(["low", "high", "ultra"])] } }
+    state: { data: { data: [record()] } }
   };
-  assert.deepEqual(
-    read([makeTrigger()], makeRoot([model(["low", "high", "ultra"])], [duplicateQuery]), visible)?.supportedEfforts,
-    ["low", "high", "ultra"],
-    "multiple valid models/list queries may agree exactly"
-  );
-  const disagreeingQuery = {
-    queryKey: ["models", "list", "remote", "chatgpt", 100],
-    state: { data: { data: [model(["low", "medium", "high", "ultra"])] } }
-  };
-  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "ultra"])], [disagreeingQuery]), visible), undefined,
-    "disagreeing valid models/list queries are ambiguous");
-  const malformedQuery = {
-    queryKey: ["models", "list", "remote", "chatgpt", 100],
-    state: { data: { data: { model: "gpt-5.6-sol" } } }
-  };
-  assert.equal(read([makeTrigger()], makeRoot([model(["low", "high", "ultra"])], [malformedQuery]), visible), undefined,
-    "data-present malformed models/list queries cannot silently authorize");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateQuery]), visible), undefined,
+    "matching records across queries remain ambiguous");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record(undefined, undefined, ["low", "high"])]), visible),
+    undefined, "raw string effort arrays are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([{ model: "gpt-5.6-sol",
+    supportedReasoningEfforts: [{ reasoningEffort: "high" }] }]), visible), undefined,
+    "missing display names are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.6-Sol! ")]), visible), undefined,
+    "malformed display names are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record(`GPT-${"x".repeat(129)}`)]), visible), undefined,
+    "oversized display names are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.6-Sol", "bad model")]), visible),
+    undefined, "malformed model IDs are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
+    record(), { model: "other-model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }
+  ]), visible), undefined, "malformed nonmatching records invalidate the catalog");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.6-Sol", "gpt-5.6-sol",
+    Array.from({ length: 65 }, (_, index) => ({ reasoningEffort: `effort-${index}` })))]), visible), undefined,
+    "oversized effort arrays are unavailable");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root(Array.from({ length: 1001 }, () => record())), visible),
+    undefined, "oversized model arrays are unavailable");
 
-  const truncatedRoot = makeRoot([model(["low", "high", "ultra"])]) as Record<string, any>;
-  let fiber = truncatedRoot;
+  let accessorReads = 0;
+  const accessorRecord: Record<string, unknown> = {
+    model: "gpt-5.6-sol",
+    supportedReasoningEfforts: [{ reasoningEffort: "high" }]
+  };
+  Object.defineProperty(accessorRecord, "displayName", {
+    enumerable: true,
+    get() { accessorReads++; return "GPT-5.6-Sol"; }
+  });
+  const accessorQueryKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(accessorQueryKey, "0", {
+    enumerable: true,
+    get() { accessorReads++; return "models"; }
+  });
+  const accessorQuery = { queryKey: accessorQueryKey, state: { data: { data: [record()] } } };
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([accessorRecord]), visible), undefined);
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [accessorQuery]), visible), undefined);
+  const accessorRecords: unknown[] = [record()];
+  Object.defineProperty(accessorRecords, "0", {
+    enumerable: true,
+    get() { accessorReads++; return record(); }
+  });
+  const accessorEfforts: unknown[] = [{ reasoningEffort: "low" }, { reasoningEffort: "high" }];
+  Object.defineProperty(accessorEfforts, "1", {
+    enumerable: true,
+    get() { accessorReads++; return { reasoningEffort: "high" }; }
+  });
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root(accessorRecords), visible), undefined);
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
+    record("GPT-5.6-Sol", "gpt-5.6-sol", accessorEfforts)
+  ]), visible), undefined);
+  assert.equal(accessorReads, 0, "catalog accessors are never invoked");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
+    new Proxy(record(), {})
+  ]), visible), undefined, "proxy-backed catalog records cannot authorize");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
+    record("GPT-5.6-Sol", "gpt-5.6-sol", new Proxy([{ reasoningEffort: "high" }], {}))
+  ]), visible), undefined, "proxy-backed effort arrays cannot authorize");
+
+  const pendingQuery = {
+    queryKey: ["models", "list", "pending", "chatgpt", 100],
+    state: { data: undefined }
+  };
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])],
+    root([record()], Array.from({ length: 30000 }, () => pendingQuery)), visible), undefined,
+    "query traversal exhaustion is unavailable");
+
+  const deepRecord: Record<string, unknown> = record();
+  let branch = deepRecord;
+  for (let depth = 0; depth < 33; depth++) {
+    branch.extra = {};
+    branch = branch.extra as Record<string, unknown>;
+  }
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([deepRecord]), visible), undefined,
+    "catalog property-depth exhaustion is unavailable");
+  const exhaustedRoot = goodRoot() as Record<string, any>;
+  let fiber = exhaustedRoot;
   for (let index = 0; index < 30000; index++) {
     fiber.child = {};
     fiber = fiber.child;
   }
-  assert.equal(read([makeTrigger()], truncatedRoot, visible), undefined,
-    "exhausting the bounded fiber traversal cannot return partial query metadata");
-});
-
-test("reasoning metadata uses only own data properties without invoking accessors", () => {
-  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
-    element: Record<string, unknown>
-  ) => string | undefined;
-  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
-    queryClients: Iterable<unknown>, modelId: string
-  ) => string[] | undefined;
-  const liveModel = "gpt-5.6-sol";
-  const effortRecords = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }));
-  let accessorReads = 0;
-
-  const reactPropsAccessor: Record<string, unknown> = {};
-  Object.defineProperty(reactPropsAccessor, "selectedValue", {
-    enumerable: true,
-    get() {
-      accessorReads++;
-      return { props: { model: liveModel } };
-    }
-  });
-  const modelAccessor: Record<string, unknown> = {};
-  Object.defineProperty(modelAccessor, "model", {
-    enumerable: true,
-    get() {
-      accessorReads++;
-      return liveModel;
-    }
-  });
-  const inheritedModel = Object.assign(Object.create({ model: liveModel }), { label: "inherited" });
-
-  const makeQueryClient = (record: unknown) => ({
-    getQueryCache: () => ({
-      getAll: () => [{
-        queryKey: ["models", "list", "local", "chatgpt", 100],
-        state: { data: { data: [record] } }
-      }]
-    }),
-    getQueryData: () => undefined
-  });
-  const supportedAccessor: Record<string, unknown> = { model: liveModel };
-  Object.defineProperty(supportedAccessor, "supportedReasoningEfforts", {
-    enumerable: true,
-    get() {
-      accessorReads++;
-      return effortRecords;
-    }
-  });
-  const effortAccessor: Record<string, unknown> = {};
-  Object.defineProperty(effortAccessor, "reasoningEffort", {
-    enumerable: true,
-    get() {
-      accessorReads++;
-      return "low";
-    }
-  });
-  const proxyRecord = new Proxy({ model: liveModel, supportedReasoningEfforts: effortRecords }, {
-    getOwnPropertyDescriptor() { throw new Error("descriptor blocked"); }
-  });
-
-  const results = [
-    readModelId({ getAttribute: () => null, "__reactProps$test": reactPropsAccessor }),
-    readModelId({
-      getAttribute: () => null,
-      "__reactProps$test": { selectedValue: { props: modelAccessor } }
-    }),
-    readModelId({
-      getAttribute: () => null,
-      "__reactProps$test": { selectedValue: { props: inheritedModel } }
-    }),
-    readEfforts([makeQueryClient(Object.assign(Object.create({ model: liveModel }), {
-      supportedReasoningEfforts: effortRecords
-    }))], liveModel),
-    readEfforts([makeQueryClient(Object.assign(Object.create({ supportedReasoningEfforts: effortRecords }), {
-      model: liveModel
-    }))], liveModel),
-    readEfforts([makeQueryClient(supportedAccessor)], liveModel),
-    readEfforts([makeQueryClient({
-      model: liveModel,
-      supportedReasoningEfforts: [effortAccessor, { reasoningEffort: "high" }]
-    })], liveModel),
-    readEfforts([makeQueryClient({
-      model: liveModel,
-      supportedReasoningEfforts: [Object.create({ reasoningEffort: "low" }), { reasoningEffort: "high" }]
-    })], liveModel),
-    readEfforts([makeQueryClient(proxyRecord)], liveModel)
-  ];
-
-  assert.deepEqual(results, Array(results.length).fill(undefined));
-  assert.equal(accessorReads, 0, "metadata inspection must not execute accessors");
-});
-
-test("transparent proxy-backed reasoning metadata cannot authorize", () => {
-  const readModelId = Reflect.get(microBridgeModule, "readSelectedReasoningModelId") as (
-    element: Record<string, unknown>
-  ) => string | undefined;
-  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
-    queryClients: Iterable<unknown>, modelId: string
-  ) => string[] | undefined;
-  const liveModel = "gpt-5.6-sol";
-  const effortRecords = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }));
-  const makeQueryClient = (record: unknown) => ({
-    getQueryCache: () => ({
-      getAll: () => [{
-        queryKey: ["models", "list", "local", "chatgpt", 100],
-        state: { data: { data: [record] } }
-      }]
-    }),
-    getQueryData: () => undefined
-  });
-
-  const selectedModelProps = new Proxy({ model: liveModel }, {});
-  const modelRecord = new Proxy({ model: liveModel, supportedReasoningEfforts: effortRecords }, {});
-  const effortArray = new Proxy(effortRecords, {});
-  const results = [
-    readModelId({
-      getAttribute: () => null,
-      "__reactProps$test": { selectedValue: { props: selectedModelProps } }
-    }),
-    readEfforts([makeQueryClient(modelRecord)], liveModel),
-    readEfforts([makeQueryClient({ model: liveModel, supportedReasoningEfforts: effortArray })], liveModel)
-  ];
-
-  assert.deepEqual(results, [undefined, undefined, undefined]);
-});
-
-test("reasoning metadata arrays never invoke index accessors", () => {
-  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
-    queryClients: Iterable<unknown>, modelId: string
-  ) => string[] | undefined;
-  const liveModel = "gpt-5.6-sol";
-  const validEfforts = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }));
-  const validRecord = { model: liveModel, supportedReasoningEfforts: validEfforts };
-  let accessorReads = 0;
-  const makeQueryClient = (queryKey: unknown, records: unknown) => ({
-    getQueryCache: () => ({
-      getAll: () => [{ queryKey, state: { data: { data: records } } }]
-    }),
-    getQueryData: () => undefined
-  });
-
-  const accessorQueryKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
-  Object.defineProperty(accessorQueryKey, "0", {
-    enumerable: true,
-    configurable: true,
-    get() { accessorReads++; return "models"; }
-  });
-  const accessorRecords: unknown[] = [validRecord];
-  Object.defineProperty(accessorRecords, "0", {
-    enumerable: true,
-    configurable: true,
-    get() { accessorReads++; return validRecord; }
-  });
-  const accessorEfforts: unknown[] = [...validEfforts];
-  Object.defineProperty(accessorEfforts, "1", {
-    enumerable: true,
-    configurable: true,
-    get() { accessorReads++; return { reasoningEffort: "high" }; }
-  });
-
-  const results = [
-    readEfforts([makeQueryClient(accessorQueryKey, [validRecord])], liveModel),
-    readEfforts([makeQueryClient(["models", "list", "local", "chatgpt", 100], accessorRecords)], liveModel),
-    readEfforts([makeQueryClient(["models", "list", "local", "chatgpt", 100], [{
-      model: liveModel,
-      supportedReasoningEfforts: accessorEfforts
-    }])], liveModel)
-  ];
-
-  assert.equal(accessorReads, 0, "query keys, model arrays, and effort arrays must use data descriptors");
-  assert.deepEqual(results, [undefined, undefined, undefined]);
-});
-
-test("oversized reasoning effort arrays fail before visiting later indices", () => {
-  const readEfforts = Reflect.get(microBridgeModule, "readReasoningModelEfforts") as (
-    queryClients: Iterable<unknown>, modelId: string
-  ) => string[] | undefined;
-  const liveModel = "gpt-5.6-sol";
-  const oversized = Array.from({ length: 64 }, (_, index) => ({ reasoningEffort: `effort-${index}` }));
-  let hostileReads = 0;
-  Object.defineProperty(oversized, "64", {
-    enumerable: true,
-    configurable: true,
-    get() {
-      hostileReads++;
-      throw new Error("hostile late index");
-    }
-  });
-  const queryClient = {
-    getQueryCache: () => ({
-      getAll: () => [{
-        queryKey: ["models", "list", "local", "chatgpt", 100],
-        state: { data: { data: [{ model: liveModel, supportedReasoningEfforts: oversized }] } }
-      }]
-    }),
-    getQueryData: () => undefined
-  };
-
-  assert.equal(readEfforts([queryClient], liveModel), undefined);
-  assert.equal(hostileReads, 0, "the >64 bound must be checked before any effort index traversal");
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], exhaustedRoot, visible), undefined,
+    "fiber traversal exhaustion is unavailable");
 });
 
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {
@@ -1120,7 +882,9 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
     assert.match(expression,
       /\[data-codex-intelligence-trigger="true"\]\[data-composer-navigation-target="reasoning"\]/);
     assert.match(expression, /data-selected-reasoning-effort/);
-    assert.match(expression, /__reactProps\$/);
+    assert.match(expression, /querySelectorAll\?\.\(["']\*["']\)/);
+    assert.match(expression, /displayName/);
+    assert.doesNotMatch(expression, /selectedValue/);
     assert.match(expression, /seen\.size\s*<\s*(?:30000|3e4)/);
     assert.match(expression, /readOwnDataProperty\(query,\s*["']queryKey["']\)/);
     assert.match(expression, /queryKey\[0\][^;]*["']models["']/);
@@ -1344,10 +1108,11 @@ test("guarded reasoning expression serializes every helper dependency into rende
     "readBoundedOwnDataArray",
     "isStructuredCloneSafePlainData",
     "normalizeReasoningEffortOrder",
+    "normalizeReasoningModelLabel",
     "isVisibleReasoningTrigger",
-    "readSelectedReasoningModelId",
+    "readVisibleReasoningModelLabel",
     "findRendererQueryClients",
-    "readReasoningModelEfforts",
+    "readReasoningModelCatalogMatch",
     "readActiveReasoningMetadata",
     "decideReasoningAdjustment",
     "resolveCommandRunner"
