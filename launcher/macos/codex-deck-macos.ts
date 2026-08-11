@@ -484,11 +484,7 @@ set -u
 
 runtime=${shellQuote(runtimePath)}
 typeset -a candidates
-candidates=()
-if [[ -n "\${CODEX_DECK_APP_PATH:-}" ]]; then
-  candidates+=("\${CODEX_DECK_APP_PATH%/}/Contents/Resources/cua_node/bin/node")
-fi
-candidates+=(
+candidates=(
   /opt/homebrew/bin/node
   /usr/local/bin/node
   /Applications/Codex.app/Contents/Resources/cua_node/bin/node
@@ -514,6 +510,31 @@ for node_candidate in "\${candidates[@]}"; do
   launch_with_node "$node_candidate"
 done
 
+spotlight_pid=""
+spotlight_results=""
+cleanup_spotlight() {
+  trap - TERM INT HUP EXIT
+  if [[ -n "$spotlight_pid" ]] && /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  if [[ -n "$spotlight_pid" ]]; then
+    wait "$spotlight_pid" 2>/dev/null
+    spotlight_pid=""
+  fi
+  if [[ -n "$spotlight_results" ]]; then
+    /bin/rm -f "$spotlight_results"
+    spotlight_results=""
+  fi
+}
+trap 'cleanup_spotlight; exit 143' TERM
+trap 'cleanup_spotlight; exit 130' INT
+trap 'cleanup_spotlight; exit 129' HUP
+trap cleanup_spotlight EXIT
+
 spotlight_results=$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/codex-deck-mdfind.XXXXXX" 2>/dev/null) || spotlight_results=""
 if [[ -n "$spotlight_results" ]]; then
   /usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' > "$spotlight_results" 2>/dev/null &
@@ -532,6 +553,7 @@ if [[ -n "$spotlight_results" ]]; then
   fi
   wait "$spotlight_pid" 2>/dev/null
   spotlight_status=$?
+  spotlight_pid=""
   typeset -a spotlight_candidates
   spotlight_candidates=()
   if [[ "$spotlight_status" -eq 0 ]]; then
@@ -541,10 +563,12 @@ if [[ -n "$spotlight_results" ]]; then
     done < "$spotlight_results"
   fi
   /bin/rm -f "$spotlight_results"
+  spotlight_results=""
   for node_candidate in "\${spotlight_candidates[@]}"; do
     launch_with_node "$node_candidate"
   done
 fi
+trap - TERM INT HUP EXIT
 
 print -r -- "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) [launcher] Node.js 20 or newer was not found; watcher did not start." >> ${shellQuote(WATCHER_LOG_PATH)}
 exit 78

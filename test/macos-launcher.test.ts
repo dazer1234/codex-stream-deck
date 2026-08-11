@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile as execFileCallback } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -52,7 +52,7 @@ test("LaunchAgent uses a dynamic Node resolver instead of pinning an NVM version
   assert.match(launcher, /\/Applications\/ChatGPT\.app\/Contents\/Resources\/cua_node\/bin\/node/);
   assert.match(launcher, /"\$HOME"\/Applications\/Codex\.app\/Contents\/Resources\/cua_node\/bin\/node/);
   assert.match(launcher, /"\$HOME"\/Applications\/ChatGPT\.app\/Contents\/Resources\/cua_node\/bin\/node/);
-  assert.match(launcher, /CODEX_DECK_APP_PATH/);
+  assert.doesNotMatch(launcher, /CODEX_DECK_APP_PATH/);
   assert.ok(launcher.indexOf("/usr/bin/mdfind") > launcher.indexOf('for node_candidate in "${candidates[@]}"'));
   assert.match(launcher, /\/bin\/kill -KILL/);
   assert.match(launcher, /Node\.js 20 or newer/);
@@ -99,14 +99,14 @@ sleep 10
   await assert.rejects(access(mdfindMarker));
 });
 
-test("watcher launcher accepts an explicit relocated Codex app without starting Spotlight", {
+test("watcher launcher accepts a per-user Codex app without starting Spotlight", {
   skip: process.platform !== "darwin"
 }, async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "codex-deck-relocated-"));
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-user-app-"));
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const home = join(root, "home");
-  const appPath = join(root, "Renamed Codex.app");
+  const appPath = join(home, "Applications", "Codex.app");
   const fakeNode = join(appPath, "Contents", "Resources", "cua_node", "bin", "node");
   const fakeMdfind = join(root, "mdfind");
   const mdfindMarker = join(root, "mdfind-called");
@@ -117,22 +117,26 @@ if [[ "$1" == "--version" ]]; then
   print -r -- "v20.0.0"
   exit 0
 fi
-print -r -- "relocated-node-started"
+  print -r -- "user-app-node-started"
 `);
   await writeFile(fakeMdfind, `#!/bin/zsh
 touch '${mdfindMarker}'
 sleep 10
 `);
   const launcher = buildWatcherLaunchScript(join(root, "missing-runtime.mjs"))
+    .replace("  /opt/homebrew/bin/node", `  ${join(root, "missing-homebrew-node")}`)
+    .replace("  /usr/local/bin/node", `  ${join(root, "missing-local-node")}`)
+    .replace("  /Applications/Codex.app", `  ${join(root, "missing-codex.app")}`)
+    .replace("  /Applications/ChatGPT.app", `  ${join(root, "missing-chatgpt.app")}`)
     .replaceAll("/usr/bin/mdfind", fakeMdfind);
   await writeFile(launcherPath, launcher);
   await Promise.all([chmod(fakeNode, 0o755), chmod(fakeMdfind, 0o755), chmod(launcherPath, 0o755)]);
 
   const { stdout } = await execFile("/bin/zsh", [launcherPath], {
-    env: { ...process.env, CODEX_DECK_APP_PATH: appPath, HOME: home },
+    env: { ...process.env, HOME: home },
     timeout: 1500
   });
-  assert.equal(stdout, "relocated-node-started\n");
+  assert.equal(stdout, "user-app-node-started\n");
   await assert.rejects(access(mdfindMarker));
 });
 
@@ -166,7 +170,7 @@ while true; do :; done
   const startedAt = Date.now();
   await assert.rejects(
     execFile("/bin/zsh", [launcherPath], {
-      env: { ...process.env, CODEX_DECK_APP_PATH: "", HOME: home },
+      env: { ...process.env, HOME: home },
       timeout: 4000
     }),
     (error: unknown) => {
@@ -176,6 +180,73 @@ while true; do :; done
   );
   assert.ok(Date.now() - startedAt < 3500);
   await access(mdfindMarker);
+});
+
+test("watcher launcher reaps Spotlight and removes its temp file when signaled", {
+  skip: process.platform !== "darwin"
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-signal-"));
+  const home = join(root, "home");
+  const fakeMdfind = join(root, "mdfind");
+  const mdfindPidPath = join(root, "mdfind.pid");
+  const launcherPath = join(root, "watcher-launch.sh");
+  let mdfindPid: number | undefined;
+  let launcherProcess: ReturnType<typeof spawn> | undefined;
+  t.after(async () => {
+    launcherProcess?.kill("SIGKILL");
+    if (mdfindPid != null) {
+      try {
+        process.kill(mdfindPid, "SIGKILL");
+      } catch {}
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await mkdir(home, { recursive: true });
+  await writeFile(fakeMdfind, `#!/bin/zsh
+trap '' TERM HUP INT
+print -r -- "$$" > '${mdfindPidPath}'
+while true; do :; done
+`);
+  let launcher = buildWatcherLaunchScript(join(root, "missing-runtime.mjs"));
+  launcher = launcher
+    .replaceAll("/opt/homebrew/bin/node", join(root, "missing-homebrew-node"))
+    .replaceAll("/usr/local/bin/node", join(root, "missing-local-node"))
+    .replaceAll("/Applications/Codex.app", join(root, "missing-codex.app"))
+    .replaceAll("/Applications/ChatGPT.app", join(root, "missing-chatgpt.app"))
+    .replaceAll("/usr/bin/mdfind", fakeMdfind)
+    .replace(/>> '[^'\n]*watcher\.log'/, `>> '${join(root, "watcher.log")}'`);
+  await writeFile(launcherPath, launcher);
+  await Promise.all([chmod(fakeMdfind, 0o755), chmod(launcherPath, 0o755)]);
+
+  const child = spawn("/bin/zsh", [launcherPath], {
+    env: { ...process.env, HOME: home, TMPDIR: root },
+    stdio: "ignore"
+  });
+  launcherProcess = child;
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("exit", () => resolve());
+    child.once("error", reject);
+  });
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      mdfindPid = Number.parseInt(await readFile(mdfindPidPath, "utf8"), 10);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  assert.ok(mdfindPid != null && Number.isSafeInteger(mdfindPid));
+  assert.ok((await readdir(root)).some((name) => name.startsWith("codex-deck-mdfind.")));
+
+  child.kill("SIGTERM");
+  await Promise.race([
+    exited,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("launcher did not exit after SIGTERM")), 1500))
+  ]);
+  assert.throws(() => process.kill(mdfindPid!, 0), { code: "ESRCH" });
+  mdfindPid = undefined;
+  assert.equal((await readdir(root)).some((name) => name.startsWith("codex-deck-mdfind.")), false);
 });
 
 test("manual and double-click launch resolve Node outside an interactive shell", async () => {
