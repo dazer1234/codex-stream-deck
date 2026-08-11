@@ -27,6 +27,24 @@ export type RelayServerConfig = {
   discovery?: { enabled: boolean };
 };
 
+const RELAY_MAX_PAYLOAD_BYTES = 64 * 1024;
+
+export function encodeRelaySnapshotMessage(message: RelaySnapshotMessage): string {
+  const encoded = JSON.stringify(message);
+  if (Buffer.byteLength(encoded, "utf8") < RELAY_MAX_PAYLOAD_BYTES) return encoded;
+  const {
+    activeModelId: _activeModelId,
+    activeModelDisplayName: _activeModelDisplayName,
+    modelCatalog: _modelCatalog,
+    ...snapshot
+  } = message.snapshot;
+  const bounded = JSON.stringify({ ...message, snapshot });
+  if (Buffer.byteLength(bounded, "utf8") >= RELAY_MAX_PAYLOAD_BYTES) {
+    throw new Error("Relay snapshot exceeds the 64 KiB transport limit without its optional model catalog.");
+  }
+  return bounded;
+}
+
 type RelayControl = Pick<CodexMicroRendererBridge,
   "refresh" | "sendAgent" | "sendAction" | "sendJoystick" | "sendEncoder" | "adjustReasoning" | "runKeycap" |
   "refreshUsage" | "consumeRateLimitReset">;
@@ -295,7 +313,7 @@ export class CodexRelayServer {
     this.degraded = false;
     this.lastSnapshotError = "";
     this.lastSnapshotErrorAt = 0;
-    const encoded = JSON.stringify(message);
+    const encoded = encodeRelaySnapshotMessage(message);
     for (const socket of only ? [only] : this.authenticated) {
       if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
     }

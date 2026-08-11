@@ -339,7 +339,7 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   if (!(hasActiveModelId === hasActiveModelDisplayName && hasActiveModelId === hasModelCatalog)) return false;
   if (hasModelCatalog && snapshot.reasoningEffort === undefined) return false;
   if (hasModelCatalog && !isActiveModelCatalog(
-    snapshot.activeModelId, snapshot.activeModelDisplayName, snapshot.modelCatalog
+    snapshot.activeModelId, snapshot.activeModelDisplayName, snapshot.reasoningEffort, snapshot.modelCatalog
   )) return false;
   if (snapshot.usage !== undefined && !isUsageSnapshot(snapshot.usage)) return false;
   if (snapshot.hostSessions === undefined) return true;
@@ -351,8 +351,14 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   );
 }
 
-function isActiveModelCatalog(activeModelId: unknown, activeDisplayName: unknown, value: unknown): boolean {
-  if (!isSafeReasoningIdentifier(activeModelId, 128) || !boundedNonblankString(activeDisplayName, 80)) return false;
+function isActiveModelCatalog(
+  activeModelId: unknown,
+  activeDisplayName: unknown,
+  activeReasoningEffort: unknown,
+  value: unknown
+): boolean {
+  if (!isSafeReasoningIdentifier(activeModelId, 128) || !boundedNonblankString(activeDisplayName, 80) ||
+      !isSafeReasoningIdentifier(activeReasoningEffort)) return false;
   const catalog = snapshotOwnDataArray(value, 32);
   if (!catalog || catalog.length === 0) return false;
   const seenModels = new Set<string>();
@@ -371,7 +377,7 @@ function isActiveModelCatalog(activeModelId: unknown, activeDisplayName: unknown
     }
     seenModels.add(entry.modelId);
     if (entry.modelId === activeModelId) {
-      if (entry.displayName !== activeDisplayName) return false;
+      if (entry.displayName !== activeDisplayName || !seenEfforts.has(activeReasoningEffort)) return false;
       activeMatch = true;
     }
   }

@@ -740,7 +740,7 @@ export function readActiveReasoningMetadata(
     if (!visibleLabels) return undefined;
     const modelCatalog = readReasoningModelCatalog(findRendererQueryClients(reactRootFiber));
     const match = modelCatalog && matchActiveReasoningModel(visibleLabels, modelCatalog);
-    return match ? {
+    return match && match.supportedReasoningEfforts.includes(currentEffort) ? {
       currentEffort,
       modelId: match.modelId,
       modelDisplayName: match.displayName,
@@ -1032,21 +1032,6 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   };
 })()`;
 
-const RELAY_SNAPSHOT_JSON_BUDGET_BYTES = 60 * 1024;
-
-export function boundModelCatalogForRelaySnapshot(snapshot: MicroSnapshot): MicroSnapshot {
-  try {
-    if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= RELAY_SNAPSHOT_JSON_BUDGET_BYTES) return snapshot;
-  } catch {}
-  const {
-    activeModelId: _activeModelId,
-    activeModelDisplayName: _activeModelDisplayName,
-    modelCatalog: _modelCatalog,
-    ...bounded
-  } = snapshot;
-  return bounded;
-}
-
 export class CodexMicroRendererBridge {
   private socket?: WebSocket;
   private nextId = 0;
@@ -1086,7 +1071,7 @@ export class CodexMicroRendererBridge {
     if (forceUsageRefresh && !hasValidNormalizedUsage(nativeSnapshot.usage)) {
       throw new Error("Codex usage refresh returned no valid rate-limit usage.");
     }
-    const snapshot = boundModelCatalogForRelaySnapshot(await this.sessionOwnership.annotate(nativeSnapshot));
+    const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
     this.lastSnapshot = snapshot;
     return snapshot;
   }

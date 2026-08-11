@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 import * as microBridgeModule from "../src/codex-micro-renderer-bridge.js";
+import * as relayServerModule from "../src/codex-relay-server.js";
 import { generate } from "selfsigned";
 import { CodexRelayClient, RELAY_SNAPSHOT_STALE_MS, resolveRelayHealth } from "../src/codex-relay-client.js";
 import { isAllowedRelayHost, isPrivateLanHost, privateLanAddresses } from "../src/relay-network.js";
@@ -455,6 +456,7 @@ test("relay snapshot parser strictly validates a complete active model catalog",
   }));
   maximumPacket.snapshot.activeModelId = "model-0";
   maximumPacket.snapshot.activeModelDisplayName = "Model 0";
+  maximumPacket.snapshot.reasoningEffort = "effort-0";
   assert.deepEqual(parseRelayServerMessage(maximumPacket), maximumPacket);
   assert.ok(Buffer.byteLength(JSON.stringify(maximumPacket), "utf8") < 64 * 1024);
 
@@ -468,6 +470,7 @@ test("relay snapshot parser strictly validates a complete active model catalog",
   add((candidate) => { delete candidate.snapshot.activeModelDisplayName; });
   add((candidate) => { delete candidate.snapshot.modelCatalog; });
   add((candidate) => { delete candidate.snapshot.reasoningEffort; });
+  add((candidate) => { candidate.snapshot.reasoningEffort = "stale-transition"; });
   add((candidate) => { candidate.snapshot.activeModelId = "missing-model"; });
   add((candidate) => { candidate.snapshot.activeModelDisplayName = "Wrong Name"; });
   add((candidate) => { candidate.snapshot.activeModelId = " bad-model"; });
@@ -515,11 +518,11 @@ test("relay snapshot parser strictly validates a complete active model catalog",
   assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(revokedEffortsPacket), null));
 });
 
-test("outbound catalog snapshots omit the atomic model tuple when the true maximal relay packet exceeds 64 KiB", () => {
-  const boundSnapshot = Reflect.get(microBridgeModule, "boundModelCatalogForRelaySnapshot") as (
-    value: MicroSnapshot
-  ) => MicroSnapshot;
-  assert.equal(typeof boundSnapshot, "function");
+test("local bridge retains a maximal catalog while relay encoding trims only its oversized transport tuple", async () => {
+  const encodeSnapshot = Reflect.get(relayServerModule, "encodeRelaySnapshotMessage") as (
+    value: unknown
+  ) => string;
+  assert.equal(typeof encodeSnapshot, "function");
   const uuid = "00000000-0000-4000-8000-000000000000";
   const threadKey = `${"a".repeat(32)}:${"b".repeat(32)}:${"c".repeat(32)}:${uuid}`;
   const efforts = Array.from({ length: 16 }, (_, index) =>
@@ -585,25 +588,62 @@ test("outbound catalog snapshots omit the atomic model tuple when the true maxim
     observedAt: Number.MAX_SAFE_INTEGER,
     snapshot: maximalSnapshot
   };
-  const smallSnapshot: MicroSnapshot = {
-    ...maximalSnapshot,
-    modelCatalog: [modelCatalog[0]!],
-    hostSessions: []
-  };
-  assert.equal(boundSnapshot(smallSnapshot), smallSnapshot,
-    "ordinary authoritative catalog snapshots retain their exact object and tuple");
   assert.ok(Buffer.byteLength(JSON.stringify(maximalPacket), "utf8") > 64 * 1024);
   assert.deepEqual(parseRelayServerMessage(maximalPacket), maximalPacket,
     "the parser keeps validating the full bounded protocol independently of transport size");
 
-  const boundedSnapshot = boundSnapshot(maximalSnapshot);
-  const boundedPacket = { ...maximalPacket, snapshot: boundedSnapshot };
-  assert.equal(boundedSnapshot.reasoningEffort, efforts[0]);
-  assert.equal(boundedSnapshot.activeModelId, undefined);
-  assert.equal(boundedSnapshot.activeModelDisplayName, undefined);
-  assert.equal(boundedSnapshot.modelCatalog, undefined);
-  assert.ok(Buffer.byteLength(JSON.stringify(boundedPacket), "utf8") < 64 * 1024);
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>() => Promise<T>;
+    sessionOwnership: { annotate: (value: MicroSnapshot) => Promise<MicroSnapshot> };
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(): Promise<T> => structuredClone(maximalSnapshot) as T;
+  testBridge.sessionOwnership = { annotate: async (value) => value };
+  const localSnapshot = await bridge.refresh();
+  assert.equal(localSnapshot.modelCatalog?.length, 32,
+    "the shared local bridge never sacrifices authoritative catalog state for relay transport");
+  assert.equal(localSnapshot.activeModelId, maximalSnapshot.activeModelId);
+
+  const encoded = encodeSnapshot(maximalPacket);
+  assert.ok(Buffer.byteLength(encoded, "utf8") < 64 * 1024);
+  const boundedPacket = JSON.parse(encoded) as typeof maximalPacket;
+  assert.equal(boundedPacket.snapshot.reasoningEffort, efforts[0]);
+  assert.equal(boundedPacket.snapshot.activeModelId, undefined);
+  assert.equal(boundedPacket.snapshot.activeModelDisplayName, undefined);
+  assert.equal(boundedPacket.snapshot.modelCatalog, undefined);
   assert.deepEqual(parseRelayServerMessage(boundedPacket), boundedPacket);
+
+  const port = await freePort();
+  const control = {
+    refresh: async () => maximalSnapshot,
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) },
+    maximalPacket.host as CodexHost,
+    control,
+    () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  try {
+    const messages = messageQueue(socket);
+    await onceOpen(socket);
+    socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+    assert.equal((await messages.next()).type, "ready");
+    const emitted = await messages.next();
+    assert.equal(emitted.type, "snapshot");
+    assert.ok(Buffer.byteLength(JSON.stringify(emitted), "utf8") < 64 * 1024);
+    assert.equal((emitted.snapshot as MicroSnapshot).modelCatalog, undefined);
+    assert.deepEqual(parseRelayServerMessage(emitted), emitted);
+  } finally {
+    socket.close();
+    await server.close();
+  }
 });
 
 test("relay parser bounds host identity and ready capabilities", () => {

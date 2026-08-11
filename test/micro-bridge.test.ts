@@ -1225,6 +1225,15 @@ test("model catalog exposes the complete bounded authoritative catalog and activ
     supportedEfforts: ["low", "medium", "high", "xhigh", "ultra"],
     modelCatalog: catalog
   });
+  trigger.getAttribute = (name: string) => ({
+    "data-codex-intelligence-trigger": "true",
+    "data-composer-navigation-target": "reasoning",
+    "data-selected-reasoning-effort": "stale-transition"
+  } as Record<string, string>)[name] ?? null;
+  assert.equal(readMetadata(
+    [trigger], { memoizedProps: { value: queryClient }, dependencies: null, child: null, sibling: null },
+    visible, () => false
+  ), undefined, "a stale visible effort outside the matched model's catalog fails closed");
 });
 
 test("model catalog rejects authority beyond public bounds or with conflicting complete records", () => {
