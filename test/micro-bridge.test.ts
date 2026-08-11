@@ -171,6 +171,7 @@ function createModelPresetHarness(options: {
   symbolProps?: boolean;
   symbolFiber?: boolean;
   getterCounter?: { count: number };
+  callbackLengthAccessors?: boolean;
   ancestorTailDepth?: number;
   hiddenTrigger?: boolean;
   modelSource?: string;
@@ -214,12 +215,24 @@ function createModelPresetHarness(options: {
   };
   const makeCallback = (source: string) => eval(`(${source})`) as (...args: string[]) => void;
   const makeProps = () => {
+    const onSelectModel = makeCallback(options.modelSource ?? "(e,t)=>{ye(e,t)}");
+    const onSelectReasoningEffort = makeCallback(options.reasoningSource ?? "e=>{ye(_,e)}");
+    if (options.callbackLengthAccessors) {
+      Object.defineProperty(onSelectModel, "length", {
+        configurable: true,
+        get() { if (options.getterCounter) options.getterCounter.count++; return 2; }
+      });
+      Object.defineProperty(onSelectReasoningEffort, "length", {
+        configurable: true,
+        get() { if (options.getterCounter) options.getterCounter.count++; return 1; }
+      });
+    }
     const props = {
       model: modelId,
       reasoningEffort,
       models: records,
-      onSelectModel: makeCallback(options.modelSource ?? "(e,t)=>{ye(e,t)}"),
-      onSelectReasoningEffort: makeCallback(options.reasoningSource ?? "e=>{ye(_,e)}")
+      onSelectModel,
+      onSelectReasoningEffort
     };
     if (options.symbolProps) {
       Object.defineProperty(props, Symbol("hostile"), { value: true });
@@ -2173,6 +2186,20 @@ test("paired model preset selector rejects symbol-bearing seam records without i
     assert.equal(getterCounter.count, 0);
     assert.equal(harness.selectorCalls.length, 0);
   }
+});
+
+test("paired model preset selector rejects accessor-backed callback arities without reading them", async () => {
+  const getterCounter = { count: 0 };
+  const harness = createModelPresetHarness({ callbackLengthAccessors: true, getterCounter });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  await assert.rejects(bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  }), /metadata|selector/i);
+  assert.equal(getterCounter.count, 0);
+  assert.equal(harness.selectorCalls.length, 0);
 });
 
 test("paired model preset operation reserves uncertain partial and timed-out transitions", async () => {

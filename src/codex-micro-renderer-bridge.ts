@@ -855,11 +855,17 @@ export function readModelPresetSelector(
         const selectEffort = readOwnDataProperty(props, "onSelectReasoningEffort");
         const hasCoreProperty = model?.exists || effort?.exists || models?.exists ||
           selectModel?.exists || selectEffort?.exists;
+        const selectModelLength = selectModel?.exists && typeof selectModel.value === "function"
+          ? readOwnDataProperty(selectModel.value, "length") : undefined;
+        const selectEffortLength = selectEffort?.exists && typeof selectEffort.value === "function"
+          ? readOwnDataProperty(selectEffort.value, "length") : undefined;
         if (hasCoreProperty && (!model?.exists || !effort?.exists || !models?.exists ||
             !selectModel?.exists || !selectEffort?.exists ||
             !isSafeReasoningIdentifier(model.value, 128) || !isSafeReasoningIdentifier(effort.value) ||
-            typeof selectModel.value !== "function" || selectModel.value.length !== 2 ||
-            typeof selectEffort.value !== "function" || selectEffort.value.length !== 1)) return undefined;
+            typeof selectModel.value !== "function" || !selectModelLength?.exists || selectModelLength.value !== 2 ||
+            typeof selectEffort.value !== "function" || !selectEffortLength?.exists || selectEffortLength.value !== 1)) {
+          return undefined;
+        }
         if (hasCoreProperty) {
           const currentModel = model!.value as string;
           const currentEffort = effort!.value as string;
