@@ -1127,6 +1127,61 @@ test("renderer evaluations retain their awaited promise until CDP has collected 
   assert.match(namespaced, /codex-deck-bridge-a-1/);
 });
 
+test("timed-out reasoning evaluations cannot poison the mutex after reconnect", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+
+  const rendererTails = new Map<string, Promise<void>>();
+  const namespaces: string[] = [];
+  let releaseLateEvaluation!: () => void;
+  const lateEvaluationGate = new Promise<void>((resolve) => { releaseLateEvaluation = resolve; });
+  let evaluationCount = 0;
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    const namespace = source.match(/const guardNamespace = ("[^"]+")/)?.[1];
+    assert.ok(namespace, "reasoning evaluation carries a renderer guard namespace");
+    namespaces.push(namespace);
+    const predecessor = rendererTails.get(namespace) ?? Promise.resolve();
+    let releaseTail!: () => void;
+    rendererTails.set(namespace, new Promise<void>((resolve) => { releaseTail = resolve; }));
+    const evaluationNumber = ++evaluationCount;
+    const rendererTask = (async () => {
+      await predecessor;
+      try {
+        if (evaluationNumber === 1) await lateEvaluationGate;
+        return { outcome: "blocked-ultra", reasoningEffort: "max" } as T;
+      } finally {
+        releaseTail();
+      }
+    })();
+    return await Promise.race([
+      rendererTask,
+      new Promise<T>((_, reject) => setTimeout(() => reject(
+        new Error("Codex-Runtime-Antwort hat zu lange gedauert.")
+      ), 5))
+    ]);
+  };
+
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /Codex-Runtime-Antwort hat zu lange gedauert\./
+  );
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
+    outcome: "blocked-ultra", reasoningEffort: "max"
+  });
+  assert.notEqual(namespaces[1], namespaces[0], "reconnect uses a fresh renderer guard namespace");
+
+  releaseLateEvaluation();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
+    outcome: "blocked-ultra", reasoningEffort: "max"
+  });
+  assert.equal(namespaces[2], namespaces[1], "late completion stays isolated from the new namespace");
+});
+
 test("agent routing follows the stable thread identity when a cross-host slot is stale", () => {
   const snapshot = {
     slots: Array.from({ length: 6 }, (_, id) => ({

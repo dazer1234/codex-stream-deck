@@ -934,7 +934,7 @@ export class CodexMicroRendererBridge {
   private connecting?: Promise<void>;
   private lastSnapshot?: MicroSnapshot;
   private readonly sessionOwnership = new CodexSessionOwnershipIndex();
-  private readonly evaluationNamespace = randomUUID();
+  private evaluationNamespace = randomUUID();
 
   constructor(private readonly log: (message: string) => void) {}
 
@@ -1450,6 +1450,7 @@ export class CodexMicroRendererBridge {
     if (expected && this.socket !== expected) return;
     const socket = this.socket;
     this.socket = undefined;
+    this.evaluationNamespace = randomUUID();
     if (socket && socket.readyState === WebSocket.OPEN) socket.close();
     for (const { reject, timer } of this.pending.values()) {
       clearTimeout(timer);
