@@ -2505,6 +2505,9 @@ test("relay ready host identity is immutable within one connection generation", 
   });
   client.start();
   await waitUntil(() => delivered.length === 1);
+  assert.equal(client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ), true);
 
   serverSocket!.send(JSON.stringify({
     type: "health", protocol: 1, host: otherHost, state: "degraded",
@@ -2521,7 +2524,9 @@ test("relay ready host identity is immutable within one connection generation", 
     type: "snapshot", protocol: 1, host, observedAt: Date.now(),
     snapshot: { ...structuredClone(snapshot), reasoningEffort: "same-host" }
   }));
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitUntil(() => !client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ));
   assert.equal(client.currentHost()?.hostId, host.hostId);
   assert.equal(client.currentSnapshot()?.host.hostId, host.hostId);
   assert.equal(delivered.length, 1);
