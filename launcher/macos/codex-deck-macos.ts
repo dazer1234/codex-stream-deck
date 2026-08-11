@@ -484,12 +484,14 @@ set -u
 
 runtime=${shellQuote(runtimePath)}
 typeset -a candidates
-candidates=(/opt/homebrew/bin/node /usr/local/bin/node)
+candidates=(
+  /opt/homebrew/bin/node
+  /usr/local/bin/node
+  /Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+)
 for node_candidate in "$HOME"/.nvm/versions/node/*/bin/node(N); do
   candidates+=("$node_candidate")
-done
-for app_candidate in \${(f)"$(/usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' 2>/dev/null)"}; do
-  candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
 done
 
 for node_candidate in "\${candidates[@]}"; do
