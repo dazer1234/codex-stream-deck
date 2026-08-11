@@ -3740,3 +3740,82 @@ test("failed newer refresh degrades and blocks reasoning plus its dependent pres
   assert.equal(presetDial.alerts, 1);
   controller.unregisterDial(presetDial);
 });
+
+test("preset tickets preserve arrival order across independent dial queues", async () => {
+  const controller = new DeckController();
+  const earlierDial = fakeDial("ticket-order-earlier");
+  const laterDial = fakeDial("ticket-order-later");
+  const state = probe(controller);
+  const heldDialWork = deferred<void>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(earlierDial, modelPresetSettings());
+  controller.registerDial(laterDial, modelPresetSettings());
+  await settle();
+  state.dials.get(earlierDial.id)!.queue.enqueue(() => heldDialWork.promise);
+
+  controller.rotateDial(earlierDial, 1);
+  controller.rotateDial(laterDial, -1);
+  await settle();
+  assert.equal(requests.length, 0, "later idle dial waits for the earlier accepted ticket");
+  heldDialWork.resolve();
+  await Promise.all([
+    state.dials.get(earlierDial.id)!.queue.idle(),
+    state.dials.get(laterDial.id)!.queue.idle()
+  ]);
+
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"],
+    ["gpt-5.6-sol", "high"]
+  ]);
+  controller.unregisterDial(earlierDial);
+  controller.unregisterDial(laterDial);
+});
+
+test("canceling an earlier preset ticket advances a later dial without waiting on its local queue", async () => {
+  const controller = new DeckController();
+  const canceledDial = fakeDial("ticket-canceled-earlier");
+  const laterDial = fakeDial("ticket-after-cancel");
+  const state = probe(controller);
+  const heldDialWork = deferred<void>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(canceledDial, modelPresetSettings());
+  controller.registerDial(laterDial, modelPresetSettings());
+  await settle();
+  state.dials.get(canceledDial.id)!.queue.enqueue(() => heldDialWork.promise);
+
+  controller.rotateDial(canceledDial, 1);
+  controller.rotateDial(laterDial, -1);
+  controller.unregisterDial(canceledDial);
+  await idle(controller, laterDial.id);
+
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-terra", "medium"]
+  ]);
+  assert.equal(state.modelReasoningMutationPending, 0);
+  heldDialWork.resolve();
+  controller.unregisterDial(laterDial);
+});
