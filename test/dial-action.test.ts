@@ -353,7 +353,7 @@ test("property inspector includes the exact action UUID in every settings and pl
   assert.deepEqual(frames[1], {
     event: "sendToPlugin",
     action: CODEX_DIAL_ACTION_UUID,
-    context: "dial-action-frame",
+    context: "plugin-uuid",
     payload: { kind: "request-model-catalog", requestGeneration: 1 }
   });
   assert.equal(frames.at(-1)?.event, "setSettings");
@@ -410,7 +410,7 @@ test("reconnect resets action authority and stale sockets cannot send with an ol
   ]);
 });
 
-test("property inspector refreshes a stale registration context from the authoritative host event", async () => {
+test("property inspector keeps its registration context when host events carry an action context", async () => {
   const { document, sockets, connect } = await inspectorHarness();
   connect(
     "24680", "plugin-uuid", "registerPropertyInspector", "{}",
@@ -436,7 +436,25 @@ test("property inspector refreshes a stale registration context from the authori
   field(document, "press").dispatch("change");
   const frames = rawDecodedMessages(sockets[0]!);
   assert.equal(frames.at(-1)?.event, "setSettings");
-  assert.equal(frames.at(-1)?.context, "current-action-context");
+  assert.equal(frames.at(-1)?.context, "plugin-uuid");
+});
+
+test("property inspector uses its registration UUID instead of stale actionInfo context", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "current-inspector-context", "registerPropertyInspector", "{}",
+    JSON.stringify({
+      action: CODEX_DIAL_ACTION_UUID,
+      context: "stale-action-context",
+      payload: { settings: expandDialPreset("reasoning") }
+    })
+  );
+  sockets[0]?.open();
+  field(document, "press").value = "host.toggle";
+  field(document, "press").dispatch("change");
+  const frames = rawDecodedMessages(sockets[0]!);
+  assert.equal(frames.at(-1)?.event, "setSettings");
+  assert.equal(frames.at(-1)?.context, "current-inspector-context");
 });
 
 test("property inspector exposes the Model Presets editor and requests live authority", async () => {
@@ -451,7 +469,7 @@ test("property inspector exposes the Model Presets editor and requests live auth
   assert.equal(field(document, "preset").value, "model-presets");
   assert.deepEqual(decodedMessages(sockets[0]!)[1], {
     event: "sendToPlugin",
-    context: "dial-models",
+    context: "plugin-uuid",
     payload: { kind: "request-model-catalog", requestGeneration: 1 }
   });
   assert.equal(field(document, "model-presets-panel").hidden, false);
@@ -874,7 +892,7 @@ test("property inspector registers, initializes, reconnects, and accepts incomin
   assert.deepEqual(decodedMessages(sockets[0]!), [
     { event: "registerPropertyInspector", uuid: "plugin-uuid" },
     {
-      event: "sendToPlugin", context: "dial-1",
+      event: "sendToPlugin", context: "plugin-uuid",
       payload: { kind: "request-model-catalog", requestGeneration: 1 }
     }
   ]);
@@ -915,7 +933,7 @@ test("every preset replaces the complete form and persists exact uncustomized de
     preset.dispatch("change");
     const last = decodedMessages(sockets[0]!).at(-1);
     assert.deepEqual(last, {
-      event: "setSettings", context: "dial-preset", payload: expandDialPreset(id)
+      event: "setSettings", context: "plugin-uuid", payload: expandDialPreset(id)
     });
   }
 });
@@ -981,7 +999,7 @@ test("incoming settings normalize exactly like the runtime before the next compl
     const last = decodedMessages(sockets[0]!).at(-1);
     assert.deepEqual(last, {
       event: "setSettings",
-      context: `dial-normalize-${index}`,
+      context: "plugin-uuid",
       payload: { ...normalizeDialSettings(input), customized: true }
     }, `case ${index} matches runtime normalization`);
   }
@@ -1007,7 +1025,7 @@ test("incoming Ultra settings update the checkbox and complete form payload", as
   checkbox.dispatch("change");
   assert.deepEqual(decodedMessages(sockets[0]!).at(-1), {
     event: "setSettings",
-    context: "dial-ultra",
+    context: "plugin-uuid",
     payload: { ...expandDialPreset("reasoning"), includeUltraReasoning: false, customized: true }
   });
 });
@@ -1209,12 +1227,12 @@ test("pre-open edits flush only the latest complete settings after registration"
   assert.deepEqual(decodedMessages(sockets[0]!), [
     { event: "registerPropertyInspector", uuid: "plugin-uuid" },
     {
-      event: "sendToPlugin", context: "dial-pending",
+      event: "sendToPlugin", context: "plugin-uuid",
       payload: { kind: "request-model-catalog", requestGeneration: 1 }
     },
     {
       event: "setSettings",
-      context: "dial-pending",
+      context: "plugin-uuid",
       payload: { ...expandDialPreset("actions"), feedback: "static", customized: true }
     }
   ]);
