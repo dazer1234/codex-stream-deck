@@ -266,6 +266,38 @@ export function readOwnDataProperty(
   } catch { return undefined; }
 }
 
+export function readDataPropertyInPrototypeChain(
+  object: unknown,
+  key: string,
+  maxDepth = 16
+): { exists: boolean; value?: unknown } | undefined {
+  if (!object || (typeof object !== "object" && typeof object !== "function")) return { exists: false };
+  try {
+    let current: object | null = object as object;
+    for (let depth = 0; current && depth <= maxDepth; depth++) {
+      const property = readOwnDataProperty(current, key);
+      if (!property) return undefined;
+      if (property.exists) return property;
+      current = Object.getPrototypeOf(current);
+    }
+    return current ? undefined : { exists: false };
+  } catch { return undefined; }
+}
+
+export function isCloneableReasoningQueryClient(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  try {
+    const names = Object.getOwnPropertyNames(value);
+    if (names.length > 64) return false;
+    for (const name of names) {
+      if (!readOwnDataProperty(value, name)) return false;
+    }
+    if (typeof structuredClone !== "function") return false;
+    structuredClone(value);
+    return true;
+  } catch { return false; }
+}
+
 export function readBoundedOwnDataArray(value: unknown, maxLength: number): unknown[] | undefined {
   try {
     if (!Array.isArray(value)) return undefined;
@@ -369,14 +401,17 @@ export function normalizeReasoningEffortOrder(value: unknown): string[] | undefi
   return isStructuredCloneSafePlainData(value, 256, 8, 64) ? efforts : undefined;
 }
 
-export function normalizeReasoningModelLabel(value: unknown): string | undefined {
+export function normalizeReasoningModelLabel(
+  value: unknown,
+  allowLeadingGpt = false
+): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > 128) return undefined;
   const trimmed = value.trim();
   if (!trimmed || !/^[A-Za-z0-9.]+(?:[ -]+[A-Za-z0-9.]+)*$/.test(trimmed)) return undefined;
   const tokens = trimmed.split(/[ -]+/).map((token) => token.replace(/[A-Z]/g, (character) =>
     String.fromCharCode(character.charCodeAt(0) + 32)
   ));
-  if (tokens[0] === "gpt") tokens.shift();
+  if (allowLeadingGpt && tokens[0] === "gpt") tokens.shift();
   return tokens.length > 0 ? tokens.join("-") : undefined;
 }
 
@@ -432,40 +467,64 @@ export function readVisibleReasoningModelLabel(
 }
 
 export function findRendererQueryClients(rootFiber: unknown): unknown[] {
-  const queue = [rootFiber];
-  const seen = new Set<object>();
-  const seenContexts = new Set<object>();
-  const queryClients = new Set<object>();
-  let contextTraversalTruncated = false;
-  while (queue.length && seen.size < 30000) {
-    const value = queue.pop();
-    if (!value || typeof value !== "object" || seen.has(value)) continue;
-    seen.add(value);
-    const fiber = value as Record<string, any>;
-    const contextValues: unknown[] = [fiber.memoizedProps?.value];
-    let dependency = fiber.dependencies?.firstContext;
-    while (dependency && typeof dependency === "object" && seenContexts.size < 30000 && !seenContexts.has(dependency)) {
-      seenContexts.add(dependency);
-      contextValues.push(dependency.memoizedValue);
-      dependency = dependency.next;
-    }
-    if (dependency && typeof dependency === "object" && !seenContexts.has(dependency)) {
-      contextTraversalTruncated = true;
-    }
-    for (const contextValue of contextValues) {
-      if (contextValue && typeof contextValue === "object" &&
-          typeof (contextValue as Record<string, unknown>).getQueryCache === "function" &&
-          typeof (contextValue as Record<string, unknown>).getQueryData === "function") {
-        queryClients.add(contextValue);
+  try {
+    const queue = [rootFiber];
+    const seen = new Set<object>();
+    const seenContexts = new Set<object>();
+    const queryClients = new Set<object>();
+    let contextTraversalTruncated = false;
+    while (queue.length && seen.size < 30000) {
+      const value = queue.pop();
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      seen.add(value);
+      const memoizedPropsProperty = readOwnDataProperty(value, "memoizedProps");
+      const dependenciesProperty = readOwnDataProperty(value, "dependencies");
+      const childProperty = readOwnDataProperty(value, "child");
+      const siblingProperty = readOwnDataProperty(value, "sibling");
+      if (!memoizedPropsProperty || !dependenciesProperty || !childProperty || !siblingProperty) return [];
+      const contextValues: unknown[] = [];
+      if (memoizedPropsProperty.exists && memoizedPropsProperty.value &&
+          typeof memoizedPropsProperty.value === "object") {
+        const valueProperty = readOwnDataProperty(memoizedPropsProperty.value, "value");
+        if (!valueProperty) return [];
+        if (valueProperty.exists) contextValues.push(valueProperty.value);
       }
+      let dependency: unknown;
+      if (dependenciesProperty.exists && dependenciesProperty.value &&
+          typeof dependenciesProperty.value === "object") {
+        const firstContextProperty = readOwnDataProperty(dependenciesProperty.value, "firstContext");
+        if (!firstContextProperty) return [];
+        dependency = firstContextProperty.value;
+      }
+      while (dependency && typeof dependency === "object" && seenContexts.size < 30000 &&
+          !seenContexts.has(dependency)) {
+        seenContexts.add(dependency);
+        const memoizedValueProperty = readOwnDataProperty(dependency, "memoizedValue");
+        const nextProperty = readOwnDataProperty(dependency, "next");
+        if (!memoizedValueProperty || !nextProperty) return [];
+        if (memoizedValueProperty.exists) contextValues.push(memoizedValueProperty.value);
+        dependency = nextProperty.value;
+      }
+      if (dependency && typeof dependency === "object" && !seenContexts.has(dependency)) {
+        contextTraversalTruncated = true;
+      }
+      for (const contextValue of contextValues) {
+        if (!isCloneableReasoningQueryClient(contextValue)) continue;
+        const getQueriesData = readDataPropertyInPrototypeChain(contextValue, "getQueriesData");
+        const getQueryData = readDataPropertyInPrototypeChain(contextValue, "getQueryData");
+        if (getQueriesData?.exists && typeof getQueriesData.value === "function" &&
+            getQueryData?.exists && typeof getQueryData.value === "function") {
+          queryClients.add(contextValue as object);
+        }
+      }
+      queue.push(childProperty.value, siblingProperty.value);
     }
-    queue.push(fiber.child, fiber.sibling);
-  }
-  const fiberTraversalTruncated = queue.some((value) =>
-    value && typeof value === "object" && !seen.has(value)
-  );
-  if (contextTraversalTruncated || fiberTraversalTruncated) return [];
-  return [...queryClients];
+    const fiberTraversalTruncated = queue.some((value) =>
+      value && typeof value === "object" && !seen.has(value)
+    );
+    if (contextTraversalTruncated || fiberTraversalTruncated) return [];
+    return [...queryClients];
+  } catch { return []; }
 }
 
 export function readReasoningModelCatalogMatch(
@@ -476,33 +535,27 @@ export function readReasoningModelCatalogMatch(
   if (!normalizedLabel) return undefined;
   const matches: Array<{ modelId: string; supportedEfforts: string[] }> = [];
   let visitedClients = 0;
-  let visitedQueries = 0;
   try {
     for (const candidate of queryClients) {
       if (++visitedClients > 64) return undefined;
-      if (!candidate || typeof candidate !== "object") return undefined;
-      const client = candidate as Record<string, any>;
-      const queries = client.getQueryCache().getAll();
-      if (!Array.isArray(queries)) return undefined;
-      const queryItems = readBoundedOwnDataArray(queries, 30000);
-      if (!queryItems) return undefined;
-      for (const query of queryItems) {
-        if (++visitedQueries > 30000) return undefined;
-        if (!query || typeof query !== "object") return undefined;
-        const queryKeyProperty = readOwnDataProperty(query, "queryKey");
-        if (!queryKeyProperty) return undefined;
-        if (!Array.isArray(queryKeyProperty.value)) continue;
-        const queryKey = readBoundedOwnDataArray(queryKeyProperty.value, 64);
-        if (!queryKey || !isStructuredCloneSafePlainData(queryKeyProperty.value, 128, 8, 64)) return undefined;
+      if (!isCloneableReasoningQueryClient(candidate)) return undefined;
+      const getQueriesDataProperty = readDataPropertyInPrototypeChain(candidate, "getQueriesData");
+      if (!getQueriesDataProperty?.exists || typeof getQueriesDataProperty.value !== "function") return undefined;
+      const rawEntries = getQueriesDataProperty.value.call(candidate, { queryKey: ["models", "list"] });
+      if (!readBoundedOwnDataArray(rawEntries, 64) ||
+          !isStructuredCloneSafePlainData(rawEntries, 70000, 32, 1000)) return undefined;
+      const entries = readBoundedOwnDataArray(structuredClone(rawEntries), 64);
+      if (!entries) return undefined;
+      for (const entry of entries) {
+        const entryItems = readBoundedOwnDataArray(entry, 2);
+        if (!entryItems || entryItems.length !== 2) return undefined;
+        const queryKey = readBoundedOwnDataArray(entryItems[0], 64);
+        if (!queryKey || !isStructuredCloneSafePlainData(entryItems[0], 128, 8, 64)) return undefined;
         if (queryKey[0] !== "models" || queryKey[1] !== "list") continue;
-        const stateProperty = readOwnDataProperty(query, "state");
-        if (!stateProperty) return undefined;
-        if (!stateProperty.exists || !stateProperty.value || typeof stateProperty.value !== "object") continue;
-        const dataProperty = readOwnDataProperty(stateProperty.value, "data");
-        if (!dataProperty) return undefined;
-        if (!dataProperty.exists || dataProperty.value === undefined) continue;
-        if (!dataProperty.value || typeof dataProperty.value !== "object") return undefined;
-        const recordsProperty = readOwnDataProperty(dataProperty.value, "data");
+        const queryData = entryItems[1];
+        if (queryData === undefined) continue;
+        if (!queryData || typeof queryData !== "object") return undefined;
+        const recordsProperty = readOwnDataProperty(queryData, "data");
         if (!recordsProperty?.exists) return undefined;
         const records = readBoundedOwnDataArray(recordsProperty.value, 1000);
         if (!records || records.length === 0) return undefined;
@@ -512,7 +565,7 @@ export function readReasoningModelCatalogMatch(
           const modelProperty = readOwnDataProperty(record, "model");
           if (!displayNameProperty?.exists || !modelProperty?.exists ||
               !isSafeReasoningIdentifier(modelProperty.value, 128)) return undefined;
-          const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value);
+          const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value, true);
           if (!normalizedDisplayName) return undefined;
           const effortsProperty = readOwnDataProperty(record, "supportedReasoningEfforts");
           if (!effortsProperty?.exists) return undefined;
@@ -529,7 +582,7 @@ export function readReasoningModelCatalogMatch(
           }
         }
         if (!isStructuredCloneSafePlainData(recordsProperty.value, 70000, 32, 1000) ||
-            !isStructuredCloneSafePlainData(dataProperty.value, 70001, 32, 1000)) return undefined;
+            !isStructuredCloneSafePlainData(queryData, 70001, 32, 1000)) return undefined;
       }
     }
   } catch { return undefined; }
@@ -541,20 +594,22 @@ export function readActiveReasoningMetadata(
   reactRootFiber: unknown,
   isVisible = isVisibleReasoningTrigger
 ): { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined {
-  const visibleTriggers: ReasoningTriggerElement[] = [];
-  for (const element of elements) {
-    if (element.getAttribute("data-codex-intelligence-trigger") !== "true" ||
-        element.getAttribute("data-composer-navigation-target") !== "reasoning" || !isVisible(element)) continue;
-    visibleTriggers.push(element);
-  }
-  if (visibleTriggers.length !== 1) return undefined;
-  const trigger = visibleTriggers[0]!;
-  const currentEffort = trigger.getAttribute("data-selected-reasoning-effort")?.trim();
-  if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
-  const visibleLabel = readVisibleReasoningModelLabel(trigger, isVisible);
-  if (!visibleLabel) return undefined;
-  const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabel);
-  return match ? { currentEffort, modelId: match.modelId, supportedEfforts: match.supportedEfforts } : undefined;
+  try {
+    const visibleTriggers: ReasoningTriggerElement[] = [];
+    for (const element of elements) {
+      if (element.getAttribute("data-codex-intelligence-trigger") !== "true" ||
+          element.getAttribute("data-composer-navigation-target") !== "reasoning" || !isVisible(element)) continue;
+      visibleTriggers.push(element);
+    }
+    if (visibleTriggers.length !== 1) return undefined;
+    const trigger = visibleTriggers[0]!;
+    const currentEffort = trigger.getAttribute("data-selected-reasoning-effort")?.trim();
+    if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
+    const visibleLabel = readVisibleReasoningModelLabel(trigger, isVisible);
+    if (!visibleLabel) return undefined;
+    const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabel);
+    return match ? { currentEffort, modelId: match.modelId, supportedEfforts: match.supportedEfforts } : undefined;
+  } catch { return undefined; }
 }
 
 export function decideReasoningAdjustment(
@@ -957,6 +1012,8 @@ export class CodexMicroRendererBridge {
       if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
       const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
       const readOwnDataProperty = (${readOwnDataProperty.toString()});
+      const readDataPropertyInPrototypeChain = (${readDataPropertyInPrototypeChain.toString()});
+      const isCloneableReasoningQueryClient = (${isCloneableReasoningQueryClient.toString()});
       const readBoundedOwnDataArray = (${readBoundedOwnDataArray.toString()});
       const isStructuredCloneSafePlainData = (${isStructuredCloneSafePlainData.toString()});
       const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
@@ -1010,6 +1067,7 @@ export class CodexMicroRendererBridge {
         for (let attempt = 0; attempt < 8; attempt++) {
           await Promise.resolve();
           const currentMetadata = readLiveMetadata();
+          if (!currentMetadata) throw new Error('Codex reasoning metadata is unavailable.');
           if (currentMetadata && (currentMetadata.modelId !== priorMetadata.modelId ||
               currentMetadata.currentEffort !== priorMetadata.currentEffort)) {
             confirmed = true;

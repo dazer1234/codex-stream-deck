@@ -11,6 +11,22 @@ import type { MicroSnapshot } from "../src/types.js";
 
 let guardedRendererHarnessId = 0;
 
+class ReasoningQueryClientFixture {
+  #entries: unknown;
+
+  constructor(entries: unknown) {
+    this.#entries = entries;
+  }
+
+  getQueriesData(): unknown {
+    return this.#entries;
+  }
+
+  getQueryData(): undefined {
+    return undefined;
+  }
+}
+
 function createGuardedRendererHarness(options: {
   currentEffort?: string;
   visibleTriggerCount?: number;
@@ -56,19 +72,14 @@ function createGuardedRendererHarness(options: {
     "enabled&&he('composer.increaseReasoningEffort','codex_micro_hid');"
   ].join("");
   const modelId = options.modelId ?? "gpt-5.6-sol";
-  const queryClient = {
-    getQueryCache: () => ({
-      getAll: () => [{
-        queryKey: ["models", "list", "local", "chatgpt", 100],
-        state: { data: { data: [{
+  const queryClient = new ReasoningQueryClientFixture([[
+    ["models", "list", "local", "chatgpt", 100],
+    { data: [{
           displayName: modelId === "gpt-5.6-sol" ? "GPT-5.6-Sol" : modelId,
           model: modelId,
           supportedReasoningEfforts: supportedEfforts.map((reasoningEffort) => ({ reasoningEffort }))
-        }] } }
-      }]
-    }),
-    getQueryData: () => undefined
-  };
+    }] }
+  ]]);
   const root = {
     "__reactContainer$test": { memoizedProps: { value: queryClient }, child: null, sibling: null }
   };
@@ -318,10 +329,7 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
       }
     ] } }
   };
-  const queryClient = {
-    getQueryCache: () => ({ getAll: () => [modelsQuery] }),
-    getQueryData: () => undefined
-  };
+  const queryClient = new ReasoningQueryClientFixture([[modelsQuery.queryKey, modelsQuery.state.data]]);
   const reactRootFiber = {
     dependencies: { firstContext: { memoizedValue: queryClient, next: null } },
     child: null,
@@ -378,6 +386,93 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
   ], reactRootFiber, (element) => element.visible === true)?.supportedEfforts, efforts, "hidden triggers are ignored");
 });
 
+function reasoningTrustFixture(rootFiber: unknown) {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, any>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, any>) => boolean
+  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  const trigger: Record<string, any> = {
+    visible: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "high"
+    })[name] ?? null
+  };
+  const label = {
+    visible: true,
+    parentElement: trigger,
+    children: [],
+    textContent: "5.6 Sol",
+    getAttribute: () => null
+  };
+  trigger.querySelectorAll = (selector: string) => selector === "*" ? [label] : [];
+  return () => read([trigger], rootFiber, (element) => element.visible === true);
+}
+
+function reasoningTrustQuery() {
+  return {
+    queryKey: ["models", "list", "local", "chatgpt", 100],
+    state: { data: { data: [{
+      displayName: "GPT-5.6-Sol",
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }]
+    }] } }
+  };
+}
+
+test("reasoning metadata rejects a proxy-backed query client", () => {
+  const query = reasoningTrustQuery();
+  const queryClient = new ReasoningQueryClientFixture([[query.queryKey, query.state.data]]);
+  const read = reasoningTrustFixture({
+    memoizedProps: { value: new Proxy(queryClient, {}) }, child: null, sibling: null
+  });
+  assert.equal(read(), undefined);
+});
+
+test("reasoning metadata rejects a proxy-backed query object", () => {
+  let queryCacheReads = 0;
+  const queryClient = new class extends ReasoningQueryClientFixture {
+    constructor() { super([]); }
+    getQueryCache() {
+      queryCacheReads++;
+      return { getAll: () => [new Proxy(reasoningTrustQuery(), {})] };
+    }
+  }();
+  const read = reasoningTrustFixture({ memoizedProps: { value: queryClient }, child: null, sibling: null });
+  assert.equal(read(), undefined);
+  assert.equal(queryCacheReads, 0, "query objects are outside the authorization path");
+});
+
+test("reasoning metadata never invokes throwing fiber accessors", () => {
+  let getterReads = 0;
+  const rootFiber: Record<string, unknown> = { child: null, sibling: null };
+  Object.defineProperty(rootFiber, "memoizedProps", {
+    enumerable: true,
+    get() {
+      getterReads++;
+      throw new Error("fiber getter must not run");
+    }
+  });
+  const read = reasoningTrustFixture(rootFiber);
+  assert.doesNotThrow(() => assert.equal(read(), undefined));
+  assert.equal(getterReads, 0);
+});
+
+test("reasoning metadata wraps the full discovery path fail closed", () => {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, any>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, any>) => boolean
+  ) => unknown;
+  const trigger = {
+    visible: true,
+    getAttribute() { throw new Error("hostile DOM read"); }
+  };
+  assert.doesNotThrow(() => assert.equal(read([trigger], {}, (element) => element.visible === true), undefined));
+});
+
 test("visible reasoning model labels and catalog records fail closed on ambiguity and unsafe data", () => {
   const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
     elements: Iterable<Record<string, any>>,
@@ -391,14 +486,11 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
     model: unknown = "gpt-5.6-sol",
     efforts: unknown = ["low", "high", "ultra"].map((reasoningEffort) => ({ reasoningEffort }))
   ) => ({ displayName, model, supportedReasoningEfforts: efforts });
-  const root = (records: unknown[], extraQueries: unknown[] = []) => {
-    const queryClient = {
-      getQueryCache: () => ({ getAll: () => [{
-        queryKey: ["models", "list", "local", "chatgpt", 100],
-        state: { data: { data: records } }
-      }, ...extraQueries] }),
-      getQueryData: () => undefined
-    };
+  const root = (records: unknown[], extraEntries: unknown[] = []) => {
+    const queryClient = new ReasoningQueryClientFixture([[
+      ["models", "list", "local", "chatgpt", 100],
+      { data: records }
+    ], ...extraEntries]);
     return { memoizedProps: { value: queryClient }, child: null, sibling: null };
   };
   const trigger = (
@@ -483,11 +575,13 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.equal(read([trigger(Array.from({ length: 257 }, () => ({ text: "" })))], goodRoot(), visible), undefined,
     "DOM node exhaustion is unavailable");
 
-  assert.deepEqual(read([trigger([{ text: " gPt  5.6-sol " }])], goodRoot(), visible), {
+  assert.deepEqual(read([trigger([{ text: " 5.6-sol " }])], goodRoot(), visible), {
     currentEffort: "high",
     modelId: "gpt-5.6-sol",
     supportedEfforts: ["low", "high", "ultra"]
-  }, "normalization permits only case, optional GPT, and space-hyphen equivalence");
+  }, "normalization permits case and space-hyphen equivalence");
+  assert.equal(read([trigger([{ text: "GPT-5.6-Sol" }])], goodRoot(), visible), undefined,
+    "the optional GPT brand token applies only to catalog display names");
   assert.equal(read([trigger([{ text: "5.6 Sol Plus" }])], goodRoot(), visible), undefined,
     "substring matches are not accepted");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.7-Sol")]), visible), undefined,
@@ -495,11 +589,8 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
     record("GPT-5.6-Sol"), record("5.6 Sol", "gpt-5.6-sol-copy")
   ]), visible), undefined, "multiple normalized catalog matches are unavailable");
-  const duplicateQuery = {
-    queryKey: ["models", "list", "remote", "chatgpt", 100],
-    state: { data: { data: [record()] } }
-  };
-  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateQuery]), visible), undefined,
+  const duplicateEntry = [["models", "list", "remote", "chatgpt", 100], { data: [record()] }];
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateEntry]), visible), undefined,
     "matching records across queries remain ambiguous");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record(undefined, undefined, ["low", "high"])]), visible),
     undefined, "raw string effort arrays are unavailable");
@@ -535,9 +626,9 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
     enumerable: true,
     get() { accessorReads++; return "models"; }
   });
-  const accessorQuery = { queryKey: accessorQueryKey, state: { data: { data: [record()] } } };
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([accessorRecord]), visible), undefined);
-  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [accessorQuery]), visible), undefined);
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [[accessorQueryKey,
+    { data: [record()] }]]), visible), undefined);
   const accessorRecords: unknown[] = [record()];
   Object.defineProperty(accessorRecords, "0", {
     enumerable: true,
@@ -560,12 +651,36 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
     record("GPT-5.6-Sol", "gpt-5.6-sol", new Proxy([{ reasoningEffort: "high" }], {}))
   ]), visible), undefined, "proxy-backed effort arrays cannot authorize");
 
-  const pendingQuery = {
-    queryKey: ["models", "list", "pending", "chatgpt", 100],
-    state: { data: undefined }
-  };
+  const plainQuery = reasoningTrustQuery();
+  const plainClient = new ReasoningQueryClientFixture([[plainQuery.queryKey, plainQuery.state.data]]);
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], {
+    memoizedProps: { value: new Proxy(plainClient, {}) }, child: null, sibling: null
+  }, visible), undefined, "proxy-backed query clients cannot authorize");
+  const proxyQueryOnlyClient = new class extends ReasoningQueryClientFixture {
+    constructor() { super([]); }
+    getQueryCache() { return { getAll: () => [new Proxy(plainQuery, {})] }; }
+  }();
+  assert.equal(read([trigger([{ text: "5.6 Sol" }])], {
+    memoizedProps: { value: proxyQueryOnlyClient }, child: null, sibling: null
+  }, visible), undefined, "proxy-backed query objects cannot authorize");
+
+  let fiberGetterReads = 0;
+  const accessorFiber: Record<string, unknown> = { child: null, sibling: null };
+  Object.defineProperty(accessorFiber, "memoizedProps", {
+    enumerable: true,
+    get() {
+      fiberGetterReads++;
+      throw new Error("fiber getter must not run");
+    }
+  });
+  assert.doesNotThrow(() => {
+    assert.equal(read([trigger([{ text: "5.6 Sol" }])], accessorFiber, visible), undefined);
+  }, "the full discovery path fails closed");
+  assert.equal(fiberGetterReads, 0, "fiber accessors are never invoked");
+
+  const pendingEntry = [["models", "list", "pending", "chatgpt", 100], undefined];
   assert.equal(read([trigger([{ text: "5.6 Sol" }])],
-    root([record()], Array.from({ length: 30000 }, () => pendingQuery)), visible), undefined,
+    root([record()], Array.from({ length: 30000 }, () => pendingEntry)), visible), undefined,
     "query traversal exhaustion is unavailable");
 
   const deepRecord: Record<string, unknown> = record();
@@ -886,7 +1001,9 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
     assert.match(expression, /displayName/);
     assert.doesNotMatch(expression, /selectedValue/);
     assert.match(expression, /seen\.size\s*<\s*(?:30000|3e4)/);
-    assert.match(expression, /readOwnDataProperty\(query,\s*["']queryKey["']\)/);
+    assert.match(expression, /getQueriesData/);
+    assert.match(expression, /structuredClone\(value\)/);
+    assert.doesNotMatch(expression, /getQueryCache\(\)\.getAll\(\)/);
     assert.match(expression, /queryKey\[0\][^;]*["']models["']/);
     assert.match(expression, /queryKey\[1\][^;]*["']list["']/);
     assert.equal((expression.match(/commandRunner\(command, 'codex_micro_hid'\)/g) ?? []).length, 1,
@@ -1075,7 +1192,7 @@ test("a failed confirmation read reserves the prior state before releasing the g
 
   await assert.rejects(
     bridge.adjustReasoning("increase", { includeUltra: false }),
-    /metadata read failed/
+    /Codex reasoning metadata is unavailable\./
   );
   assert.equal(harness.runnerCalls.length, 1);
 
@@ -1105,6 +1222,8 @@ test("guarded reasoning expression serializes every helper dependency into rende
   for (const helper of [
     "isSafeReasoningIdentifier",
     "readOwnDataProperty",
+    "readDataPropertyInPrototypeChain",
+    "isCloneableReasoningQueryClient",
     "readBoundedOwnDataArray",
     "isStructuredCloneSafePlainData",
     "normalizeReasoningEffortOrder",
