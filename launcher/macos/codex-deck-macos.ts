@@ -484,23 +484,67 @@ set -u
 
 runtime=${shellQuote(runtimePath)}
 typeset -a candidates
-candidates=(
+candidates=()
+if [[ -n "\${CODEX_DECK_APP_PATH:-}" ]]; then
+  candidates+=("\${CODEX_DECK_APP_PATH%/}/Contents/Resources/cua_node/bin/node")
+fi
+candidates+=(
   /opt/homebrew/bin/node
   /usr/local/bin/node
   /Applications/Codex.app/Contents/Resources/cua_node/bin/node
   /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
 )
 for node_candidate in "$HOME"/.nvm/versions/node/*/bin/node(N); do
   candidates+=("$node_candidate")
 done
 
-for node_candidate in "\${candidates[@]}"; do
-  [[ -x "$node_candidate" ]] || continue
-  node_version=$("$node_candidate" --version 2>/dev/null) || continue
+launch_with_node() {
+  local node_candidate="$1"
+  local node_version node_major
+  [[ -x "$node_candidate" ]] || return 0
+  node_version=$("$node_candidate" --version 2>/dev/null) || return 0
   node_major=\${\${node_version#v}%%.*}
-  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || continue
+  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || return 0
   exec "$node_candidate" "$runtime" watch
+}
+
+for node_candidate in "\${candidates[@]}"; do
+  launch_with_node "$node_candidate"
 done
+
+spotlight_results=$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/codex-deck-mdfind.XXXXXX" 2>/dev/null) || spotlight_results=""
+if [[ -n "$spotlight_results" ]]; then
+  /usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' > "$spotlight_results" 2>/dev/null &
+  spotlight_pid=$!
+  typeset -i spotlight_checks=0
+  while /bin/kill -0 "$spotlight_pid" 2>/dev/null && (( spotlight_checks < 20 )); do
+    /bin/sleep 0.1
+    (( spotlight_checks += 1 ))
+  done
+  if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  wait "$spotlight_pid" 2>/dev/null
+  spotlight_status=$?
+  typeset -a spotlight_candidates
+  spotlight_candidates=()
+  if [[ "$spotlight_status" -eq 0 ]]; then
+    while IFS= read -r app_candidate; do
+      [[ -n "$app_candidate" ]] || continue
+      spotlight_candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
+    done < "$spotlight_results"
+  fi
+  /bin/rm -f "$spotlight_results"
+  for node_candidate in "\${spotlight_candidates[@]}"; do
+    launch_with_node "$node_candidate"
+  done
+fi
 
 print -r -- "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) [launcher] Node.js 20 or newer was not found; watcher did not start." >> ${shellQuote(WATCHER_LOG_PATH)}
 exit 78

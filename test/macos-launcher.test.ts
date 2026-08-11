@@ -50,7 +50,11 @@ test("LaunchAgent uses a dynamic Node resolver instead of pinning an NVM version
   assert.match(launcher, /\.nvm\/versions\/node\/\*\/bin\/node/);
   assert.match(launcher, /\/Applications\/Codex\.app\/Contents\/Resources\/cua_node\/bin\/node/);
   assert.match(launcher, /\/Applications\/ChatGPT\.app\/Contents\/Resources\/cua_node\/bin\/node/);
-  assert.doesNotMatch(launcher, /mdfind/);
+  assert.match(launcher, /"\$HOME"\/Applications\/Codex\.app\/Contents\/Resources\/cua_node\/bin\/node/);
+  assert.match(launcher, /"\$HOME"\/Applications\/ChatGPT\.app\/Contents\/Resources\/cua_node\/bin\/node/);
+  assert.match(launcher, /CODEX_DECK_APP_PATH/);
+  assert.ok(launcher.indexOf("/usr/bin/mdfind") > launcher.indexOf('for node_candidate in "${candidates[@]}"'));
+  assert.match(launcher, /\/bin\/kill -KILL/);
   assert.match(launcher, /Node\.js 20 or newer/);
   assert.match(plist, /<string>\/bin\/zsh<\/string>/);
   assert.match(plist, /watcher-launch\.sh/);
@@ -93,6 +97,85 @@ sleep 10
   });
   assert.equal(stdout, "watcher-started\n");
   await assert.rejects(access(mdfindMarker));
+});
+
+test("watcher launcher accepts an explicit relocated Codex app without starting Spotlight", {
+  skip: process.platform !== "darwin"
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-relocated-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const appPath = join(root, "Renamed Codex.app");
+  const fakeNode = join(appPath, "Contents", "Resources", "cua_node", "bin", "node");
+  const fakeMdfind = join(root, "mdfind");
+  const mdfindMarker = join(root, "mdfind-called");
+  const launcherPath = join(root, "watcher-launch.sh");
+  await mkdir(join(fakeNode, ".."), { recursive: true });
+  await writeFile(fakeNode, `#!/bin/zsh
+if [[ "$1" == "--version" ]]; then
+  print -r -- "v20.0.0"
+  exit 0
+fi
+print -r -- "relocated-node-started"
+`);
+  await writeFile(fakeMdfind, `#!/bin/zsh
+touch '${mdfindMarker}'
+sleep 10
+`);
+  const launcher = buildWatcherLaunchScript(join(root, "missing-runtime.mjs"))
+    .replaceAll("/usr/bin/mdfind", fakeMdfind);
+  await writeFile(launcherPath, launcher);
+  await Promise.all([chmod(fakeNode, 0o755), chmod(fakeMdfind, 0o755), chmod(launcherPath, 0o755)]);
+
+  const { stdout } = await execFile("/bin/zsh", [launcherPath], {
+    env: { ...process.env, CODEX_DECK_APP_PATH: appPath, HOME: home },
+    timeout: 1500
+  });
+  assert.equal(stdout, "relocated-node-started\n");
+  await assert.rejects(access(mdfindMarker));
+});
+
+test("watcher launcher bounds Spotlight when no direct Node candidate is usable", {
+  skip: process.platform !== "darwin"
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-spotlight-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const fakeMdfind = join(root, "mdfind");
+  const mdfindMarker = join(root, "mdfind-called");
+  const launcherPath = join(root, "watcher-launch.sh");
+  await mkdir(home, { recursive: true });
+  await writeFile(fakeMdfind, `#!/bin/zsh
+trap '' TERM
+touch '${mdfindMarker}'
+while true; do :; done
+`);
+  let launcher = buildWatcherLaunchScript(join(root, "missing-runtime.mjs"));
+  launcher = launcher
+    .replaceAll("/opt/homebrew/bin/node", join(root, "missing-homebrew-node"))
+    .replaceAll("/usr/local/bin/node", join(root, "missing-local-node"))
+    .replaceAll("/Applications/Codex.app", join(root, "missing-codex.app"))
+    .replaceAll("/Applications/ChatGPT.app", join(root, "missing-chatgpt.app"))
+    .replaceAll("/usr/bin/mdfind", fakeMdfind)
+    .replace(/>> '[^'\n]*watcher\.log'/, `>> '${join(root, "watcher.log")}'`);
+  await writeFile(launcherPath, launcher);
+  await Promise.all([chmod(fakeMdfind, 0o755), chmod(launcherPath, 0o755)]);
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    execFile("/bin/zsh", [launcherPath], {
+      env: { ...process.env, CODEX_DECK_APP_PATH: "", HOME: home },
+      timeout: 4000
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: number | string }).code, 78);
+      return true;
+    }
+  );
+  assert.ok(Date.now() - startedAt < 3500);
+  await access(mdfindMarker);
 });
 
 test("manual and double-click launch resolve Node outside an interactive shell", async () => {
