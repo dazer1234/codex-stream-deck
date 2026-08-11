@@ -1178,7 +1178,9 @@ test("Stream Deck Plus guide documents the supported dial contract without overs
   assert.match(macos, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
   assert.match(windows, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
 
-  for (const label of ["Reasoning", "Agents", "Actions", "Usage"]) assert.match(guide, new RegExp(`\\b${label}\\b`));
+  for (const label of ["Model Presets", "Reasoning", "Agents", "Actions", "Usage"]) {
+    assert.match(guide, new RegExp(`\\b${label}\\b`));
+  }
   for (const gesture of ["rotate", "press", "touch"]) assert.match(guide, new RegExp(`\\b${gesture}\\b`, "i"));
   for (const state of ["NO ITEMS", "OFFLINE", "DEGRADED", "CONNECTING"]) assert.match(guide, new RegExp(state));
   assert.match(guide, /Reasoning[^\n]*decrease[^\n]*increase/i);
@@ -1192,6 +1194,20 @@ test("Stream Deck Plus guide documents the supported dial contract without overs
   assert.match(guide, /When Include Ultra is on[^.\n]*Ultra[^.\n]*native Full-access confirmation/i);
   assert.match(guide, /Manual Codex selection[^.\n]*keypad Reasoning Up[^.\n]*unrestricted/i);
   assert.match(guide, /never confirms or dismisses[^.\n]*native dialog/i);
+  assert.match(guide, /Model Presets[^\n]*immediately[^\n]*detent[^\n]*wrap/i);
+  assert.match(guide, /5\.6 Sol[^\n]*High[^\n]*5\.6 Sol[^\n]*Medium[^\n]*5\.6 Terra[^\n]*Medium/i);
+  assert.match(guide, /live model[^.\n]*reasoning dropdowns[^.\n]*per knob/i);
+  assert.match(guide, /add[^.\n]*remove[^.\n]*(?:drag|move)[^.\n]*reorder/i);
+  assert.match(guide, /`SWITCHING…`[^.\n]*before[^.\n]*confirmed/i);
+  assert.match(guide, /confirmed pair[^.\n]*(?:position|[0-9]+\s*\/\s*[0-9]+)/i);
+  assert.match(guide, /`UNLISTED`[^.\n]*actual pair/i);
+  assert.match(guide, /`NO PRESETS`[^.\n]*empty/i);
+  assert.match(guide, /`UNAVAILABLE`[^.\n]*authoritative catalog/i);
+  assert.match(guide, /unavailable entries[^.\n]*preserved[^.\n]*skipped/i);
+  assert.match(guide, /Include Ultra[^.\n]*Model Presets[^.\n]*defaults off/i);
+  assert.match(guide, /does not use[^.\n]*keyboard[^.\n]*focus navigation/i);
+  assert.match(guide, /Press[^.\n]*None[^.\n]*Touch[^.\n]*Fast Mode/i);
+  assert.match(guide, /remote host[^.\n]*`model-presets` capability/i);
   assert.match(guide, /Agents[^\n]*occupied agent[^\n]*focus[^\n]*M\/W host badge/i);
   assert.match(guide, /Actions[^\n]*Fast[^\n]*Approve[^\n]*Reject[^\n]*Fork[^\n]*Dictation[^\n]*Send[^\n]*Settings/i);
   assert.match(guide, /six action names[^.\n]*default slot labels/i);

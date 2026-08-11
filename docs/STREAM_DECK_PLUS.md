@@ -16,7 +16,7 @@ The recommended layout uses four separate `Codex Dial` instances:
 
 | Knob | Rotate | Press | Touch | Feedback |
 |---|---|---|---|---|
-| Reasoning | Reasoning decrease counter-clockwise; reasoning increase clockwise | None | Fast mode | Current reasoning effort |
+| Model Presets | Immediately apply the previous or next configured model/reasoning pair, with continuous wrap | None | Fast Mode | Confirmed model, reasoning effort, and valid-list position |
 | Agents | Select the previous or next occupied agent | Focus the highlighted agent | Tasks view | Agent title, status, context use, and M/W host badge when relevant |
 | Actions | Select Fast, Approve, Reject, Fork, Dictation, or Send in that order | Run the highlighted action | Settings | Selected action and activation hint |
 | Usage | Select Auto, 5h, or Weekly | Toggle the selected single-window view and two-window overview | Refresh usage now | Remaining capacity, reset time, health, and view mode |
@@ -32,6 +32,20 @@ The Reasoning knob redraws as soon as Codex confirms the resulting level after a
 The six action names are the default slot labels for the six configured Codex Micro action slots. Feedback labels follow the current Codex Micro assignments, so a customized slot is identified by its current assignment rather than a hardcoded default name.
 
 ## Gesture behavior
+
+### Model Presets
+
+Model Presets immediately applies one pair per detent and uses continuous wrap in both directions. Clockwise chooses the next currently valid configured pair and counter-clockwise chooses the previous one. If Codex's active pair is not in the list, clockwise starts at the first valid pair and counter-clockwise starts at the last. Rapid turns are queued in arrival order, and each detent is resolved from the pair that Codex confirmed for the preceding detent.
+
+The preferred starting list is `5.6 Sol · High`, `5.6 Sol · Medium`, and `5.6 Terra · Medium`, when the current Codex catalog offers those exact pairs. Its default gestures are Press **None** and Touch **Fast Mode**; both remain independently customizable per knob.
+
+The property inspector supplies live model and reasoning dropdowns for each row per knob. You can add, remove, drag, or use accessible move buttons to reorder entries. Saved entries that the current catalog cannot use remain visible: unavailable entries are preserved and skipped without being deleted. Additions and catalog-dependent edits pause while authority is unavailable.
+
+**Include Ultra** for Model Presets is per knob and defaults off. With it off, the editor does not offer new Ultra pairs and rotation skips a saved Ultra entry; turning it back on makes a saved entry eligible again if Codex still advertises it. The plugin never approves or dismisses Codex's native Ultra dialog.
+
+Model Presets does not use keyboard events or focus navigation. It calls Codex's native paired model/reasoning selection path once, and then waits for the exact resulting pair to be reported.
+
+Feedback is deliberately non-optimistic: `SWITCHING…` appears before the pair is confirmed, without naming the requested pair as active. A confirmed pair shows its current display name, reasoning level, and position such as `2 / 3`. `UNLISTED` shows the actual pair Codex reported when it is not among the valid configured entries. `NO PRESETS` means the saved list is empty or the authoritative catalog proves that no saved entry is currently valid. `UNAVAILABLE` means the authoritative catalog or active pair cannot currently be obtained, so rotation sends nothing.
 
 ### Paired controls
 
@@ -55,13 +69,14 @@ Holding the dial while rotating does not reveal a second binding layer. A held t
 
 | Field | Purpose |
 |---|---|
-| Preset | Choose Reasoning, Agents, Actions, Navigation, Usage, or Custom defaults. Choosing a preset replaces all fields for that dial. |
+| Preset | Choose Model Presets, Reasoning, Agents, Actions, Navigation, Usage, or Custom defaults. Choosing a preset replaces all fields for that dial. |
+| Model preset list | For Model Presets, add up to twelve unique model/reasoning pairs, remove rows, and reorder them by drag or accessible move buttons. |
 | Rotation mode | Choose Paired controls or Rotate to select. |
 | Counter-clockwise / Clockwise | Choose the two bindings used by paired rotation. |
 | Selector source | Choose occupied agents, configured actions, or usage windows. |
 | Wrap at ends | Allow the selector to continue from the last item to the first and vice versa. |
 | Configured actions | Enable and reorder the allow-listed actions available to an Actions selector. |
-| Include Ultra | Allow this knob's clockwise Reasoning control to enter Ultra. It is off by default. |
+| Include Ultra | Allow this knob's Reasoning control or Model Presets list to use Ultra. It is off by default. |
 | Press | Choose an independent dial-down/dial-up action or Activate Selection. |
 | Touch tap | Choose an independent tap action. |
 | Feedback | Choose Automatic, Current reasoning, Selected agent, Selected action, Navigation pair, Usage window / overview, or Static label. |
@@ -83,6 +98,7 @@ In single-host mode, controls and feedback use the local Codex instance. In mult
 
 - Agent selection and focus stay bound to the highlighted task's owning host and stable task identity. Agent feedback includes an M/W host badge when the merged list needs to distinguish the owner.
 - Reasoning, navigation, Micro, keycap, new-task, and host controls use the selected function-control host.
+- Model Presets also uses the selected function-control host. A remote host must advertise the `model-presets` capability; an older or reconnecting peer is refused before any command is sent rather than receiving a partial model-only or reasoning-only fallback.
 - Usage is account-scoped. It prefers a healthy local usage snapshot. When healthy local usage is unavailable, it selects a healthy paired host with usable account data.
 - New command starts require a healthy, applicable route. A cleanup release for a momentary action that already went down may still be attempted against its captured route so the remote control is not left pressed.
 
@@ -93,6 +109,10 @@ Feedback may retain last-known information while a host is degraded or offline, 
 After installing a development build on macOS, back up the installed plugin and the affected Stream Deck + profile before replacing anything. Then verify:
 
 - all four Status-focused presets can be added without changing existing keypad actions;
+- Model Presets seeds the available preferred pairs `5.6 Sol · High`, `5.6 Sol · Medium`, and `5.6 Terra · Medium`;
+- both Model Presets wrap directions apply immediately, rapid detents stay ordered, and the LCD never claims a pair before Codex confirms it;
+- Fast Mode works from the default Model Presets touch action, while Press remains None unless customized;
+- an unavailable saved entry remains in the editor, is skipped during rotation, and becomes eligible again when its catalog pair returns;
 - each counter-clockwise and clockwise detent is preserved, including a fast turn;
 - selector rotation previews without running anything until press;
 - press down/up and each touch region act independently;
@@ -108,9 +128,11 @@ The plugin source, manifest, property inspector, and packaged Encoder assets use
 
 ## Troubleshooting
 
-### `NO ITEMS` or `UNAVAILABLE`
+### `NO ITEMS`, `NO PRESETS`, or `UNAVAILABLE`
 
-`NO ITEMS` means the current selector is empty. For Agents, open Codex and make sure the selected Codex Micro source has at least one occupied task. For Actions, select at least one configured action in the property inspector. `UNAVAILABLE` applies to live Usage or Reasoning values that the current Codex build did not report.
+`NO ITEMS` means the current selector is empty. For Agents, open Codex and make sure the selected Codex Micro source has at least one occupied task. For Actions, select at least one configured action in the property inspector. `NO PRESETS` means a Model Presets list is empty or has no entries supported by the current authoritative catalog; open that knob's property inspector to add or inspect its saved rows. `UNAVAILABLE` applies to live Usage or Reasoning values that the current Codex build did not report, or to Model Presets when the authoritative catalog and active pair are not available. Saved preset rows are retained while the host is offline or reconnecting.
+
+If a paired host works for other controls but Model Presets remains unavailable, update Codex Deck on that peer and reconnect it. The feature deliberately requires its advertised relay capability and has no mixed-version fallback.
 
 ### `CONNECTING`
 
