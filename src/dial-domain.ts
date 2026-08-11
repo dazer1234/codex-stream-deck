@@ -425,11 +425,12 @@ function strictLegacyRotation(value: unknown): LegacyDialRotation | undefined {
   const source = ownDataValue(value, "source");
   const wrap = ownDataValue(value, "wrap");
   const items = ownDataValue(value, "items");
-  if (!isSelectorSource(source) || typeof wrap !== "boolean" || !exactDataArray(items, 30)) {
+  const itemValues = ownDataArrayValues(items, 30);
+  if (!isSelectorSource(source) || typeof wrap !== "boolean" || itemValues == null) {
     return undefined;
   }
   const bindings: DialBindingId[] = [];
-  for (const item of items) {
+  for (const item of itemValues) {
     if (!isDialBindingId(item, "selector") || bindings.includes(item)) return undefined;
     bindings.push(item);
   }
@@ -438,10 +439,11 @@ function strictLegacyRotation(value: unknown): LegacyDialRotation | undefined {
 }
 
 function normalizeModelPresetEntries(value: unknown): ModelPresetEntry[] | undefined {
-  if (!exactDataArray(value, 12)) return undefined;
+  const values = ownDataArrayValues(value, 12);
+  if (values == null) return undefined;
   const entries: ModelPresetEntry[] = [];
   const seen = new Set<string>();
-  for (const item of value) {
+  for (const item of values) {
     if (!exactPlainDataRecord(item, ["modelId", "reasoningEffort"])) return undefined;
     const modelId = ownDataValue(item, "modelId");
     const reasoningEffort = ownDataValue(item, "reasoningEffort");
@@ -456,16 +458,17 @@ function normalizeModelPresetEntries(value: unknown): ModelPresetEntry[] | undef
 }
 
 function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.hasOwn(value, key);
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    return !Array.isArray(value);
+  } catch {
+    return false;
+  }
 }
 
 function ownDataValue(value: unknown, key: string): unknown {
-  if (!record(value)) return undefined;
   try {
+    if (!record(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor != null && "value" in descriptor ? descriptor.value : undefined;
   } catch {
@@ -491,19 +494,34 @@ function exactPlainDataRecord(
   });
 }
 
-function exactDataArray(value: unknown, maximum: number): value is unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
-      value.length > maximum || Object.getOwnPropertySymbols(value).length !== 0) return false;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const expectedKeys = Array.from({ length: value.length }, (_, index) => String(index));
-  const keys = Object.keys(descriptors).filter((key) => key !== "length");
-  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
-    return false;
+function ownDataArrayValues(value: unknown, maximum: number): unknown[] | undefined {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+        Object.getOwnPropertySymbols(value).length !== 0) return undefined;
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<string, PropertyDescriptor>;
+    const lengthDescriptor = descriptors["length"];
+    const length = lengthDescriptor?.value;
+    if (lengthDescriptor == null || !("value" in lengthDescriptor) ||
+        !Number.isSafeInteger(length) || typeof length !== "number" || length < 0 ||
+        length > maximum) return undefined;
+    const expectedKeys = Array.from(
+      { length }, (_, index) => String(index)
+    );
+    const keys = Object.keys(descriptors).filter((key) => key !== "length");
+    if (keys.length !== expectedKeys.length ||
+        keys.some((key, index) => key !== expectedKeys[index])) return undefined;
+    const values: unknown[] = [];
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (descriptor == null || !("value" in descriptor) || descriptor.enumerable !== true) {
+        return undefined;
+      }
+      values.push(descriptor.value);
+    }
+    return values;
+  } catch {
+    return undefined;
   }
-  return expectedKeys.every((key) => {
-    const descriptor = descriptors[key];
-    return descriptor != null && "value" in descriptor && descriptor.enumerable === true;
-  });
 }
 
 function isPreset(value: unknown): value is DialPreset {
@@ -566,35 +584,41 @@ function selectorPreset(
 }
 
 function normalizeRotation(value: unknown, fallback: LegacyDialRotation): LegacyDialRotation {
-  if (!record(value) || !hasOwn(value, "kind")) return fallback;
-  if (value.kind === "paired") {
+  try {
+    const kind = ownDataValue(value, "kind");
+    if (kind === "paired") {
+      const counterClockwise = ownDataValue(value, "counterClockwise");
+      const clockwise = ownDataValue(value, "clockwise");
+      return {
+        kind,
+        counterClockwise: isDialBindingId(counterClockwise, "rotation")
+          ? counterClockwise
+          : "none",
+        clockwise: isDialBindingId(clockwise, "rotation") ? clockwise : "none"
+      };
+    }
+    if (kind !== "selector") return fallback;
+    const source = ownDataValue(value, "source");
+    const wrap = ownDataValue(value, "wrap");
+    const items = ownDataValue(value, "items");
+    const itemValues = ownDataArrayValues(items, 10_000);
+    if (!isSelectorSource(source) || typeof wrap !== "boolean" || itemValues == null) {
+      return fallback;
+    }
     return {
-      kind: "paired",
-      counterClockwise: hasOwn(value, "counterClockwise") &&
-        isDialBindingId(value.counterClockwise, "rotation")
-        ? value.counterClockwise
-        : "none",
-      clockwise: hasOwn(value, "clockwise") && isDialBindingId(value.clockwise, "rotation")
-        ? value.clockwise
-        : "none"
-    };
-  }
-  if (value.kind === "selector" && hasOwn(value, "source") && isSelectorSource(value.source) &&
-      hasOwn(value, "wrap") && typeof value.wrap === "boolean" &&
-      hasOwn(value, "items") && Array.isArray(value.items)) {
-    return {
-      kind: "selector",
-      source: value.source,
-      wrap: value.wrap,
-      items: value.source === "actions"
-        ? value.items.filter((item): item is DialBindingId =>
+      kind,
+      source,
+      wrap,
+      items: source === "actions"
+        ? itemValues.filter((item): item is DialBindingId =>
           isDialBindingId(item, "selector"))
-          .filter((item, index, items) => items.indexOf(item) === index)
+          .filter((item, index, candidates) => candidates.indexOf(item) === index)
           .slice(0, 30)
         : []
     };
+  } catch {
+    return fallback;
   }
-  return fallback;
 }
 
 function cleanActionLabel(value: string | undefined): string | undefined {

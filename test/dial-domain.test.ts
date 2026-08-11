@@ -1236,6 +1236,99 @@ test("version 2 normalization rejects hostile prototypes, inherited data, symbol
   assert.equal(entryReads, 0);
 });
 
+test("normalization fails closed for revoked and throwing proxies without propagating", () => {
+  const revoked = Proxy.revocable({ version: 2, preset: "model-presets" }, {});
+  revoked.revoke();
+  assert.doesNotThrow(() => normalizeDialSettings(revoked.proxy));
+  assert.deepEqual(normalizeDialSettings(revoked.proxy), expandDialPreset("reasoning"));
+
+  const throwing = new Proxy({}, {
+    getPrototypeOf() { throw new Error("prototype trap"); },
+    getOwnPropertyDescriptor() { throw new Error("descriptor trap"); },
+    ownKeys() { throw new Error("keys trap"); }
+  });
+  assert.doesNotThrow(() => normalizeDialSettings(throwing));
+  assert.deepEqual(normalizeDialSettings(throwing), expandDialPreset("reasoning"));
+
+  const nested = new Proxy({}, {
+    getOwnPropertyDescriptor() { throw new Error("nested descriptor trap"); }
+  });
+  assert.deepEqual(normalizeDialSettings({
+    version: 1,
+    preset: "custom",
+    rotation: nested,
+    press: "none",
+    touchTap: "none",
+    feedback: "static"
+  }).rotation, expandDialPreset("custom").rotation);
+});
+
+test("version 1 rotation migration never invokes nested accessors", () => {
+  let kindReads = 0;
+  const accessorKind: Record<string, unknown> = {
+    counterClockwise: "reasoning.decrease",
+    clockwise: "reasoning.increase"
+  };
+  Object.defineProperty(accessorKind, "kind", {
+    enumerable: true,
+    get() { kindReads += 1; return "paired"; }
+  });
+  assert.deepEqual(normalizeDialSettings({
+    version: 1,
+    preset: "custom",
+    rotation: accessorKind,
+    press: "none",
+    touchTap: "none",
+    feedback: "static"
+  }).rotation, expandDialPreset("custom").rotation);
+  assert.equal(kindReads, 0);
+
+  for (const field of ["counterClockwise", "clockwise"] as const) {
+    let reads = 0;
+    const rotation: Record<string, unknown> = {
+      kind: "paired",
+      counterClockwise: "reasoning.decrease",
+      clockwise: "reasoning.increase"
+    };
+    Object.defineProperty(rotation, field, {
+      enumerable: true,
+      get() { reads += 1; return field === "clockwise" ? "reasoning.increase" : "reasoning.decrease"; }
+    });
+    const normalized = normalizeDialSettings({
+      version: 1,
+      preset: "custom",
+      rotation,
+      press: "none",
+      touchTap: "none",
+      feedback: "static"
+    });
+    assert.deepEqual(normalized.rotation, {
+      kind: "paired",
+      counterClockwise: field === "counterClockwise" ? "none" : "reasoning.decrease",
+      clockwise: field === "clockwise" ? "none" : "reasoning.increase"
+    });
+    assert.equal(reads, 0, field);
+  }
+
+  let itemReads = 0;
+  const items: unknown[] = [];
+  Object.defineProperty(items, "0", {
+    enumerable: true,
+    configurable: true,
+    get() { itemReads += 1; return "keycap.FAST"; }
+  });
+  items.length = 1;
+  assert.deepEqual(normalizeDialSettings({
+    version: 1,
+    preset: "actions",
+    rotation: { kind: "selector", source: "actions", wrap: true, items },
+    press: "selector.activate",
+    touchTap: "keycap.SETUP",
+    feedback: "action"
+  }).rotation, expandDialPreset("actions").rotation);
+  assert.equal(itemReads, 0);
+});
+
 test("model preset resolver wraps, reverses, starts unlisted at an edge, and counts valid pairs", () => {
   const settings = modelPresetSettings([
     { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
