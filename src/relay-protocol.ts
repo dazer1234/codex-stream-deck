@@ -11,15 +11,22 @@ export type RelayCommand =
   | { kind: "action"; slot: MicroActionSlot; act: 0 | 1 }
   | { kind: "joystick"; direction: MicroDirection; distance: 0 | 1 }
   | { kind: "encoder"; act: 0 | 1 }
-  | { kind: "reasoning"; direction: ReasoningAdjustment; includeUltra: boolean }
+  | {
+      kind: "reasoning";
+      direction: ReasoningAdjustment;
+      includeUltra: boolean;
+      includeReasoningFeedback?: true;
+    }
   | { kind: "usage-refresh" }
   | { kind: "rate-limit-reset" }
   | { kind: "keycap"; keycapId: OfficialKeycapId };
 
 export type RelayAuthMessage = { type: "auth"; protocol: 1; token: string };
 export const RELAY_REASONING_POLICY_CAPABILITY = "reasoning-policy";
+export const RELAY_REASONING_FEEDBACK_CAPABILITY = "reasoning-feedback";
 export const RELAY_CAPABILITIES = [
   "agent", "action", "joystick", "encoder", "reasoning", RELAY_REASONING_POLICY_CAPABILITY,
+  RELAY_REASONING_FEEDBACK_CAPABILITY,
   "keycap", "usage", "usage-refresh", "rate-limit-reset"
 ] as const;
 export type RelayReadyMessage = {
@@ -52,6 +59,7 @@ export type RelayResultMessage =
       requestId: string;
       ok: true;
       outcome?: ReasoningAdjustmentResult;
+      reasoningEffort?: string;
     }
   | { type: "result"; protocol: 1; requestId: string; ok: false; error?: string };
 export type RelayServerMessage = RelayReadyMessage | RelaySnapshotMessage | RelayHealthMessage | RelayResultMessage;
@@ -263,11 +271,16 @@ export function parseRelayServerMessage(value: unknown): RelayServerMessage | nu
     return message as RelayHealthMessage;
   }
   if (message.type === "result" && boundedNonblankString(message.requestId, 128)) {
+    const hasOutcome = message.outcome !== undefined;
+    const hasReasoningEffort = message.reasoningEffort !== undefined;
     if (message.ok === true &&
-        (message.outcome === undefined || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
-        exactOwnDataKeys(message, message.outcome === undefined
-          ? ["type", "protocol", "requestId", "ok"]
-          : ["type", "protocol", "requestId", "ok", "outcome"])) {
+        (!hasOutcome || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
+        (!hasReasoningEffort || (hasOutcome && boundedNonblankString(message.reasoningEffort, 64))) &&
+        exactOwnDataKeys(message, [
+          "type", "protocol", "requestId", "ok",
+          ...(hasOutcome ? ["outcome"] : []),
+          ...(hasReasoningEffort ? ["reasoningEffort"] : [])
+        ])) {
       return message as RelayResultMessage;
     }
     if (message.ok === false &&
@@ -292,7 +305,11 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
   if (command.kind === "encoder" && binary(command.act)) return command as RelayCommand;
   if (command.kind === "reasoning" && (command.direction === "decrease" || command.direction === "increase") &&
       typeof command.includeUltra === "boolean" &&
-      exactOwnDataKeys(command, ["kind", "direction", "includeUltra"])) return command as RelayCommand;
+      (command.includeReasoningFeedback === undefined || command.includeReasoningFeedback === true) &&
+      exactOwnDataKeys(command, ["kind", "direction", "includeUltra",
+        ...(command.includeReasoningFeedback === true ? ["includeReasoningFeedback"] : [])])) {
+    return command as RelayCommand;
+  }
   if (command.kind === "usage-refresh" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
   if (command.kind === "rate-limit-reset" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
   if (command.kind === "keycap" && typeof command.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(command.keycapId as OfficialKeycapId)) return command as RelayCommand;

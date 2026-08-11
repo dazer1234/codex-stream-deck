@@ -11,7 +11,7 @@ import {
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
-import type { CodexHost, ReasoningAdjustmentResult } from "./types.js";
+import type { CodexHost, ReasoningAdjustmentExecution } from "./types.js";
 
 export type RelayServerConfig = {
   enabled: boolean;
@@ -204,11 +204,17 @@ export class CodexRelayServer {
       : command.kind;
     this.log(`Relay command ${commandLabel} received.`);
     try {
-      const outcome = validatedRelayOutcome(command, await executeRelayCommand(this.control, command));
+      const execution = validatedRelayExecution(command, await executeRelayCommand(this.control, command));
       if (command.kind === "usage-refresh") await this.publishSnapshot(undefined, true);
-      this.sendResult(socket, message.requestId, true, undefined, outcome);
+      if (command.kind === "reasoning" && command.includeReasoningFeedback === true) {
+        await this.publishSnapshot(undefined, true);
+      }
+      this.sendResult(socket, message.requestId, true, undefined, execution);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
-      if (command.kind !== "usage-refresh") await this.publishSnapshot();
+      if (command.kind !== "usage-refresh" &&
+          !(command.kind === "reasoning" && command.includeReasoningFeedback === true)) {
+        await this.publishSnapshot();
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.log(`Relay command ${commandLabel} failed in ${Date.now() - startedAt} ms: ${errorMessage}`);
@@ -221,13 +227,16 @@ export class CodexRelayServer {
     requestId: string,
     ok: boolean,
     error?: string,
-    outcome?: ReasoningAdjustmentResult
+    execution?: ReasoningAdjustmentExecution
   ): void {
     if (socket.readyState !== WebSocket.OPEN) return;
     const result: RelayResultMessage = ok
       ? {
           type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: true,
-          ...(outcome === undefined ? {} : { outcome })
+          ...(execution === undefined ? {} : { outcome: execution.outcome }),
+          ...(execution?.reasoningEffort === undefined ? {} : {
+            reasoningEffort: execution.reasoningEffort
+          })
         }
       : {
           type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: false,
@@ -405,25 +414,55 @@ async function executeRelayCommand(
   return undefined;
 }
 
-function validatedRelayOutcome(
+function validatedRelayExecution(
   command: RelayCommand,
   value: unknown
-): ReasoningAdjustmentResult | undefined {
+): ReasoningAdjustmentExecution | undefined {
   if (command.kind === "reasoning") {
     let outcome: unknown;
+    let reasoningEffort: unknown;
     try {
       if (!value || typeof value !== "object" || Array.isArray(value)) {
         throw new Error("Invalid reasoning adjustment result.");
       }
-      const property = Object.getOwnPropertyDescriptor(value, "outcome");
-      if (!property || !Object.prototype.hasOwnProperty.call(property, "value")) {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
         throw new Error("Invalid reasoning adjustment result.");
       }
-      outcome = property.value;
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      const expectedKeys = ["outcome", ...(Object.prototype.hasOwnProperty.call(descriptors, "reasoningEffort")
+        ? ["reasoningEffort"] : [])];
+      if (keys.length !== expectedKeys.length || keys.some((key) =>
+        typeof key !== "string" || !expectedKeys.includes(key))) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      const outcomeProperty = descriptors.outcome;
+      const effortProperty = descriptors.reasoningEffort;
+      if (!outcomeProperty || outcomeProperty.enumerable !== true || !("value" in outcomeProperty) ||
+          (effortProperty && (effortProperty.enumerable !== true || !("value" in effortProperty)))) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      outcome = outcomeProperty.value;
+      reasoningEffort = effortProperty?.value;
     } catch {
       throw new Error("Invalid reasoning adjustment result.");
     }
-    if (outcome === "applied" || outcome === "blocked-ultra") return outcome;
+    if (outcome === "applied" || outcome === "blocked-ultra") {
+      if (command.includeReasoningFeedback === true && reasoningEffort === undefined) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      if (reasoningEffort !== undefined &&
+          (typeof reasoningEffort !== "string" || reasoningEffort.trim().length === 0 ||
+            reasoningEffort.length > 64)) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      return {
+        outcome,
+        ...(command.includeReasoningFeedback === true && reasoningEffort !== undefined
+          ? { reasoningEffort } : {})
+      };
+    }
   }
   if (command.kind !== "reasoning" && value === undefined) return undefined;
   throw new Error("Invalid reasoning adjustment result.");

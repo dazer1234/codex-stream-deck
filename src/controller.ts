@@ -1267,31 +1267,41 @@ export class DeckController {
     const lifecycle = bindingLifecycle(binding);
     if (act === 0 && lifecycle !== "momentary") return;
     if (binding === "reasoning.decrease") {
-      const outcome = await this.sendDialToHost(
+      const result = await this.sendDialToHost(
         route,
         {
           kind: "reasoning", direction: "decrease",
-          includeUltra: gesture.includeUltraReasoning
+          includeUltra: gesture.includeUltraReasoning,
+          includeReasoningFeedback: true
         },
         () => this.microBridge.adjustReasoning("decrease", {
           includeUltra: gesture.includeUltraReasoning
         })
       );
+      const outcome = reasoningResultOutcome(result);
       if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+      else if (reasoningResultEffort(result) !== undefined) {
+        await this.renderDialSafely(registration);
+      }
       return;
     }
     if (binding === "reasoning.increase") {
-      const outcome = await this.sendDialToHost(
+      const result = await this.sendDialToHost(
         route,
         {
           kind: "reasoning", direction: "increase",
-          includeUltra: gesture.includeUltraReasoning
+          includeUltra: gesture.includeUltraReasoning,
+          includeReasoningFeedback: true
         },
         () => this.microBridge.adjustReasoning("increase", {
           includeUltra: gesture.includeUltraReasoning
         })
       );
+      const outcome = reasoningResultOutcome(result);
       if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+      else if (reasoningResultEffort(result) !== undefined) {
+        await this.renderDialSafely(registration);
+      }
       return;
     }
     if (binding === "new-task") {
@@ -1367,7 +1377,7 @@ export class DeckController {
     command: RelayCommand,
     local: () => Promise<void | ReasoningAdjustmentExecution>,
     requireReady = true
-  ): Promise<ReasoningAdjustmentResult | undefined> {
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
     const localHost = this.localHost;
     const localRequested = route.hostId != null
       ? route.hostId === localHost?.hostId
@@ -1377,14 +1387,19 @@ export class DeckController {
         throw new Error("The captured Codex host is not ready.");
       }
       const execution = await local();
-      if (!execution || typeof execution !== "object" || Array.isArray(execution)) return undefined;
-      try {
-        const property = Object.getOwnPropertyDescriptor(execution, "outcome");
-        const outcome = property && Object.prototype.hasOwnProperty.call(property, "value")
-          ? property.value
-          : undefined;
-        return outcome === "applied" || outcome === "blocked-ultra" ? outcome : undefined;
-      } catch { return undefined; }
+      const parsed = parseReasoningExecution(execution);
+      if (!parsed) return undefined;
+      const current = this.localSnapshot;
+      if (parsed.reasoningEffort !== undefined &&
+          localHost != null && localHost === this.localHost &&
+          current != null && current.host.hostId === localHost.hostId) {
+        this.localSnapshotGeneration += 1;
+        this.localSnapshot = {
+          ...current,
+          snapshot: { ...current.snapshot, reasoningEffort: parsed.reasoningEffort }
+        };
+      }
+      return parsed.reasoningEffort === undefined ? parsed.outcome : parsed;
     }
     const remote = this.relayClient?.currentHost();
     if (!remote || (route.hostId != null
@@ -1399,7 +1414,9 @@ export class DeckController {
         !this.relayClient?.supportsCurrentReadyCapability(RELAY_REASONING_POLICY_CAPABILITY)) {
       throw new Error("Remote Codex host does not support reasoning policy controls.");
     }
-    return this.sendRemote(command);
+    const result = await this.sendRemote(command);
+    if (typeof result === "string" || result === undefined) return result;
+    return parseReasoningExecution(result);
   }
 
   private async refreshDialUsage(route: DialHostRoute): Promise<void> {
@@ -1606,7 +1623,9 @@ export class DeckController {
     return this.localHost != null && this.targetPlatform !== this.localHost.platform;
   }
 
-  private async sendRemote(command: RelayCommand): Promise<ReasoningAdjustmentResult | undefined> {
+  private async sendRemote(
+    command: RelayCommand
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
     if (!this.relayClient) throw new Error("Remote Codex relay is not configured.");
     return this.relayClient.send(command);
   }
@@ -1711,4 +1730,46 @@ export class DeckController {
     this.keycapImages.set(cacheKey, pending);
     return pending;
   }
+}
+
+function parseReasoningExecution(value: unknown): ReasoningAdjustmentExecution | undefined {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    const expected = ["outcome", ...(Object.prototype.hasOwnProperty.call(descriptors, "reasoningEffort")
+      ? ["reasoningEffort"] : [])];
+    if (keys.length !== expected.length || keys.some((key) =>
+      typeof key !== "string" || !expected.includes(key))) return undefined;
+    const outcomeProperty = descriptors.outcome;
+    const effortProperty = descriptors.reasoningEffort;
+    if (!outcomeProperty || outcomeProperty.enumerable !== true || !("value" in outcomeProperty) ||
+        (effortProperty && (effortProperty.enumerable !== true || !("value" in effortProperty)))) {
+      return undefined;
+    }
+    const outcome = outcomeProperty.value;
+    const reasoningEffort = effortProperty?.value;
+    if (outcome !== "applied" && outcome !== "blocked-ultra") return undefined;
+    if (reasoningEffort !== undefined &&
+        (typeof reasoningEffort !== "string" || reasoningEffort.trim().length === 0 ||
+          reasoningEffort.length > 64)) return undefined;
+    return {
+      outcome,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort })
+    };
+  } catch { return undefined; }
+}
+
+function reasoningResultOutcome(
+  result: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined
+): ReasoningAdjustmentResult | undefined {
+  return typeof result === "string" ? result : result?.outcome;
+}
+
+function reasoningResultEffort(
+  result: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined
+): string | undefined {
+  return typeof result === "object" ? result.reasoningEffort : undefined;
 }

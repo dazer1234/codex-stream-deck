@@ -5,11 +5,14 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { isAllowedRelayHost } from "./relay-network.js";
 import {
-  RELAY_PROTOCOL_VERSION, RELAY_REASONING_POLICY_CAPABILITY,
+  RELAY_PROTOCOL_VERSION, RELAY_REASONING_FEEDBACK_CAPABILITY,
+  RELAY_REASONING_POLICY_CAPABILITY,
   normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
   type HostSnapshot, type RelayCommand, type RelayResultMessage
 } from "./relay-protocol.js";
-import type { CodexHost, HostHealth, ReasoningAdjustmentResult } from "./types.js";
+import type {
+  CodexHost, HostHealth, ReasoningAdjustmentExecution, ReasoningAdjustmentResult
+} from "./types.js";
 
 export type RelayClientConfig = { enabled: boolean; url: string; token: string };
 
@@ -41,7 +44,10 @@ export class CodexRelayClient {
   private readonly pending = new Map<string, {
     commandKind: RelayCommand["kind"];
     legacyUnrestrictedReasoning: boolean;
-    resolve: (outcome: ReasoningAdjustmentResult | undefined) => void;
+    reasoningFeedbackOptIn: boolean;
+    connectionGeneration: number;
+    readyHostId: string;
+    resolve: (outcome: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }>();
@@ -90,7 +96,9 @@ export class CodexRelayClient {
       this.capabilities.has(capability);
   }
 
-  async send(command: RelayCommand): Promise<ReasoningAdjustmentResult | undefined> {
+  async send(
+    command: RelayCommand
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN ||
         this.readyGeneration !== this.connectionGeneration || this.readyHostId == null ||
@@ -103,16 +111,30 @@ export class CodexRelayClient {
     }
     const legacyUnrestrictedReasoning = command.kind === "reasoning" &&
       command.includeUltra && !supportsReasoningPolicy;
+    const reasoningFeedbackOptIn = command.kind === "reasoning" &&
+      command.includeReasoningFeedback === true &&
+      this.capabilities.has(RELAY_REASONING_FEEDBACK_CAPABILITY);
+    const wireCommand: RelayCommand = command.kind === "reasoning" && !reasoningFeedbackOptIn
+      ? {
+          kind: "reasoning", direction: command.direction,
+          includeUltra: command.includeUltra
+        }
+      : command;
     const requestId = randomUUID();
-    return new Promise<ReasoningAdjustmentResult | undefined>((resolve, reject) => {
+    return new Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error("Remote Codex command timed out."));
       }, RELAY_COMMAND_TIMEOUT_MS);
       this.pending.set(requestId, {
-        commandKind: command.kind, legacyUnrestrictedReasoning, resolve, reject, timer
+        commandKind: command.kind, legacyUnrestrictedReasoning, reasoningFeedbackOptIn,
+        connectionGeneration: this.connectionGeneration,
+        readyHostId: this.readyHostId!,
+        resolve, reject, timer
       });
-      socket.send(JSON.stringify({ type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command }));
+      socket.send(JSON.stringify({
+        type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command: wireCommand
+      }));
     });
   }
 
@@ -178,6 +200,21 @@ export class CodexRelayClient {
       pending.reject(new Error(message.error || "Remote Codex command failed."));
       return;
     }
+    if (message.reasoningEffort !== undefined) {
+      if (pending.commandKind !== "reasoning" || !pending.reasoningFeedbackOptIn) {
+        pending.reject(new Error("Remote Codex returned unexpected reasoning feedback."));
+        return;
+      }
+      if (pending.connectionGeneration !== this.connectionGeneration ||
+          pending.connectionGeneration !== this.readyGeneration ||
+          pending.readyHostId !== this.readyHostId ||
+          pending.readyHostId !== this.host?.hostId ||
+          this.snapshotGeneration !== this.connectionGeneration ||
+          this.snapshot?.host.hostId !== pending.readyHostId) {
+        pending.reject(new Error("Remote Codex returned stale reasoning feedback."));
+        return;
+      }
+    }
     if (pending.commandKind === "reasoning" &&
         message.outcome !== "applied" && message.outcome !== "blocked-ultra") {
       if (pending.legacyUnrestrictedReasoning && message.outcome === undefined) {
@@ -185,6 +222,22 @@ export class CodexRelayClient {
         return;
       }
       pending.reject(new Error("Remote Codex returned an invalid reasoning adjustment result."));
+      return;
+    }
+    if (pending.reasoningFeedbackOptIn && message.reasoningEffort === undefined) {
+      pending.reject(new Error("Remote Codex omitted requested reasoning feedback."));
+      return;
+    }
+    if (message.reasoningEffort !== undefined) {
+      const current = this.snapshot!;
+      this.snapshot = {
+        ...current,
+        snapshot: { ...current.snapshot, reasoningEffort: message.reasoningEffort }
+      };
+      this.onSnapshot(this.snapshot);
+      pending.resolve({
+        outcome: message.outcome!, reasoningEffort: message.reasoningEffort
+      });
       return;
     }
     pending.resolve(message.outcome);

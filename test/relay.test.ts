@@ -118,6 +118,16 @@ test("relay command parser permits only the narrow native command surface", () =
     parseRelayCommand({ kind: "reasoning", direction: "decrease", includeUltra: false }),
     { kind: "reasoning", direction: "decrease", includeUltra: false }
   );
+  assert.deepEqual(
+    parseRelayCommand({
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true
+    }),
+    {
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true
+    }
+  );
   assert.deepEqual(parseRelayCommand({ kind: "rate-limit-reset" }), { kind: "rate-limit-reset" });
   assert.equal(parseRelayCommand({ kind: "rate-limit-reset", force: true }), null);
   assert.deepEqual(parseRelayCommand({ kind: "usage-refresh" }), { kind: "usage-refresh" });
@@ -198,6 +208,48 @@ test("relay reasoning command parsing accepts only exact own data properties wit
     parseRelayCommand(JSON.parse('{"kind":"reasoning","direction":"increase","includeUltra":false}')),
     { kind: "reasoning", direction: "increase", includeUltra: false }
   );
+
+  for (const invalid of [
+    { kind: "reasoning", direction: "increase", includeUltra: true, includeReasoningFeedback: false },
+    { kind: "reasoning", direction: "increase", includeUltra: true, includeReasoningFeedback: 1 },
+    { kind: "reasoning", direction: "increase", includeUltra: true, includeReasoningFeedback: "true" },
+    {
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true, extra: true
+    }
+  ]) assert.equal(parseRelayCommand(invalid), null);
+
+  const feedbackAccessor = { kind: "reasoning", direction: "increase", includeUltra: true };
+  Object.defineProperty(feedbackAccessor, "includeReasoningFeedback", {
+    enumerable: true,
+    get() { getterReads += 1; return true; }
+  });
+  assert.equal(parseRelayCommand(feedbackAccessor), null);
+  assert.equal(getterReads, 0);
+});
+
+test("reasoning feedback results require exact own bounded data", () => {
+  const result = {
+    type: "result", protocol: 1, requestId: "feedback", ok: true,
+    outcome: "applied", reasoningEffort: "xhigh"
+  };
+  assert.deepEqual(parseRelayServerMessage(result), result);
+
+  for (const reasoningEffort of ["", "   ", "x".repeat(65), null, 1, {}, []]) {
+    assert.equal(parseRelayServerMessage({ ...result, reasoningEffort }), null);
+  }
+  assert.equal(parseRelayServerMessage({ ...result, extra: true }), null);
+  assert.equal(parseRelayServerMessage({
+    type: "result", protocol: 1, requestId: "feedback", ok: true,
+    reasoningEffort: "xhigh"
+  }), null);
+  const accessor = { ...result };
+  Object.defineProperty(accessor, "reasoningEffort", {
+    enumerable: true,
+    get() { throw new Error("must not execute"); }
+  });
+  assert.equal(parseRelayServerMessage(accessor), null);
+  assert.equal(parseRelayServerMessage({ ...result, [Symbol("extra")]: true }), null);
 });
 
 test("iOS unrestricted reasoning commands encode the explicit Ultra policy", async () => {
@@ -1095,7 +1147,7 @@ test("authenticated relay publishes snapshots and dispatches typed commands", as
   assert.equal(first.type, "ready");
   assert.equal(first.bridge, "native-codex-micro");
   assert.deepEqual(first.capabilities, [
-    "agent", "action", "joystick", "encoder", "reasoning", "reasoning-policy", "keycap", "usage",
+    "agent", "action", "joystick", "encoder", "reasoning", "reasoning-policy", "reasoning-feedback", "keycap", "usage",
     "usage-refresh", "rate-limit-reset"
   ]);
   const second = await messages.next();
@@ -1160,6 +1212,133 @@ test("relay client and server round-trip typed reasoning outcomes without invent
   assert.deepEqual(policies, [{ includeUltra: true }, { includeUltra: false }]);
 });
 
+test("opted-in reasoning waits for the in-flight snapshot, publishes fresh state, then returns exact feedback", async (t) => {
+  const port = await freePort();
+  let refreshCall = 0;
+  let adjustments = 0;
+  let releaseOld!: (value: MicroSnapshot) => void;
+  const oldRefresh = new Promise<MicroSnapshot>((resolve) => { releaseOld = resolve; });
+  const control = {
+    refresh: async () => {
+      refreshCall += 1;
+      if (refreshCall === 1) return oldRefresh;
+      return { ...structuredClone(snapshot), reasoningEffort: "fresh-snapshot" };
+    },
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {},
+    adjustReasoning: async () => {
+      adjustments += 1;
+      return { outcome: "applied" as const, reasoningEffort: "xhigh" };
+    },
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => {
+    socket.close();
+    await server.close();
+  });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  const ready = await messages.next();
+  assert.equal(ready.type, "ready");
+  assert.ok((ready.capabilities as string[]).includes("reasoning-feedback"));
+  await waitUntil(() => refreshCall === 1);
+
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "reasoning-feedback",
+    command: {
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true
+    }
+  }));
+  await waitUntil(() => adjustments === 1);
+  releaseOld({ ...structuredClone(snapshot), reasoningEffort: "old-snapshot" });
+
+  const old = await messages.next();
+  const fresh = await messages.next();
+  const result = await messages.next();
+  assert.equal((old.snapshot as MicroSnapshot).reasoningEffort, "old-snapshot");
+  assert.equal((fresh.snapshot as MicroSnapshot).reasoningEffort, "fresh-snapshot");
+  assert.deepEqual(result, {
+    type: "result", protocol: 1, requestId: "reasoning-feedback", ok: true,
+    outcome: "applied", reasoningEffort: "xhigh"
+  });
+  assert.equal(refreshCall, 2);
+});
+
+test("new relay server keeps legacy reasoning requests and failures free of feedback", async (t) => {
+  const port = await freePort();
+  let reasoningExecution: { outcome: "applied"; reasoningEffort?: string } | Error = {
+    outcome: "applied", reasoningEffort: "xhigh"
+  };
+  const control = {
+    refresh: async () => snapshot,
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {},
+    adjustReasoning: async () => {
+      if (reasoningExecution instanceof Error) throw reasoningExecution;
+      return reasoningExecution;
+    },
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => {
+    socket.close();
+    await server.close();
+  });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await messages.next()).type, "ready");
+  assert.equal((await messages.next()).type, "snapshot");
+
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "legacy-reasoning",
+    command: { kind: "reasoning", direction: "increase", includeUltra: true }
+  }));
+  const legacy = await messages.next();
+  assert.deepEqual(legacy, {
+    type: "result", protocol: 1, requestId: "legacy-reasoning", ok: true, outcome: "applied"
+  });
+  assert.equal((await messages.next()).type, "snapshot");
+
+  reasoningExecution = { outcome: "applied" };
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "missing-feedback",
+    command: {
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true
+    }
+  }));
+  const missing = await messages.next();
+  assert.equal(missing.type, "result");
+  assert.equal(missing.requestId, "missing-feedback");
+  assert.equal(missing.ok, false);
+  assert.equal("reasoningEffort" in missing, false);
+
+  reasoningExecution = new Error("reasoning failed");
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "failed-reasoning",
+    command: {
+      kind: "reasoning", direction: "increase", includeUltra: true,
+      includeReasoningFeedback: true
+    }
+  }));
+  let failed = await messages.next();
+  while (failed.type !== "result" || failed.requestId !== "failed-reasoning") failed = await messages.next();
+  assert.equal(failed.ok, false);
+  assert.equal("reasoningEffort" in failed, false);
+});
+
 test("relay server fails closed when a reasoning control returns an invalid outcome", async (t) => {
   const port = await freePort();
   const control = {
@@ -1217,11 +1396,26 @@ test("relay client receives an error when a reasoning control omits its mandator
   client.start();
   await waitUntil(() => client.currentHealth().state === "ready");
 
-  for (execution of [undefined, null, {}, { outcome: "unexpected" }]) {
+  let getterReads = 0;
+  const accessor = { outcome: "applied" };
+  Object.defineProperty(accessor, "reasoningEffort", {
+    enumerable: true,
+    get() { getterReads += 1; return "xhigh"; }
+  });
+  for (execution of [
+    undefined, null, {}, { outcome: "unexpected" },
+    { outcome: "applied", reasoningEffort: "" },
+    { outcome: "applied", reasoningEffort: "x".repeat(65) },
+    { outcome: "applied", reasoningEffort: 1 },
+    { outcome: "applied", reasoningEffort: "xhigh", extra: true },
+    { outcome: "applied", reasoningEffort: "xhigh", [Symbol("extra")]: true },
+    accessor
+  ]) {
     await assert.rejects(client.send({
       kind: "reasoning", direction: "increase", includeUltra: true
     }), /invalid reasoning adjustment result/i);
   }
+  assert.equal(getterReads, 0);
 });
 
 test("relay client rejects an outcome-less reasoning success from a malformed peer", async (t) => {
@@ -1306,7 +1500,7 @@ test("relay client refuses restricted reasoning before sending to a legacy v1 pe
 test("relay client maps an outcome-less unrestricted reasoning success from a legacy v1 peer", async (t) => {
   const port = await freePort();
   const relay = new WebSocketServer({ host: "127.0.0.1", port });
-  let commandFrames = 0;
+  const commandFrames: Record<string, unknown>[] = [];
   relay.on("connection", (socket) => {
     socket.on("message", (raw) => {
       const message = JSON.parse(raw.toString()) as Record<string, unknown>;
@@ -1316,7 +1510,7 @@ test("relay client maps an outcome-less unrestricted reasoning success from a le
           capabilities: ["reasoning"], bridge: "native-codex-micro"
         }));
       } else if (message.type === "command") {
-        commandFrames += 1;
+        commandFrames.push(message);
         socket.send(JSON.stringify({
           type: "result", protocol: 1, requestId: message.requestId, ok: true
         }));
@@ -1335,9 +1529,221 @@ test("relay client maps an outcome-less unrestricted reasoning success from a le
   await waitUntil(() => client.supportsCapability("reasoning"));
 
   assert.equal(await client.send({
-    kind: "reasoning", direction: "increase", includeUltra: true
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
   }), "applied");
-  assert.equal(commandFrames, 1);
+  assert.equal(commandFrames.length, 1);
+  assert.deepEqual(commandFrames[0]!.command, {
+    kind: "reasoning", direction: "increase", includeUltra: true
+  }, "new clients must send the legacy shape to peers without reasoning-feedback");
+});
+
+test("relay client immutably patches confirmed opted-in effort before callback and resolution", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let serverSocket: WebSocket | undefined;
+  let requestId = "";
+  let receivedCommand: Record<string, unknown> | undefined;
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback"],
+          bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: { ...structuredClone(snapshot), reasoningEffort: "high" }
+        }));
+      } else if (message.type === "command") {
+        receivedCommand = message.command as Record<string, unknown>;
+        requestId = String(message.requestId);
+      }
+    });
+  });
+  const delivered: HostSnapshot[] = [];
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) },
+    (value) => delivered.push(value), () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => delivered.length === 1);
+
+  const send = client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
+  });
+  await waitUntil(() => requestId !== "");
+  assert.deepEqual(receivedCommand, {
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
+  });
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+    snapshot: { ...structuredClone(snapshot), reasoningEffort: "fresh-before-result" }
+  }));
+  await waitUntil(() => delivered.length === 2);
+  const beforePatch = client.currentSnapshot()!;
+  const beforeObservedAt = beforePatch.observedAt;
+  serverSocket!.send(JSON.stringify({
+    type: "result", protocol: 1, requestId, ok: true,
+    outcome: "applied", reasoningEffort: "xhigh"
+  }));
+
+  assert.deepEqual(await send, { outcome: "applied", reasoningEffort: "xhigh" });
+  assert.equal(delivered.length, 3);
+  assert.equal(beforePatch.snapshot.reasoningEffort, "fresh-before-result");
+  assert.notEqual(client.currentSnapshot(), beforePatch);
+  assert.notEqual(client.currentSnapshot()!.snapshot, beforePatch.snapshot);
+  assert.equal(client.currentSnapshot()!.observedAt, beforeObservedAt);
+  assert.equal(client.currentSnapshot()!.snapshot.reasoningEffort, "xhigh");
+  assert.equal(delivered.at(-1), client.currentSnapshot());
+});
+
+test("relay client never patches reasoning feedback from a stale connection generation", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let requestId = "";
+  relay.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback"],
+          bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: { ...structuredClone(snapshot), reasoningEffort: "high" }
+        }));
+      } else if (message.type === "command") requestId = String(message.requestId);
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  const retained = client.currentSnapshot();
+  const send = client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
+  });
+  await waitUntil(() => requestId !== "");
+  const internals = client as unknown as {
+    connectionGeneration: number;
+    handleMessage(raw: string, generation: number): void;
+  };
+  internals.connectionGeneration += 1;
+  internals.handleMessage(JSON.stringify({
+    type: "result", protocol: 1, requestId, ok: true,
+    outcome: "applied", reasoningEffort: "xhigh"
+  }), internals.connectionGeneration);
+
+  await assert.rejects(send, /stale reasoning feedback/i);
+  assert.equal(client.currentSnapshot(), retained);
+  assert.equal(client.currentSnapshot()?.snapshot.reasoningEffort, "high");
+});
+
+test("relay client rejects unexpected feedback without patching retained state", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let serverSocket: WebSocket | undefined;
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["action", "reasoning", "reasoning-policy", "reasoning-feedback"],
+          bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: { ...structuredClone(snapshot), reasoningEffort: "high" }
+        }));
+      } else if (message.type === "command") {
+        socket.send(JSON.stringify({
+          type: "result", protocol: 1, requestId: message.requestId, ok: true,
+          outcome: "applied",
+          reasoningEffort: "xhigh"
+        }));
+      }
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    serverSocket?.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  const retained = client.currentSnapshot();
+
+  await assert.rejects(client.send({ kind: "action", slot: "ACT06", act: 1 }), /unexpected reasoning feedback/i);
+  await assert.rejects(client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true
+  }), /unexpected reasoning feedback/i);
+  assert.equal(client.currentSnapshot(), retained);
+  assert.equal(client.currentSnapshot()?.snapshot.reasoningEffort, "high");
+});
+
+test("relay client rejects requested feedback omitted by a capable peer", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  relay.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback"],
+          bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot
+        }));
+      } else if (message.type === "command") {
+        socket.send(JSON.stringify({
+          type: "result", protocol: 1, requestId: message.requestId,
+          ok: true, outcome: "applied"
+        }));
+      }
+    });
+  });
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+
+  await assert.rejects(client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
+  }), /omitted requested reasoning feedback/i);
 });
 
 test("usage refresh publishes a new post-command snapshot before acknowledging success", async (t) => {

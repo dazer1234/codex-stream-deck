@@ -29,12 +29,13 @@ type ControllerProbe = {
   localHealth: HostHealth;
   targetHostId?: string;
   targetPlatform: CodexHost["platform"];
+  localSnapshotGeneration: number;
   relayClient?: {
     currentHost(): CodexHost | undefined;
     currentHealth(): HostHealth;
     currentSnapshot(): { host: CodexHost; observedAt: number; snapshot: MicroSnapshot } | undefined;
     supportsCurrentReadyCapability?(capability: string): boolean;
-    send(command: unknown): Promise<void | ReasoningAdjustmentResult>;
+    send(command: unknown): Promise<void | ReasoningAdjustmentResult | ReasoningAdjustmentExecution>;
   };
   microBridge: {
     sendAgent(slot: number, act: 0 | 1, threadKey?: string): Promise<void>;
@@ -61,7 +62,7 @@ type ControllerProbe = {
     command: unknown,
     local: () => Promise<unknown>,
     requireReady?: boolean
-  ): Promise<ReasoningAdjustmentResult | undefined>;
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined>;
   refreshInFlight?: Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
   renderAll(): Promise<void>;
@@ -688,6 +689,96 @@ test("local dial outcome extraction ignores malformed structured executions", as
   assert.equal(outcome, undefined);
 });
 
+test("local confirmed reasoning renders immediately and supersedes an older refresh", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-local-immediate");
+  const state = probe(controller);
+  const staleRefresh = deferred<MicroSnapshot>();
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async refresh() { return staleRefresh.promise; },
+    async adjustReasoning() {
+      return { outcome: "applied", reasoningEffort: "xhigh" };
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+  const originalSnapshot = state.localSnapshot;
+  const originalObservedAt = originalSnapshot.observedAt;
+  const older = state.refresh();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+  const immediateValue = (action.feedbackCalls.at(-1) as { value: string }).value;
+  const confirmedSnapshot = state.localSnapshot;
+  const confirmedGeneration = state.localSnapshotGeneration;
+
+  staleRefresh.resolve({ ...structuredClone(SNAPSHOT), reasoningEffort: "medium" });
+  await older;
+  await settle();
+
+  assert.equal(immediateValue, "XHIGH", "feedback must not wait for the 1.2 second poll");
+  assert.equal(confirmedGeneration, 1);
+  assert.notEqual(confirmedSnapshot, originalSnapshot);
+  assert.notEqual(confirmedSnapshot.snapshot, originalSnapshot.snapshot);
+  assert.equal(confirmedSnapshot.observedAt, originalObservedAt);
+  assert.equal(state.localSnapshot, confirmedSnapshot);
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "xhigh");
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "XHIGH");
+  controller.unregisterDial(action);
+});
+
+test("local reasoning feedback accepts only exact own bounded execution data", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  let getterReads = 0;
+  const accessor = { outcome: "applied" };
+  Object.defineProperty(accessor, "reasoningEffort", {
+    enumerable: true,
+    get() { getterReads += 1; return "xhigh"; }
+  });
+  const invalid = [
+    { outcome: "applied", reasoningEffort: "" },
+    { outcome: "applied", reasoningEffort: " ".repeat(3) },
+    { outcome: "applied", reasoningEffort: "x".repeat(65) },
+    { outcome: "applied", reasoningEffort: 1 },
+    { outcome: "applied", reasoningEffort: "xhigh", extra: true },
+    { outcome: "applied", reasoningEffort: "xhigh", [Symbol("extra")]: true },
+    accessor
+  ];
+
+  for (const execution of invalid) {
+    const result = await state.sendDialToHost(
+      { kind: "host", hostId: HOST.hostId, platform: HOST.platform },
+      {
+        kind: "reasoning", direction: "increase", includeUltra: true,
+        includeReasoningFeedback: true
+      },
+      async () => execution as ReasoningAdjustmentExecution,
+      false
+    );
+    assert.equal(result, undefined);
+    assert.equal(state.localSnapshot.snapshot.reasoningEffort, "high");
+  }
+  assert.equal(getterReads, 0);
+});
+
 test("remote reasoning detents carry each dial's explicit Ultra policy", async () => {
   const controller = new DeckController();
   const action = fakeDial("reasoning-remote-policy");
@@ -714,9 +805,183 @@ test("remote reasoning detents carry each dial's explicit Ultra policy", async (
   await idle(controller, action.id);
 
   assert.deepEqual(commands, [
-    { kind: "reasoning", direction: "increase", includeUltra: false },
-    { kind: "reasoning", direction: "decrease", includeUltra: true }
+    {
+      kind: "reasoning", direction: "increase", includeUltra: false,
+      includeReasoningFeedback: true
+    },
+    {
+      kind: "reasoning", direction: "decrease", includeUltra: true,
+      includeReasoningFeedback: true
+    }
   ]);
+});
+
+test("remote confirmed reasoning rerenders the same live registration immediately", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-remote-immediate");
+  const state = probe(controller);
+  let remoteSnapshot = {
+    host: REMOTE_HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  const commands: unknown[] = [];
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => remoteSnapshot,
+    supportsCurrentReadyCapability: () => true,
+    async send(command) {
+      commands.push(command);
+      remoteSnapshot = {
+        ...remoteSnapshot,
+        snapshot: { ...remoteSnapshot.snapshot, reasoningEffort: "xhigh" }
+      };
+      return { outcome: "applied", reasoningEffort: "xhigh" };
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(commands, [{
+    kind: "reasoning", direction: "increase", includeUltra: false,
+    includeReasoningFeedback: true
+  }]);
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "XHIGH");
+  controller.unregisterDial(action);
+});
+
+test("remote reasoning result never renders a replaced or disposed registration", async () => {
+  for (const lifecycle of ["replaced", "disposed"] as const) {
+    const controller = new DeckController();
+    const oldAction = fakeDial(`reasoning-remote-stale-${lifecycle}`);
+    const replacement = fakeDial(oldAction.id);
+    const state = probe(controller);
+    const response = deferred<void>();
+    let remoteSnapshot = {
+      host: REMOTE_HOST, observedAt: 1_000,
+      snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+    };
+    state.localHost = HOST;
+    state.targetHostId = REMOTE_HOST.hostId;
+    state.targetPlatform = REMOTE_HOST.platform;
+    state.relayClient = {
+      currentHost: () => REMOTE_HOST,
+      currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+      currentSnapshot: () => remoteSnapshot,
+      supportsCurrentReadyCapability: () => true,
+      async send() {
+        await response.promise;
+        remoteSnapshot = {
+          ...remoteSnapshot,
+          snapshot: { ...remoteSnapshot.snapshot, reasoningEffort: "xhigh" }
+        };
+        return { outcome: "applied", reasoningEffort: "xhigh" };
+      }
+    };
+    controller.registerDial(oldAction, expandDialPreset("reasoning"));
+    await settle();
+    const oldRegistration = probe(controller).dials.get(oldAction.id)!;
+    controller.rotateDial(oldAction, 1);
+    await settle();
+    if (lifecycle === "replaced") {
+      controller.registerDial(replacement, expandDialPreset("reasoning"));
+      await settle();
+    } else controller.unregisterDial(oldAction);
+    const oldCalls = oldAction.feedbackCalls.length;
+    const replacementCalls = replacement.feedbackCalls.length;
+    response.resolve();
+    await oldRegistration.queue.idle();
+    await settle();
+
+    assert.equal(oldAction.feedbackCalls.length, oldCalls, lifecycle);
+    assert.equal(replacement.feedbackCalls.length, replacementCalls, lifecycle);
+    if (lifecycle === "replaced") controller.unregisterDial(replacement);
+  }
+});
+
+test("rapid remote reasoning detents render confirmed efforts in command order", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-remote-ordered");
+  const state = probe(controller);
+  const efforts = ["medium", "high", "xhigh"];
+  let remoteSnapshot = {
+    host: REMOTE_HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "low" }
+  };
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => remoteSnapshot,
+    supportsCurrentReadyCapability: () => true,
+    async send() {
+      const reasoningEffort = efforts.shift()!;
+      remoteSnapshot = {
+        ...remoteSnapshot,
+        snapshot: { ...remoteSnapshot.snapshot, reasoningEffort }
+      };
+      return { outcome: "applied", reasoningEffort };
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+  controller.rotateDial(action, 3);
+  await idle(controller, action.id);
+
+  assert.deepEqual(
+    action.feedbackCalls.map((call) => (call as { value: string }).value),
+    ["LOW", "MEDIUM", "HIGH", "XHIGH"]
+  );
+  controller.unregisterDial(action);
+});
+
+test("remote missing, malformed, and failed feedback never invent a reasoning transition", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-remote-invalid-feedback");
+  const state = probe(controller);
+  const results: Array<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | Error> = [
+    "applied",
+    { outcome: "applied", reasoningEffort: "" },
+    new Error("remote adjustment failed")
+  ];
+  const remoteSnapshot = {
+    host: REMOTE_HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => remoteSnapshot,
+    supportsCurrentReadyCapability: () => true,
+    async send() {
+      const result = results.shift()!;
+      if (result instanceof Error) throw result;
+      return result;
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+  controller.rotateDial(action, 3);
+  await idle(controller, action.id);
+
+  assert.deepEqual(
+    action.feedbackCalls.map((call) => (call as { value: string }).value),
+    ["HIGH"]
+  );
+  assert.equal(action.alerts, 1);
+  assert.equal(remoteSnapshot.snapshot.reasoningEffort, "high");
+  controller.unregisterDial(action);
 });
 
 test("restricted remote reasoning refuses a legacy peer before controller send", async () => {
@@ -799,19 +1064,28 @@ test("blocked local and remote reasoning show identical registration-safe Ultra 
       snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
     };
     state.localHealth = { state: "ready", changedAt: 1_000 };
+    let remoteSnapshot = {
+      host: REMOTE_HOST, observedAt: 1_000,
+      snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+    };
     state.microBridge = {
       async sendAgent() {},
-      async adjustReasoning() { return { outcome: "blocked-ultra" }; }
+      async adjustReasoning() {
+        return { outcome: "blocked-ultra", reasoningEffort: "max" };
+      }
     };
     state.relayClient = {
       currentHost: () => REMOTE_HOST,
       currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
-      currentSnapshot: () => ({
-        host: REMOTE_HOST, observedAt: 1_000,
-        snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
-      }),
+      currentSnapshot: () => remoteSnapshot,
       supportsCurrentReadyCapability: () => true,
-      async send() { return "blocked-ultra"; }
+      async send() {
+        remoteSnapshot = {
+          ...remoteSnapshot,
+          snapshot: { ...remoteSnapshot.snapshot, reasoningEffort: "max" }
+        };
+        return { outcome: "blocked-ultra", reasoningEffort: "max" };
+      }
     };
     controller.registerDial(action, {
       ...expandDialPreset("reasoning"), includeUltraReasoning: false
@@ -822,6 +1096,13 @@ test("blocked local and remote reasoning show identical registration-safe Ultra 
     await idle(controller, action.id);
 
     assert.deepEqual(action.feedbackCalls.at(-1), expected, route);
+    assert.equal(
+      route === "local"
+        ? state.localSnapshot?.snapshot.reasoningEffort
+        : state.relayClient!.currentSnapshot()?.snapshot.reasoningEffort,
+      "max",
+      `${route} authoritative feedback is retained behind the notice`
+    );
     assert.equal(action.alerts, 0, route);
     controller.unregisterDial(action);
   }
