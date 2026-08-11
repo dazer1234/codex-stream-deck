@@ -10,6 +10,7 @@ import {
 import { OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 
 const text = (path: string) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+const CODEX_DIAL_ACTION_UUID = "com.simeo.codex-deck.codex-dial";
 
 type ManifestAction = {
   UUID: string;
@@ -131,6 +132,7 @@ async function inspectorHarness(): Promise<{
   document: FakeDocument;
   sockets: FakeSocket[];
   connect: (...args: string[]) => void;
+  connectRaw: (...args: unknown[]) => void;
   normalize: (input: unknown) => Record<string, unknown>;
 }> {
   const source = await text("static/property-inspector/codex-dial.html");
@@ -174,14 +176,25 @@ async function inspectorHarness(): Promise<{
   runInNewContext(`${script}\nwindow.__normalizedSettings = normalizedSettings;`, {
     window, document, WebSocket: FakeWebSocket, JSON
   });
-  const connect = window.connectElgatoStreamDeckSocket;
+  const connectRaw = window.connectElgatoStreamDeckSocket;
   const normalize = window.__normalizedSettings;
-  assert.equal(typeof connect, "function");
+  assert.equal(typeof connectRaw, "function");
   assert.equal(typeof normalize, "function");
+  const connect = (...args: string[]): void => {
+    const copy = [...args];
+    try {
+      const parsed = JSON.parse(copy[4] || "{}");
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) &&
+          !Object.hasOwn(parsed, "action")) parsed.action = CODEX_DIAL_ACTION_UUID;
+      copy[4] = JSON.stringify(parsed);
+    } catch {}
+    (connectRaw as (...values: string[]) => void)(...copy);
+  };
   return {
     document,
     sockets,
-    connect: connect as (...args: string[]) => void,
+    connect,
+    connectRaw: connectRaw as (...args: unknown[]) => void,
     normalize: normalize as (input: unknown) => Record<string, unknown>
   };
 }
@@ -193,6 +206,17 @@ function field(document: FakeDocument, id: string): FakeElement {
 }
 
 function decodedMessages(socket: FakeSocket): Array<Record<string, unknown>> {
+  return socket.sent.map((payload) => {
+    const message = JSON.parse(payload) as Record<string, unknown>;
+    if (message.event === "setSettings" || message.event === "sendToPlugin") {
+      assert.equal(message.action, CODEX_DIAL_ACTION_UUID);
+      delete message.action;
+    }
+    return message;
+  });
+}
+
+function rawDecodedMessages(socket: FakeSocket): Array<Record<string, unknown>> {
   return socket.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
 }
 
@@ -310,6 +334,80 @@ test("Codex Dial adapter forwards property inspector lifecycle and messages only
   assert.deepEqual(calls.map(({ method }) => method), ["pi-appear", "pi-message", "pi-disappear"]);
   assert.equal(calls[1]?.action, dial);
   assert.equal(calls[1]?.payload, request);
+});
+
+test("property inspector includes the exact action UUID in every settings and plugin frame", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({
+      action: CODEX_DIAL_ACTION_UUID,
+      context: "dial-action-frame",
+      payload: { settings: expandDialPreset("reasoning") }
+    })
+  );
+  sockets[0]?.open();
+  field(document, "press").value = "host.toggle";
+  field(document, "press").dispatch("change");
+  const frames = rawDecodedMessages(sockets[0]!);
+  assert.deepEqual(frames[1], {
+    event: "sendToPlugin",
+    action: CODEX_DIAL_ACTION_UUID,
+    context: "dial-action-frame",
+    payload: { kind: "request-model-catalog", requestGeneration: 1 }
+  });
+  assert.equal(frames.at(-1)?.event, "setSettings");
+  assert.equal(frames.at(-1)?.action, CODEX_DIAL_ACTION_UUID);
+});
+
+test("missing or malformed action identity fails closed without losing local edits", async () => {
+  let getterCalls = 0;
+  const accessorActionInfo = Object.defineProperty({}, "action", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return CODEX_DIAL_ACTION_UUID;
+    }
+  });
+  for (const actionInfo of [
+    JSON.stringify({ context: "missing", payload: { settings: expandDialPreset("reasoning") } }),
+    JSON.stringify({ action: "com.example.wrong", context: "wrong", payload: { settings: expandDialPreset("reasoning") } }),
+    JSON.stringify({ action: 7, context: "typed", payload: { settings: expandDialPreset("reasoning") } }),
+    "null",
+    accessorActionInfo,
+    { action: Symbol("codex-dial") }
+  ]) {
+    const { document, sockets, connectRaw } = await inspectorHarness();
+    connectRaw("24680", "plugin-uuid", "registerPropertyInspector", "{}", actionInfo);
+    sockets[0]?.open();
+    field(document, "press").value = "host.toggle";
+    field(document, "press").dispatch("change");
+    assert.deepEqual(rawDecodedMessages(sockets[0]!), [
+      { event: "registerPropertyInspector", uuid: "plugin-uuid" }
+    ]);
+    assert.equal(field(document, "press").value, "host.toggle", "failed send retains the local edit");
+  }
+  assert.equal(getterCalls, 0, "action accessors are never invoked");
+});
+
+test("reconnect resets action authority and stale sockets cannot send with an old action", async () => {
+  const { document, sockets, connectRaw } = await inspectorHarness();
+  connectRaw(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ action: CODEX_DIAL_ACTION_UUID, context: "valid", payload: { settings: expandDialPreset("reasoning") } })
+  );
+  connectRaw(
+    "24681", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ action: "com.example.wrong", context: "invalid", payload: { settings: expandDialPreset("reasoning") } })
+  );
+  sockets[0]?.open();
+  sockets[1]?.open();
+  field(document, "press").value = "host.toggle";
+  field(document, "press").dispatch("change");
+  assert.deepEqual(rawDecodedMessages(sockets[0]!), []);
+  assert.deepEqual(rawDecodedMessages(sockets[1]!), [
+    { event: "registerPropertyInspector", uuid: "plugin-uuid" }
+  ]);
 });
 
 test("property inspector exposes the Model Presets editor and requests live authority", async () => {

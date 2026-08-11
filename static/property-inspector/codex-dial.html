@@ -245,7 +245,10 @@
   <script>
     let websocket;
     let context;
+    let actionUuid;
     let connectionGeneration = 0;
+
+    const CODEX_DIAL_ACTION_UUID = "com.simeo.codex-deck.codex-dial";
 
     const PRESETS = {
       reasoning: {
@@ -825,15 +828,13 @@
       payload.version = 2;
       payload.customized = customized;
       settings = payload;
-      if (websocket?.readyState === WebSocket.OPEN) {
-        websocket.send(JSON.stringify({ event: "setSettings", context, payload }));
-      }
+      if (websocket?.readyState !== WebSocket.OPEN || actionUuid !== CODEX_DIAL_ACTION_UUID) return false;
+      websocket.send(JSON.stringify({ event: "setSettings", action: actionUuid, context, payload }));
+      return true;
     }
 
     function persistAndQueue(customized = true) {
-      const wasOpen = websocket?.readyState === WebSocket.OPEN;
-      persist(customized);
-      if (!wasOpen) hasPendingSettings = true;
+      if (!persist(customized)) hasPendingSettings = true;
     }
 
     function bindControls() {
@@ -879,10 +880,11 @@
     }
 
     function requestModelCatalog() {
-      if (websocket?.readyState !== WebSocket.OPEN) return;
+      if (websocket?.readyState !== WebSocket.OPEN || actionUuid !== CODEX_DIAL_ACTION_UUID) return;
       catalogRequestGeneration += 1;
       websocket.send(JSON.stringify({
         event: "sendToPlugin",
+        action: actionUuid,
         context,
         payload: { kind: "request-model-catalog", requestGeneration: catalogRequestGeneration }
       }));
@@ -946,6 +948,7 @@
     }
 
     window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
+      actionUuid = undefined;
       const replacedSocket = websocket;
       if (replacedSocket && typeof replacedSocket.close === "function") {
         try { replacedSocket.close(); } catch {}
@@ -959,6 +962,11 @@
         const parsed = JSON.parse(actionInfo || "{}");
         action = record(parsed) ? parsed : {};
       } catch { action = {}; }
+      const actionDescriptor = Object.getOwnPropertyDescriptor(action, "action");
+      if (actionDescriptor && hasOwn(actionDescriptor, "value") &&
+          actionDescriptor.value === CODEX_DIAL_ACTION_UUID && Object.getOwnPropertySymbols(action).length === 0) {
+        actionUuid = CODEX_DIAL_ACTION_UUID;
+      }
       context = hasOwn(action, "context") && typeof action.context === "string" ? action.context : uuid;
       const initialSettings = hasOwn(action, "payload") && record(action.payload) &&
         hasOwn(action.payload, "settings") ? action.payload.settings : PRESETS.reasoning;
@@ -970,8 +978,8 @@
         if (generation !== connectionGeneration) return;
         socket.send(JSON.stringify({ event: registerEvent, uuid }));
         requestModelCatalog();
-        if (hasPendingSettings) {
-          socket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
+        if (hasPendingSettings && actionUuid === CODEX_DIAL_ACTION_UUID) {
+          socket.send(JSON.stringify({ event: "setSettings", action: actionUuid, context, payload: settings }));
           hasPendingSettings = false;
         }
       });
