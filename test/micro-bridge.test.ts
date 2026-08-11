@@ -2385,8 +2385,20 @@ test("paired model preset request validation rejects accessors and proxies witho
   assert.equal(connected, 0);
 });
 
+test("paired model preset selector accepts the current live 221-node React ancestry", async () => {
+  const harness = createModelPresetHarness({ ancestorTailDepth: 220 });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  assert.deepEqual(await bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  }), { modelId: "gpt-5.6-terra", reasoningEffort: "medium" });
+  assert.deepEqual(harness.selectorCalls, [["gpt-5.6-terra", "medium"]]);
+});
+
 test("paired model preset selector fails closed when the React ancestor traversal exceeds its bound", async () => {
-  const harness = createModelPresetHarness({ ancestorTailDepth: 50 });
+  const harness = createModelPresetHarness({ ancestorTailDepth: 256 });
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
   testBridge.ensureConnected = async () => {};

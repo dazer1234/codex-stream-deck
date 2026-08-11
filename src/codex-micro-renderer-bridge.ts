@@ -880,7 +880,7 @@ export function readModelPresetSelector(
     const candidates: ModelPresetSelector[] = [];
     let fiber: unknown = fiberProperty.value;
     const seen = new Set<object>();
-    for (let depth = 0; fiber && typeof fiber === "object" && depth < 50; depth++) {
+    for (let depth = 0; fiber && typeof fiber === "object" && depth < 256; depth++) {
       if (seen.has(fiber as object)) return undefined;
       if (Object.getOwnPropertySymbols(fiber).length > 0) return undefined;
       seen.add(fiber as object);
