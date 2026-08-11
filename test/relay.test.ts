@@ -2296,6 +2296,62 @@ test("relay client preserves last-known tasks but marks their host offline after
   client.close();
 });
 
+test("relay client bounds pending commands, recovers capacity, and cleans synchronous send failures", async () => {
+  const makeClient = (send: (frame: string) => void) => {
+    const client = new CodexRelayClient(
+      { enabled: true, url: "ws://127.0.0.1:9999", token: "t".repeat(32) }, () => {}, () => {}
+    );
+    const state = client as unknown as {
+      socket: { readyState: number; send(frame: string): void; close(): void };
+      host: CodexHost;
+      connectionGeneration: number;
+      readyGeneration: number;
+      readyHostId: string;
+      readyPlatform: CodexHost["platform"];
+      identityViolationGeneration: number;
+      pending: Map<string, unknown>;
+      handleMessage(raw: string, generation: number): void;
+    };
+    state.socket = { readyState: WebSocket.OPEN, send, close() {} };
+    state.host = host;
+    state.connectionGeneration = 1;
+    state.readyGeneration = 1;
+    state.readyHostId = host.hostId;
+    state.readyPlatform = host.platform;
+    state.identityViolationGeneration = 0;
+    return { client, state };
+  };
+
+  const frames: Record<string, unknown>[] = [];
+  const { client, state } = makeClient((frame) =>
+    frames.push(JSON.parse(frame) as Record<string, unknown>));
+  const pending = Array.from({ length: 128 }, () =>
+    client.send({ kind: "action", slot: "ACT06", act: 1 }));
+  await assert.rejects(
+    client.send({ kind: "action", slot: "ACT06", act: 1 }),
+    /too many pending/i
+  );
+  assert.equal(frames.length, 128);
+  assert.equal(state.pending.size, 128);
+  state.handleMessage(JSON.stringify({
+    type: "result", protocol: 1, requestId: frames[0]!.requestId, ok: true
+  }), 1);
+  await pending[0];
+  const recovered = client.send({ kind: "action", slot: "ACT06", act: 1 });
+  assert.equal(frames.length, 129);
+  client.close();
+  await Promise.allSettled([...pending.slice(1), recovered]);
+  assert.equal(state.pending.size, 0);
+
+  const thrown = makeClient(() => { throw new Error("socket send exploded"); });
+  await assert.rejects(
+    thrown.client.send({ kind: "action", slot: "ACT06", act: 1 }),
+    /socket send exploded/i
+  );
+  assert.equal(thrown.state.pending.size, 0);
+  thrown.client.close();
+});
+
 test("relay capabilities are valid only for a snapshot from the current connection generation", async (t) => {
   const port = await freePort();
   const relay = new WebSocketServer({ host: "127.0.0.1", port });

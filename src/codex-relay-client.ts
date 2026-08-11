@@ -19,6 +19,7 @@ export type RelayClientConfig = { enabled: boolean; url: string; token: string }
 const CONFIG_PATH = join(codexDeckStateRoot(), "relay-client.json");
 export const RELAY_SNAPSHOT_STALE_MS = 5_000;
 export const RELAY_COMMAND_TIMEOUT_MS = 10_000;
+export const RELAY_MAX_PENDING_COMMANDS = 128;
 
 export function resolveRelayHealth(health: HostHealth, hasSnapshot: boolean, lastSnapshotReceivedAt: number, now = Date.now()): HostHealth {
   if (health.state === "ready" && (!hasSnapshot || now - lastSnapshotReceivedAt > RELAY_SNAPSHOT_STALE_MS)) {
@@ -130,6 +131,9 @@ export class CodexRelayClient {
         this.host?.hostId !== this.readyHostId || this.host.platform !== this.readyPlatform) {
       throw new Error("Remote Codex host is offline.");
     }
+    if (this.pending.size >= RELAY_MAX_PENDING_COMMANDS) {
+      throw new Error("Remote Codex relay has too many pending commands.");
+    }
     const supportsReasoningPolicy = this.capabilities.has(RELAY_REASONING_POLICY_CAPABILITY);
     if (command.kind === "model-preset" &&
         !this.supportsCapabilityForSnapshot(
@@ -168,9 +172,15 @@ export class CodexRelayClient {
         readyPlatform: this.readyPlatform!,
         resolve, reject, timer
       });
-      socket.send(JSON.stringify({
-        type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command: wireCommand
-      }));
+      try {
+        socket.send(JSON.stringify({
+          type: "command", protocol: RELAY_PROTOCOL_VERSION, requestId, command: wireCommand
+        }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(error);
+      }
     });
   }
 
