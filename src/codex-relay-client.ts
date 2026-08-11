@@ -39,6 +39,8 @@ export class CodexRelayClient {
   private connectionGeneration = 0;
   private readyGeneration = 0;
   private readyHostId?: string;
+  private readyPlatform?: CodexHost["platform"];
+  private identityViolationGeneration = 0;
   private snapshotGeneration = 0;
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
   private readonly pending = new Map<string, {
@@ -47,6 +49,7 @@ export class CodexRelayClient {
     reasoningFeedbackOptIn: boolean;
     connectionGeneration: number;
     readyHostId: string;
+    readyPlatform: CodexHost["platform"];
     resolve: (outcome: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
@@ -69,6 +72,8 @@ export class CodexRelayClient {
     this.capabilities.clear();
     this.readyGeneration = 0;
     this.readyHostId = undefined;
+    this.readyPlatform = undefined;
+    this.identityViolationGeneration = 0;
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
   }
@@ -78,21 +83,35 @@ export class CodexRelayClient {
   currentHealth(now = Date.now()): HostHealth {
     return resolveRelayHealth(this.health, this.snapshot != null, this.lastSnapshotReceivedAt, now);
   }
-  isConnected(): boolean { return this.socket?.readyState === WebSocket.OPEN && this.host != null; }
+  isConnected(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN &&
+      this.identityViolationGeneration !== this.connectionGeneration &&
+      this.readyGeneration === this.connectionGeneration &&
+      this.readyHostId != null && this.readyPlatform != null &&
+      this.host?.hostId === this.readyHostId && this.host.platform === this.readyPlatform;
+  }
   supportsCapability(capability: string): boolean { return this.capabilities.has(capability); }
   supportsCurrentReadyCapability(capability: string): boolean {
     return this.socket?.readyState === WebSocket.OPEN &&
-      this.readyGeneration === this.connectionGeneration && this.readyHostId != null &&
-      this.host?.hostId === this.readyHostId && this.capabilities.has(capability);
+      this.identityViolationGeneration !== this.connectionGeneration &&
+      this.readyGeneration === this.connectionGeneration &&
+      this.readyHostId != null && this.readyPlatform != null &&
+      this.host?.hostId === this.readyHostId && this.host.platform === this.readyPlatform &&
+      this.capabilities.has(capability);
   }
-  supportsCapabilityForSnapshot(capability: string, hostId: string): boolean {
+  supportsCapabilityForSnapshot(
+    capability: string,
+    hostId: string,
+    platform: CodexHost["platform"]
+  ): boolean {
     return this.socket?.readyState === WebSocket.OPEN &&
       this.currentHealth().state === "ready" &&
+      this.identityViolationGeneration !== this.connectionGeneration &&
       this.readyGeneration === this.connectionGeneration &&
       this.snapshotGeneration === this.connectionGeneration &&
-      this.readyHostId === hostId &&
-      this.host?.hostId === hostId &&
-      this.snapshot?.host.hostId === hostId &&
+      this.readyHostId === hostId && this.readyPlatform === platform &&
+      this.host?.hostId === hostId && this.host.platform === platform &&
+      this.snapshot?.host.hostId === hostId && this.snapshot.host.platform === platform &&
       this.capabilities.has(capability);
   }
 
@@ -101,8 +120,10 @@ export class CodexRelayClient {
   ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN ||
-        this.readyGeneration !== this.connectionGeneration || this.readyHostId == null ||
-        this.host?.hostId !== this.readyHostId) {
+        this.identityViolationGeneration === this.connectionGeneration ||
+        this.readyGeneration !== this.connectionGeneration ||
+        this.readyHostId == null || this.readyPlatform == null ||
+        this.host?.hostId !== this.readyHostId || this.host.platform !== this.readyPlatform) {
       throw new Error("Remote Codex host is offline.");
     }
     const supportsReasoningPolicy = this.capabilities.has(RELAY_REASONING_POLICY_CAPABILITY);
@@ -130,6 +151,7 @@ export class CodexRelayClient {
         commandKind: command.kind, legacyUnrestrictedReasoning, reasoningFeedbackOptIn,
         connectionGeneration: this.connectionGeneration,
         readyHostId: this.readyHostId!,
+        readyPlatform: this.readyPlatform!,
         resolve, reject, timer
       });
       socket.send(JSON.stringify({
@@ -164,16 +186,28 @@ export class CodexRelayClient {
     catch { return; }
     const message = parseRelayServerMessage(parsed);
     if (!message) return;
+    if (this.identityViolationGeneration === generation) return;
     if (message.type === "ready") {
-      if (this.readyGeneration === generation && this.readyHostId !== message.host.hostId) return;
+      if (this.readyGeneration === generation &&
+          (this.readyHostId !== message.host.hostId ||
+            this.readyPlatform !== message.host.platform)) {
+        this.invalidateIdentity(generation);
+        return;
+      }
       this.readyHostId = message.host.hostId;
+      this.readyPlatform = message.host.platform;
       this.host = message.host;
       this.capabilities = new Set(message.capabilities ?? []);
       this.readyGeneration = generation;
       this.health = { state: "degraded", reason: "awaiting-snapshot", changedAt: Date.now() };
       this.log(`Remote Codex host connected: ${message.host.hostName} (${message.host.platform}).`);
     } else if (message.type === "snapshot") {
-      if (this.readyGeneration !== generation || this.readyHostId !== message.host.hostId) return;
+      if (this.readyGeneration !== generation) return;
+      if (this.readyHostId !== message.host.hostId ||
+          this.readyPlatform !== message.host.platform) {
+        this.invalidateIdentity(generation);
+        return;
+      }
       const receivedAt = Date.now();
       this.host = message.host;
       this.snapshot = normalizeHostSnapshotAtReceipt(
@@ -185,7 +219,12 @@ export class CodexRelayClient {
       this.health = { state: "ready", changedAt: receivedAt };
       this.onSnapshot(this.snapshot);
     } else if (message.type === "health") {
-      if (this.readyGeneration !== generation || this.readyHostId !== message.host.hostId) return;
+      if (this.readyGeneration !== generation) return;
+      if (this.readyHostId !== message.host.hostId ||
+          this.readyPlatform !== message.host.platform) {
+        this.invalidateIdentity(generation);
+        return;
+      }
       this.host = message.host;
       this.health = { state: "degraded", reason: message.reason, changedAt: Date.now() };
     } else this.handleResult(message);
@@ -208,9 +247,12 @@ export class CodexRelayClient {
       if (pending.connectionGeneration !== this.connectionGeneration ||
           pending.connectionGeneration !== this.readyGeneration ||
           pending.readyHostId !== this.readyHostId ||
+          pending.readyPlatform !== this.readyPlatform ||
           pending.readyHostId !== this.host?.hostId ||
+          pending.readyPlatform !== this.host?.platform ||
           this.snapshotGeneration !== this.connectionGeneration ||
-          this.snapshot?.host.hostId !== pending.readyHostId) {
+          this.snapshot?.host.hostId !== pending.readyHostId ||
+          this.snapshot.host.platform !== pending.readyPlatform) {
         pending.reject(new Error("Remote Codex returned stale reasoning feedback."));
         return;
       }
@@ -243,12 +285,23 @@ export class CodexRelayClient {
     pending.resolve(message.outcome);
   }
 
+  private invalidateIdentity(generation: number): void {
+    if (generation !== this.connectionGeneration ||
+        this.identityViolationGeneration === generation) return;
+    this.identityViolationGeneration = generation;
+    this.capabilities.clear();
+    this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
+    this.rejectPending("Remote Codex relay identity changed.");
+  }
+
   private disconnected(expected: WebSocket): void {
     if (this.socket !== expected) return;
     this.socket = undefined;
     this.capabilities.clear();
     this.readyGeneration = 0;
     this.readyHostId = undefined;
+    this.readyPlatform = undefined;
+    this.identityViolationGeneration = 0;
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
     this.scheduleReconnect();

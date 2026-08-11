@@ -1949,22 +1949,34 @@ test("relay capabilities are valid only for a snapshot from the current connecti
   client.start();
   await waitUntil(() => client.currentHealth().state === "ready");
   const generationGate = client as CodexRelayClient & {
-    supportsCapabilityForSnapshot(capability: string, hostId: string): boolean;
+    supportsCapabilityForSnapshot(
+      capability: string, hostId: string, platform: CodexHost["platform"]
+    ): boolean;
   };
-  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
+  assert.equal(generationGate.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ), true);
 
   firstSocket!.close();
   await waitUntil(() => connectionCount === 2, 4_000);
   await waitUntil(() => client.currentHealth().state === "degraded");
   assert.equal(client.currentSnapshot()?.host.hostId, host.hostId, "last-known snapshot stays available for display");
-  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), false);
+  assert.equal(generationGate.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ), false);
 
   secondSocket!.send(JSON.stringify({
     type: "snapshot", protocol: 1, host, observedAt: Date.now(), snapshot
   }));
-  await waitUntil(() => generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId));
-  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
-  assert.equal(generationGate.supportsCapabilityForSnapshot("usage-refresh", "wrong-host"), false);
+  await waitUntil(() => generationGate.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ));
+  assert.equal(generationGate.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ), true);
+  assert.equal(generationGate.supportsCapabilityForSnapshot(
+    "usage-refresh", "wrong-host", host.platform
+  ), false);
 });
 
 test("relay commands require the current ready identity but remain available while that host is degraded", async (t) => {
@@ -2069,12 +2081,100 @@ test("relay ready host identity is immutable within one connection generation", 
     type: "snapshot", protocol: 1, host, observedAt: Date.now(),
     snapshot: { ...structuredClone(snapshot), reasoningEffort: "same-host" }
   }));
-  await waitUntil(() => delivered.length === 2);
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(client.currentHost()?.hostId, host.hostId);
   assert.equal(client.currentSnapshot()?.host.hostId, host.hostId);
-  assert.equal(delivered[1]?.snapshot.reasoningEffort, "same-host");
-  assert.equal(client.supportsCapabilityForSnapshot("usage-refresh", host.hostId), true);
-  assert.equal(client.supportsCapabilityForSnapshot("usage-refresh", otherHost.hostId), false);
+  assert.equal(delivered.length, 1);
+  assert.equal(client.currentSnapshot()?.snapshot.reasoningEffort, undefined);
+  assert.equal(client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, host.platform
+  ), false);
+  assert.equal(client.supportsCapabilityForSnapshot(
+    "usage-refresh", otherHost.hostId, otherHost.platform
+  ), false);
+});
+
+test("relay client invalidates a same-id platform flip for snapshots, capabilities, health, and pending feedback", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  const flippedHost: CodexHost = { ...host, platform: "win32", hostName: "Imposter Windows" };
+  let serverSocket: WebSocket | undefined;
+  let requestId = "";
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback", "usage-refresh"],
+          bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: { ...structuredClone(snapshot), reasoningEffort: "high" }
+        }));
+      } else if (message.type === "command") requestId = String(message.requestId);
+    });
+  });
+  const delivered: HostSnapshot[] = [];
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) },
+    (value) => delivered.push(value), () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  const retained = client.currentSnapshot();
+  const initialDarwinCapability = client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, "darwin"
+  );
+  const initialWindowsCapability = client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, "win32"
+  );
+  const send = client.send({
+    kind: "reasoning", direction: "increase", includeUltra: true,
+    includeReasoningFeedback: true
+  });
+  await waitUntil(() => requestId !== "");
+
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host: flippedHost, observedAt: Date.now(),
+    snapshot: { ...structuredClone(snapshot), reasoningEffort: "wrong-platform" }
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "health", protocol: 1, host: flippedHost, state: "degraded",
+    reason: "native-signals-unavailable", observedAt: Date.now()
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "result", protocol: 1, requestId, ok: true,
+    outcome: "applied", reasoningEffort: "xhigh"
+  }));
+  serverSocket!.send(JSON.stringify({
+    type: "ready", protocol: 1, host: flippedHost,
+    capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback", "usage-refresh"],
+    bridge: "native-codex-micro"
+  }));
+
+  await assert.rejects(send, /identity changed/i);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(initialDarwinCapability, true);
+  assert.equal(initialWindowsCapability, false);
+  assert.equal(client.currentHost()?.platform, "darwin");
+  assert.equal(client.currentSnapshot(), retained);
+  assert.equal(client.currentSnapshot()?.snapshot.reasoningEffort, "high");
+  assert.equal(delivered.length, 1);
+  assert.equal(client.supportsCurrentReadyCapability("reasoning-feedback"), false);
+  assert.equal(client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, "darwin"
+  ), false);
+  assert.equal(client.supportsCapabilityForSnapshot(
+    "usage-refresh", host.hostId, "win32"
+  ), false);
 });
 
 test("controller catches relay snapshot display failures", async () => {
@@ -2095,7 +2195,7 @@ test("controller refreshes account usage on its source host instead of the selec
   assert.match(source, /async refreshUsage\(\): Promise<void>/);
   assert.match(source, /refreshUsage[\s\S]*const source = this\.accountUsageSource\(\)/);
   assert.match(source, /refreshUsage[\s\S]*this\.microBridge\.requestUsageRefresh\(\)/);
-  assert.match(source, /refreshUsage[\s\S]*supportsCapabilityForSnapshot\("usage-refresh", source\.hostId\)/);
+  assert.match(source, /refreshUsage[\s\S]*supportsCapabilityForSnapshot\([\s\S]*?"usage-refresh", source\.hostId, remote\.platform/);
   assert.match(source, /refreshUsage[\s\S]*\{ kind: "usage-refresh" \}/);
   assert.match(source, /Remote Codex host does not support usage refresh\./);
   assert.match(source, /refreshUsage: async \(\) => \{[\s\S]*?await this\.refreshLocalUsage\(\);[\s\S]*?mobileSnapshotDirty = false/);

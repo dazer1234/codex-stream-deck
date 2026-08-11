@@ -664,7 +664,11 @@ export class DeckController {
   async refreshUsage(): Promise<void> {
     const source = this.accountUsageSource();
     if (source.hostId != null && source.hostId !== this.localHost?.hostId) {
-      if (!this.relayClient?.supportsCapabilityForSnapshot("usage-refresh", source.hostId)) {
+      const remote = this.relayClient?.currentHost();
+      if (remote?.hostId !== source.hostId ||
+          !this.relayClient?.supportsCapabilityForSnapshot(
+            "usage-refresh", source.hostId, remote.platform
+          )) {
         throw new Error("Remote Codex host does not support usage refresh.");
       }
       await this.relayClient.send({ kind: "usage-refresh" });
@@ -1440,7 +1444,9 @@ export class DeckController {
       : remote.platform !== route.platform)) {
       throw new Error("The captured Codex usage host is no longer connected.");
     }
-    if (!this.relayClient?.supportsCapabilityForSnapshot("usage-refresh", remote.hostId)) {
+    if (!this.relayClient?.supportsCapabilityForSnapshot(
+      "usage-refresh", remote.hostId, remote.platform
+    )) {
       throw new Error("Remote Codex host does not support usage refresh.");
     }
     await this.relayClient.send({ kind: "usage-refresh" });
