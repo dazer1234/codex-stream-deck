@@ -3,10 +3,12 @@ import test from "node:test";
 import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck";
 import { DeckController } from "../src/controller.js";
 import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
-import type { CodexDialSettings, DialRuntimeState } from "../src/dial-types.js";
 import type {
-  CodexHost, HostHealth, MicroSnapshot, ReasoningAdjustmentPolicy,
-  ReasoningAdjustmentExecution, ReasoningAdjustmentResult, RoutedAgentSlot
+  CodexDialSettings, DialRuntimeState, ModelPresetEntry, ModelPresetsDialSettings
+} from "../src/dial-types.js";
+import type {
+  CodexHost, HostHealth, MicroSnapshot, ModelPresetExecution, ModelPresetRequest,
+  ReasoningAdjustmentPolicy, ReasoningAdjustmentExecution, ReasoningAdjustmentResult, RoutedAgentSlot
 } from "../src/types.js";
 
 type FakeDial = DialAction<CodexDialSettings> & {
@@ -46,6 +48,7 @@ type ControllerProbe = {
       direction: string,
       policy?: ReasoningAdjustmentPolicy
     ): Promise<ReasoningAdjustmentExecution>;
+    applyModelPreset?(request: ModelPresetRequest): Promise<ModelPresetExecution>;
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
     refresh?(): Promise<MicroSnapshot>;
@@ -171,6 +174,36 @@ function snapshotWithFast(fastModeEnabled: boolean | undefined, act06 = "FAST"):
   };
   if (fastModeEnabled !== undefined) snapshot.fastModeEnabled = fastModeEnabled;
   return snapshot;
+}
+
+const MODEL_CATALOG = [
+  {
+    modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+    supportedReasoningEfforts: ["medium", "high"]
+  },
+  {
+    modelId: "gpt-5.6-terra", displayName: "5.6 Terra",
+    supportedReasoningEfforts: ["medium"]
+  }
+];
+
+function modelSnapshot(modelId = "gpt-5.6-sol", reasoningEffort = "high"): MicroSnapshot {
+  const activeModelDisplayName = modelId === "gpt-5.6-terra" ? "5.6 Terra" : "5.6 Sol";
+  return {
+    ...structuredClone(SNAPSHOT),
+    activeModelId: modelId,
+    activeModelDisplayName,
+    reasoningEffort,
+    modelCatalog: structuredClone(MODEL_CATALOG)
+  };
+}
+
+function modelPresetSettings(entries: ModelPresetEntry[] = [
+  { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+  { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+  { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+]): ModelPresetsDialSettings {
+  return { ...expandDialPreset("model-presets"), modelPresets: entries } as ModelPresetsDialSettings;
 }
 
 function decodeImage(image: string): string {
@@ -2623,4 +2656,297 @@ test("stale same-id inspector disappear cannot unregister its replacement", asyn
   assert.equal(replacementSent.length, 2, "replacement remains registered after stale disappear");
   assert.equal((replacementSent.at(-1) as { requestGeneration: number }).requestGeneration, 8);
   controller.unregisterDialPropertyInspector(replacement);
+});
+
+test("rapid model preset detents resolve one direction at a time from each confirmed pair", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-rapid");
+  const state = probe(controller);
+  const requests: ModelPresetRequest[] = [];
+  const releases = [deferred<void>(), deferred<void>(), deferred<void>()];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      const index = requests.length;
+      requests.push(structuredClone(request));
+      await releases[index]!.promise;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(action, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(action, 3);
+  await settle();
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"]
+  ]);
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "SWITCHING…");
+
+  releases[0]!.resolve();
+  await settle();
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"], ["gpt-5.6-terra", "medium"]
+  ]);
+  releases[1]!.resolve();
+  await settle();
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"], ["gpt-5.6-terra", "medium"], ["gpt-5.6-sol", "high"]
+  ]);
+  releases[2]!.resolve();
+  await idle(controller, action.id);
+
+  assert.equal(state.localSnapshotGeneration, 3);
+  assert.equal(state.localSnapshot.snapshot.activeModelId, "gpt-5.6-sol");
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "high");
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "5.6 SOL");
+  controller.unregisterDial(action);
+});
+
+test("model preset directions use authoritative edges and skip invalid saved pairs", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-edges");
+  const state = probe(controller);
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot("gpt-5.6-sol", "low") };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(action, modelPresetSettings([
+    { modelId: "removed-model", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]));
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+  state.localSnapshot = { ...state.localSnapshot, snapshot: modelSnapshot("gpt-5.6-sol", "low") };
+  controller.rotateDial(action, -1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"], ["gpt-5.6-terra", "medium"]
+  ]);
+  controller.unregisterDial(action);
+});
+
+test("model preset queue rejects overflow and rechecks registration and target before execution", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-lifecycle");
+  const replacement = fakeDial(action.id);
+  const state = probe(controller);
+  const first = deferred<ModelPresetExecution>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      if (requests.length === 1) return first.promise;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(action, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(action, 64);
+  controller.rotateDial(action, 64);
+  controller.rotateDial(action, 1);
+  await settle();
+  assert.equal(requests.length, 1);
+  assert.equal(action.alerts, 1, "the 129th pending detent is rejected as one event");
+
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  const oldRegistration = state.dials.get(action.id)!;
+  controller.registerDial(replacement, modelPresetSettings());
+  const oldFeedbackCount = action.feedbackCalls.length;
+  first.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await settle();
+  await oldRegistration.queue.idle();
+  assert.equal(requests.length, 1, "queued old-registration directions never execute locally");
+  assert.equal(action.feedbackCalls.length, oldFeedbackCount);
+  controller.unregisterDial(replacement);
+});
+
+test("queued model preset directions resolve against a target host changed before execution", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-target-change");
+  const state = probe(controller);
+  const first = deferred<ModelPresetExecution>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      return first.promise;
+    }
+  };
+  controller.registerDial(action, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(action, 2);
+  await settle();
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 2_000 }),
+    currentSnapshot: () => ({ host: REMOTE_HOST, observedAt: 2_000, snapshot: modelSnapshot() }),
+    async send() { throw new Error("Task 6 relay path must not be used yet"); }
+  };
+  first.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await idle(controller, action.id);
+
+  assert.equal(requests.length, 1, "the queued second direction does not reuse the captured local host");
+  assert.equal(action.alerts, 1, "the current remote target is refused until relay support lands");
+  controller.unregisterDial(action);
+});
+
+test("disposing a model preset dial prevents held completion and queued detents from writing feedback", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-disposed");
+  const state = probe(controller);
+  const first = deferred<ModelPresetExecution>();
+  let requests = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset() { requests += 1; return first.promise; }
+  };
+  controller.registerDial(action, modelPresetSettings());
+  await settle();
+  const registration = state.dials.get(action.id)!;
+  controller.rotateDial(action, 2);
+  await settle();
+  controller.unregisterDial(action);
+  const feedbackCount = action.feedbackCalls.length;
+  first.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await registration.queue.idle();
+
+  assert.equal(requests, 1);
+  assert.equal(action.feedbackCalls.length, feedbackCount);
+});
+
+test("local model preset success fences a held poll, patches the exact pair immutably, and redraws", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("model-preset-local-patch");
+  const state = probe(controller);
+  const stalePoll = deferred<MicroSnapshot>();
+  const applied = deferred<ModelPresetExecution>();
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  const originalHostSnapshot = state.localSnapshot;
+  const originalSnapshot = state.localSnapshot.snapshot;
+  state.microBridge = {
+    async sendAgent() {},
+    async refresh() { return stalePoll.promise; },
+    async applyModelPreset() { return applied.promise; }
+  };
+  controller.registerDial(action, modelPresetSettings());
+  await settle();
+  const poll = state.refresh();
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await settle();
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "SWITCHING…");
+  applied.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await idle(controller, action.id);
+
+  assert.notEqual(state.localSnapshot, originalHostSnapshot);
+  assert.notEqual(state.localSnapshot.snapshot, originalSnapshot);
+  assert.equal(state.localSnapshot.snapshot.activeModelId, "gpt-5.6-sol");
+  assert.equal(state.localSnapshot.snapshot.activeModelDisplayName, "5.6 Sol");
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "medium");
+  assert.equal((action.feedbackCalls.at(-1) as { detail: string }).detail, "MEDIUM");
+
+  stalePoll.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
+  await poll;
+  assert.equal(state.localSnapshot.snapshot.activeModelId, "gpt-5.6-sol", "older poll is fenced");
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "medium");
+  controller.unregisterDial(action);
+});
+
+test("refused or malformed model preset results reconcile actual state without rollback", async () => {
+  let getterReads = 0;
+  const accessorResult = Object.defineProperty(
+    { modelId: "gpt-5.6-terra" }, "reasoningEffort",
+    { enumerable: true, get() { getterReads += 1; return "medium"; } }
+  );
+  for (const [index, result] of [
+    new Error("selection refused"),
+    { modelId: "gpt-5.6-terra" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium", extra: true },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium", [Symbol("extra")]: true },
+    accessorResult
+  ].entries()) {
+    const controller = new DeckController();
+    const action = fakeDial(`model-preset-failure-${index}`);
+    const state = probe(controller);
+    const requests: ModelPresetRequest[] = [];
+    let refreshes = 0;
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+    state.microBridge = {
+      async sendAgent() {},
+      async applyModelPreset(request) {
+        requests.push(structuredClone(request));
+        if (result instanceof Error) throw result;
+        return result as ModelPresetExecution;
+      }
+    };
+    state.refresh = async () => {
+      refreshes += 1;
+      state.localSnapshot = {
+        host: HOST, observedAt: 2_000, snapshot: modelSnapshot("gpt-5.6-terra", "high")
+      };
+      state.localHealth = { state: "ready", changedAt: 2_000 };
+    };
+    controller.registerDial(action, modelPresetSettings());
+    await settle();
+
+    controller.rotateDial(action, 1);
+    await idle(controller, action.id);
+
+    assert.equal(requests.length, 1, "no rollback callback is attempted");
+    assert.equal(refreshes, 1, "failure forces one authoritative reconciliation");
+    assert.equal((action.feedbackCalls.at(-1) as { detail: string }).detail, "HIGH · UNLISTED");
+    assert.equal(action.alerts, 1);
+    controller.unregisterDial(action);
+  }
+  assert.equal(getterReads, 0, "result validation never invokes accessors");
 });

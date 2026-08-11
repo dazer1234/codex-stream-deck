@@ -23,6 +23,7 @@ import {
   normalizeDialSettings,
   reconcileSelector,
   reduceDialRotation,
+  resolveModelPresetDirection,
   selectedItem,
   selectorItems
 } from "./dial-domain.js";
@@ -31,7 +32,8 @@ import type {
   DialBindingId,
   DialRuntimeState,
   DialRuntimeView,
-  DialSelectorItem
+  DialSelectorItem,
+  ModelPresetDirection
 } from "./dial-types.js";
 import {
   HostActivityIndex, RELAY_REASONING_POLICY_CAPABILITY,
@@ -45,9 +47,9 @@ import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
 import { isSafeReasoningIdentifier } from "./types.js";
 import type {
-  CodexHost, CodexModelCatalogEntry, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
-  ReasoningAdjustmentExecution, ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot,
-  UsageLimitMode, UsageWindowKind
+  CodexHost, CodexModelCatalogEntry, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot,
+  ModelPresetExecution, ModelPresetRequest, ReasoningAdjustment, ReasoningAdjustmentExecution,
+  ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot, UsageLimitMode, UsageWindowKind
 } from "./types.js";
 import { selectAccountUsageSource, selectUsageWindow, type AccountUsageSource } from "./usage.js";
 
@@ -526,6 +528,22 @@ export class DeckController {
       return;
     }
     registration.settings = normalizeDialSettings(registration.settings);
+    if (registration.settings.rotation.kind === "model-presets") {
+      if (ticks === 0) return;
+      const count = Math.abs(ticks);
+      if (!registration.queue.canEnqueue(count)) {
+        void this.reportDialCommandError(
+          registration,
+          new Error("Dial rotation ignored: command queue is full.")
+        );
+        return;
+      }
+      const direction: ModelPresetDirection = ticks > 0 ? "clockwise" : "counter-clockwise";
+      for (let detent = 0; detent < count; detent += 1) {
+        this.enqueueModelPresetDirection(registration, direction);
+      }
+      return;
+    }
     const reduced = reduceDialRotation(
       registration.settings,
       registration.state,
@@ -547,6 +565,55 @@ export class DeckController {
     for (const binding of reduced.bindings) {
       const gesture = this.captureDialGesture(registration, binding, undefined, startedAt);
       this.enqueueDialTap(registration, gesture);
+    }
+  }
+
+  private enqueueModelPresetDirection(
+    registration: DialRegistration,
+    direction: ModelPresetDirection
+  ): void {
+    const accepted = registration.queue.enqueue(async () => {
+      if (!this.isCurrentDialRegistration(registration)) return;
+      registration.settings = normalizeDialSettings(registration.settings);
+      if (registration.settings.rotation.kind !== "model-presets") return;
+      const resolution = resolveModelPresetDirection(
+        registration.settings,
+        this.dialRuntimeView(registration.settings, registration.state),
+        direction
+      );
+      if (resolution.kind !== "target") {
+        await this.renderDialSafely(registration);
+        return;
+      }
+      const route: DialHostRoute = {
+        kind: "host",
+        hostId: this.targetHostId,
+        platform: this.targetPlatform
+      };
+      const request: ModelPresetRequest = {
+        modelId: resolution.entry.modelId,
+        reasoningEffort: resolution.entry.reasoningEffort,
+        includeUltra: registration.settings.includeUltraReasoning
+      };
+      registration.state = { ...registration.state, modelPresetSwitching: true };
+      await this.renderDialSafely(registration);
+      try {
+        await this.sendModelPresetToHost(route, request);
+        if (!this.isCurrentDialRegistration(registration)) return;
+        registration.state = { ...registration.state, modelPresetSwitching: false };
+        await this.renderDialSafely(registration);
+      } catch (error) {
+        if (!this.isCurrentDialRegistration(registration)) return;
+        registration.state = { ...registration.state, modelPresetSwitching: false };
+        await this.renderDialSafely(registration);
+        await this.reportDialCommandError(registration, error);
+      }
+    });
+    if (!accepted && this.isCurrentDialRegistration(registration)) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial rotation ignored: command queue is full.")
+      );
     }
   }
 
@@ -970,6 +1037,15 @@ export class DeckController {
     return {
       health: (feedbackUsesUsage ? usageSource.health : this.targetHealth()).state,
       reasoningEffort: targetSnapshot?.reasoningEffort,
+      activeModelId: targetSnapshot?.activeModelId,
+      activeModelDisplayName: targetSnapshot?.activeModelDisplayName,
+      ...(targetSnapshot?.modelCatalog == null ? {} : {
+        modelCatalog: targetSnapshot.modelCatalog.map((entry) => ({
+          modelId: entry.modelId,
+          displayName: entry.displayName,
+          supportedReasoningEfforts: [...entry.supportedReasoningEfforts]
+        }))
+      }),
       agents: this.routedSlots
         .filter((slot): slot is RoutedAgentSlot & { threadKey: string } => slot.threadKey != null)
         .map((slot) => ({
@@ -1558,6 +1634,61 @@ export class DeckController {
     return parseReasoningExecution(result);
   }
 
+  private async sendModelPresetToHost(
+    route: DialHostRoute,
+    request: ModelPresetRequest
+  ): Promise<ModelPresetExecution> {
+    const localHost = this.localHost;
+    const localRequested = route.hostId != null
+      ? route.hostId === localHost?.hostId
+      : route.platform === localHost?.platform;
+    if (!localRequested) {
+      throw new Error("Remote Codex host does not support model preset controls yet.");
+    }
+    if (this.localHealth.state !== "ready") {
+      throw new Error("The captured Codex host is not ready.");
+    }
+
+    this.localSnapshotGeneration += 1;
+    try {
+      const parsed = parseModelPresetExecution(await this.microBridge.applyModelPreset(request));
+      if (!parsed || parsed.modelId !== request.modelId ||
+          parsed.reasoningEffort !== request.reasoningEffort) {
+        throw new Error("Codex returned an invalid or unconfirmed model preset result.");
+      }
+      const current = this.localSnapshot;
+      if (!localHost || this.localHost?.hostId !== localHost.hostId ||
+          this.localHost.platform !== localHost.platform || !current ||
+          current.host.hostId !== localHost.hostId || current.host.platform !== localHost.platform) {
+        throw new Error("The captured Codex host changed before model preset confirmation.");
+      }
+      const catalogEntry = current.snapshot.modelCatalog?.find((entry) =>
+        entry.modelId === parsed.modelId &&
+        entry.supportedReasoningEfforts.includes(parsed.reasoningEffort));
+      if (!catalogEntry) {
+        throw new Error("The confirmed Codex model preset is absent from the authoritative catalog.");
+      }
+      this.localSnapshot = {
+        ...current,
+        snapshot: {
+          ...current.snapshot,
+          activeModelId: parsed.modelId,
+          activeModelDisplayName: catalogEntry.displayName,
+          reasoningEffort: parsed.reasoningEffort
+        }
+      };
+      return parsed;
+    } catch (error) {
+      try {
+        if (this.refreshInFlight) await this.refreshInFlight;
+        await this.refresh();
+      } catch {
+        // refresh() records degraded health; retain the original command error for the dial alert.
+      }
+      throw error;
+    }
+  }
+
   private async refreshDialUsage(route: DialHostRoute): Promise<void> {
     const localRequested = route.hostId != null
       ? route.hostId === this.localHost?.hostId
@@ -1897,6 +2028,29 @@ function parseReasoningExecution(value: unknown): ReasoningAdjustmentExecution |
     return {
       outcome,
       ...(reasoningEffort === undefined ? {} : { reasoningEffort })
+    };
+  } catch { return undefined; }
+}
+
+function parseModelPresetExecution(value: unknown): ModelPresetExecution | undefined {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length !== 2 || keys.some((key) =>
+      key !== "modelId" && key !== "reasoningEffort")) return undefined;
+    const modelProperty = descriptors.modelId;
+    const effortProperty = descriptors.reasoningEffort;
+    if (!modelProperty || !effortProperty || modelProperty.enumerable !== true ||
+        effortProperty.enumerable !== true || !("value" in modelProperty) ||
+        !("value" in effortProperty)) return undefined;
+    if (!isSafeReasoningIdentifier(modelProperty.value, 128) ||
+        !isSafeReasoningIdentifier(effortProperty.value, 64)) return undefined;
+    return {
+      modelId: modelProperty.value,
+      reasoningEffort: effortProperty.value
     };
   } catch { return undefined; }
 }
