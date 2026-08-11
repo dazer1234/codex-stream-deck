@@ -206,11 +206,27 @@ git commit -m "fix: render confirmed reasoning feedback immediately"
 - Modify: `docs/STREAM_DECK_PLUS.md`
 - Test: `test/dial-action.test.ts`
 
-- [ ] **Step 1: Add a failing guide assertion and document the contract**
+- [ ] **Step 1: Add the test-only failing guide assertion**
 
-Assert the guide states Reasoning feedback updates from Codex's confirmed level immediately and background polling only reconciles it. Do not claim optimistic or zero-latency behavior.
+In `test/dial-action.test.ts`, add assertions requiring the guide to state that Reasoning feedback updates from Codex's confirmed level immediately, without waiting for the background poll, and that background polling only reconciles it. Do not edit `docs/STREAM_DECK_PLUS.md` in this step, and do not assert optimistic or zero-latency behavior.
 
-- [ ] **Step 2: Run documentation and full verification**
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run: `npx tsx --test --test-name-pattern='Stream Deck Plus guide' test/dial-action.test.ts`
+
+Expected: FAIL because `docs/STREAM_DECK_PLUS.md` does not yet contain the immediate-confirmed-feedback and background-reconciliation wording.
+
+- [ ] **Step 3: Document the confirmed feedback contract**
+
+Update `docs/STREAM_DECK_PLUS.md` to state that a successful Reasoning detent redraws from Codex's confirmed effort immediately without waiting for the scheduled poll, while the background poll continues as reconciliation. Do not claim optimistic feedback or zero latency.
+
+- [ ] **Step 4: Rerun the focused test and verify GREEN**
+
+Run: `npx tsx --test --test-name-pattern='Stream Deck Plus guide' test/dial-action.test.ts`
+
+Expected: PASS with the new guide assertion satisfied.
+
+- [ ] **Step 5: Run full verification**
 
 Run:
 
@@ -226,15 +242,15 @@ git status --short
 
 Expected: 0 failures; only the intentional platform skip; Stream Deck validation and all release roots pass. Restore only the two known validator-regenerated plugin PNGs if needed.
 
-- [ ] **Step 3: Run a live read-only metadata probe**
+- [ ] **Step 6: Run a live read-only metadata probe**
 
 Against the current Codex main renderer, verify without executing a command that the unique visible trigger reports effort `high`; its ordinary DOM contains hidden measurement label `5.3 Codex Spark` and unique visible label `5.6 Sol`; strict normalization maps that label uniquely to the validated `models/list` record with `displayName` `GPT-5.6-Sol` and model ID `gpt-5.6-sol`; and the result preserves that same record's supported reasoning effort order. Record the observed order from the live record rather than asserting an unverified hardcoded sequence.
 
-- [ ] **Step 4: Request independent final review**
+- [ ] **Step 7: Request independent final review**
 
 Review the complete diff for ordinary-DOM visibility/measurement filtering, strict label normalization, unique catalog matching, descriptor and traversal safety, absence of React model authorization, protected command isolation, confirmation honesty, relay generation handling, registration-safe immediate redraw, background-poll reconciliation, rapid-detent serialization, notice races, and packaging. Fix every Critical or Important finding with a separate RED/GREEN correction commit and re-review.
 
-- [ ] **Step 5: Commit docs, merge, and verify main**
+- [ ] **Step 8: Commit docs, merge, and verify main**
 
 ```bash
 git add docs/STREAM_DECK_PLUS.md test/dial-action.test.ts
@@ -245,6 +261,6 @@ npm run check
 npm test
 ```
 
-- [ ] **Step 6: Back up and install**
+- [ ] **Step 9: Back up and install**
 
 Quit Stream Deck, create timestamped backups of the installed `com.simeo.codex-deck.sdPlugin` and active Stream Deck+ profile, atomically replace the plugin with `dist/com.simeo.codex-deck.sdPlugin`, relaunch Stream Deck, and verify matching bundle hashes, `local=ready`, layout synchronization, explicit `includeUltraReasoning:false`, and a clean `main` worktree.
