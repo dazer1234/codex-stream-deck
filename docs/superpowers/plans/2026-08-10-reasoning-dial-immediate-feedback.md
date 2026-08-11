@@ -4,37 +4,43 @@
 
 **Goal:** Update Reasoning dial feedback immediately from Codex's confirmed result while repairing current live model discovery without weakening the Ultra guard.
 
-**Architecture:** Extend reasoning execution with an optional confirmed effort, propagate it through the exact relay result contract, and commit it to the matching host snapshot before immediately rendering dials. Support the old selected-value and current unique visible-trigger model shapes with descriptor-only, bounded, fail-closed traversal.
+**Architecture:** Extend reasoning execution with an optional confirmed effort, propagate it through the exact relay result contract, and commit it to the matching host snapshot before immediately rendering dials. Read the unique visible ordinary-DOM model label beneath the unique visible reasoning trigger, strictly normalize it, and resolve it uniquely to a descriptor-safe, bounded, fully validated `models/list` record whose ordered supported efforts remain authoritative.
 
 **Tech Stack:** TypeScript, Node test runner via `tsx --test`, Elgato Stream Deck SDK, Electron CDP renderer evaluation, WebSocket relay protocol, Swift source contract.
 
 ---
 
-### Task 1: Recover the current live reasoning model safely
+### Task 1: Recover the current live reasoning model from its visible label
 
 **Files:**
 - Modify: `src/codex-micro-renderer-bridge.ts`
 - Test: `test/micro-bridge.test.ts`
 
-- [ ] **Step 1: Write the failing current-shape test**
+- [ ] **Step 1: Write the failing current-shape DOM-label test**
 
-Add a fixture in which one visible reasoning trigger contains `selectedValue` without a model and exactly one safe `model` in a visible sibling props branch. Assert:
+Add a fixture in which the unique visible reasoning trigger reports effort `high` and its ordinary DOM descendants contain a hidden measurement label `5.3 Codex Spark` plus the unique visible label `5.6 Sol`. Pair it with a validated `models/list` record whose `displayName` is `GPT-5.6-Sol`, model ID is `gpt-5.6-sol`, and `supportedReasoningEfforts` has a distinctive test order. Assert:
 
 ```ts
-assert.equal(readSelectedReasoningModelId(trigger), "gpt-5.3-codex-spark");
+assert.deepEqual(readActiveReasoningMetadata([trigger], reactRootFiber, isVisible), {
+  currentEffort: "high",
+  modelId: "gpt-5.6-sol",
+  supportedEfforts: expectedEffortsFromMatchedRecord
+});
 ```
 
-Also assert conflicting selected/sibling models, two sibling models, hidden sibling models, accessors, proxies, depth exhaustion, and traversal exhaustion return `undefined` without invoking executable properties.
+Also assert that zero or multiple visible labels, label-normalization collisions, zero or multiple matching `displayName` records, React-only sibling/`selectedValue` models, hidden/measurement labels, accessors, proxies, malformed strings/records, and DOM/catalog depth, node, array, query, or property exhaustion return `undefined` without invoking executable properties. Include a case proving the hidden `5.3 Codex Spark` measurement label cannot select its catalog record.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run: `npx tsx --test --test-name-pattern='current visible sibling reasoning model' test/micro-bridge.test.ts`
+Run: `npx tsx --test --test-name-pattern='visible reasoning model label|reasoning metadata' test/micro-bridge.test.ts`
 
-Expected: FAIL because the current extractor only accepts a model beneath `selectedValue`.
+Expected: FAIL because the current extractor authorizes a model from React `selectedValue`/sibling data and does not map the visible ordinary-DOM label to a validated catalog `displayName`.
 
-- [ ] **Step 3: Implement bounded descriptor-only candidate collection**
+- [ ] **Step 3: Implement bounded DOM-label discovery and catalog resolution**
 
-Retain `readOwnDataProperty`, node/depth ceilings, hidden/measurement checks, and unique-candidate semantics. Treat both selected-value and visible trigger siblings as candidate sources, but return a model only when the union contains exactly one safe value and traversal completed without malformed data.
+Replace React model discovery with a helper that, under the unique visible semantic reasoning trigger, collects the unique visible, non-hidden, non-measurement ordinary-DOM model label with explicit string/node/depth bounds. Normalize bounded safe labels by trimming and ASCII-case-folding, tokenizing only on spaces/hyphens, and removing only an exact leading `gpt` token from catalog `displayName` values; compare the complete remaining token sequence, never a substring or fuzzy match.
+
+Replace the separate model-ID effort lookup with bounded `models/list` extraction that validates each candidate record as safe own data before matching its normalized `displayName`, requires exactly one matching record, and returns that same record's safe model ID and `supportedReasoningEfforts` in original order. Do not inspect or accept React `selectedValue` or sibling model values as model authorization. Reuse descriptor-safe own-data readers for cache data and fail closed on zero/multiple matches, malformed/accessor/proxy-backed data, any exhausted bound, or traversal ambiguity.
 
 - [ ] **Step 4: Run focused and bridge tests**
 
@@ -53,6 +59,8 @@ Expected: all selected tests and the full bridge file pass.
 git add src/codex-micro-renderer-bridge.ts test/micro-bridge.test.ts
 git commit -m "fix: read current Codex reasoning model"
 ```
+
+This forward correction supersedes the model-discovery behavior introduced by commits `c9067e5`, `3f8ca81`, and `3c6c7f2`; preserve those commits in history rather than rewriting them.
 
 ### Task 2: Return confirmed reasoning execution data
 
@@ -232,11 +240,11 @@ Expected: 0 failures; only the intentional platform skip; Stream Deck validation
 
 - [ ] **Step 3: Run a live read-only metadata probe**
 
-Against the current Codex main renderer, verify one visible trigger resolves the active effort/model and ordered supported efforts without executing a command. Expected current evidence: `high`, `gpt-5.3-codex-spark`, `low, medium, high, xhigh`.
+Against the current Codex main renderer, verify without executing a command that the unique visible trigger reports effort `high`; its ordinary DOM contains hidden measurement label `5.3 Codex Spark` and unique visible label `5.6 Sol`; strict normalization maps that label uniquely to the validated `models/list` record with `displayName` `GPT-5.6-Sol` and model ID `gpt-5.6-sol`; and the result preserves that same record's supported reasoning effort order. Record the observed order from the live record rather than asserting an unverified hardcoded sequence.
 
 - [ ] **Step 4: Request independent final review**
 
-Review the complete diff for descriptor safety, protected command isolation, confirmation honesty, relay generation handling, rapid-detent serialization, notice races, and packaging. Fix every Critical or Important finding with a separate RED/GREEN correction commit and re-review.
+Review the complete diff for ordinary-DOM visibility/measurement filtering, strict label normalization, unique catalog matching, descriptor and traversal safety, absence of React model authorization, protected command isolation, confirmation honesty, relay generation handling, registration-safe immediate redraw, background-poll reconciliation, rapid-detent serialization, notice races, and packaging. Fix every Critical or Important finding with a separate RED/GREEN correction commit and re-review.
 
 - [ ] **Step 5: Commit docs, merge, and verify main**
 
