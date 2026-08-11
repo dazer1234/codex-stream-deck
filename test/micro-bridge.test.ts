@@ -1193,56 +1193,85 @@ test("renderer evaluations retain their awaited promise until CDP has collected 
 test("timed-out reasoning evaluations cannot poison the mutex after reconnect", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const testBridge = bridge as unknown as {
-    ensureConnected: () => Promise<void>;
-    evaluate: <T>(source: string) => Promise<T>;
+    socket?: { readyState: number; send: (raw: string) => void; close: () => void };
+    handleMessage: (raw: string) => void;
   };
-  testBridge.ensureConnected = async () => {};
-
-  const rendererTails = new Map<string, Promise<void>>();
   const namespaces: string[] = [];
-  let releaseLateEvaluation!: () => void;
-  const lateEvaluationGate = new Promise<void>((resolve) => { releaseLateEvaluation = resolve; });
-  let evaluationCount = 0;
-  testBridge.evaluate = async <T>(source: string): Promise<T> => {
-    const namespace = source.match(/const guardNamespace = ("[^"]+")/)?.[1];
-    assert.ok(namespace, "reasoning evaluation carries a renderer guard namespace");
-    namespaces.push(namespace);
-    const predecessor = rendererTails.get(namespace) ?? Promise.resolve();
-    let releaseTail!: () => void;
-    rendererTails.set(namespace, new Promise<void>((resolve) => { releaseTail = resolve; }));
-    const evaluationNumber = ++evaluationCount;
-    const rendererTask = (async () => {
-      await predecessor;
-      try {
-        if (evaluationNumber === 1) await lateEvaluationGate;
-        return { outcome: "blocked-ultra", reasoningEffort: "max" } as T;
-      } finally {
-        releaseTail();
-      }
-    })();
-    return await Promise.race([
-      rendererTask,
-      new Promise<T>((_, reject) => setTimeout(() => reject(
-        new Error("Codex-Runtime-Antwort hat zu lange gedauert.")
-      ), 5))
-    ]);
+  let firstRequestId: number | undefined;
+  const sockets: Array<{ readyState: number; send: (raw: string) => void; close: () => void }> = [];
+  const makeSocket = () => {
+    const socket = {
+      readyState: 1,
+      send(raw: string) {
+        const request = JSON.parse(raw) as { id: number; params: { expression: string } };
+        const encodedNamespace = request.params.expression.match(/const guardNamespace = ("[^"]+")/)?.[1];
+        assert.ok(encodedNamespace, "reasoning evaluation carries a renderer guard namespace");
+        const namespace = JSON.parse(encodedNamespace) as string;
+        namespaces.push(namespace);
+        if (namespaces.length === 1) {
+          firstRequestId = request.id;
+          return;
+        }
+        if (namespace === namespaces[0]) return;
+        testBridge.handleMessage(JSON.stringify({
+          id: request.id,
+          result: { result: { value: { outcome: "blocked-ultra", reasoningEffort: "max" } } }
+        }));
+      },
+      close() { socket.readyState = 3; }
+    };
+    sockets.push(socket);
+    return socket;
+  };
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Map<number, { callback: (...args: unknown[]) => void; args: unknown[]; delay: number }>();
+  let nextTimerId = 0;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay = 0, ...args: unknown[]) => {
+    const id = ++nextTimerId;
+    timers.set(id, { callback, args, delay });
+    return id as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: NodeJS.Timeout | number | undefined) => {
+    timers.delete(Number(timer));
+  }) as typeof clearTimeout;
+  const waitForRequest = async (count: number) => {
+    for (let attempt = 0; attempt < 8 && namespaces.length < count; attempt++) await Promise.resolve();
+    assert.equal(namespaces.length, count, `fake CDP received Runtime.evaluate request ${count}`);
   };
 
-  await assert.rejects(
-    bridge.adjustReasoning("increase", { includeUltra: false }),
-    /Codex-Runtime-Antwort hat zu lange gedauert\./
-  );
-  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
-    outcome: "blocked-ultra", reasoningEffort: "max"
-  });
-  assert.notEqual(namespaces[1], namespaces[0], "reconnect uses a fresh renderer guard namespace");
+  try {
+    testBridge.socket = makeSocket();
+    const first = bridge.adjustReasoning("increase", { includeUltra: false });
+    await waitForRequest(1);
+    assert.equal(timers.size, 1);
+    const timeout = [...timers.entries()][0]!;
+    assert.equal(timeout[1].delay, 5000, "the real bridge evaluation timeout is under manual control");
+    timers.delete(timeout[0]);
+    timeout[1].callback(...timeout[1].args);
+    await assert.rejects(first, /Codex-Runtime-Antwort hat zu lange gedauert\./);
+    assert.equal(sockets[0]?.readyState, 3, "the timed-out adjustment disconnects its CDP socket");
 
-  releaseLateEvaluation();
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
-    outcome: "blocked-ultra", reasoningEffort: "max"
-  });
-  assert.equal(namespaces[2], namespaces[1], "late completion stays isolated from the new namespace");
+    testBridge.socket = makeSocket();
+    const second = bridge.adjustReasoning("increase", { includeUltra: false });
+    await waitForRequest(2);
+    assert.equal(timers.size, 0, "the reconnected renderer is not blocked behind the old guard tail");
+    assert.deepEqual(await second, { outcome: "blocked-ultra", reasoningEffort: "max" });
+    assert.notEqual(namespaces[1], namespaces[0], "reconnect uses a fresh renderer guard namespace");
+
+    assert.ok(firstRequestId);
+    testBridge.handleMessage(JSON.stringify({
+      id: firstRequestId,
+      result: { result: { value: { outcome: "blocked-ultra", reasoningEffort: "max" } } }
+    }));
+    const third = bridge.adjustReasoning("increase", { includeUltra: false });
+    await waitForRequest(3);
+    assert.deepEqual(await third, { outcome: "blocked-ultra", reasoningEffort: "max" });
+    assert.equal(namespaces[2], namespaces[1], "late old completion stays isolated from the new namespace");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });
 
 test("agent routing follows the stable thread identity when a cross-host slot is stale", () => {
