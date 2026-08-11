@@ -482,8 +482,14 @@ test("relay server-message parsing rejects hostile nested records without throwi
   const hostileSlots = new Proxy(structuredClone(snapshot.slots), {
     ownKeys() { throw new Error("hostile slots"); }
   });
+  const accessorCapabilities = ["model-presets"];
+  Object.defineProperty(accessorCapabilities, "0", {
+    enumerable: true, get() { getterReads += 1; return "model-presets"; }
+  });
   const messages = [
     { type: "ready", protocol: 1, host: accessorHost },
+    { type: "ready", protocol: 1, host, capabilities: accessorCapabilities },
+    { type: "ready", protocol: 1, host, extra: true },
     { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: nestedAccessor },
     {
       type: "snapshot", protocol: 1, host, observedAt: 1,

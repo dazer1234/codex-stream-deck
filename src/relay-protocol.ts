@@ -279,16 +279,27 @@ export function parseRelayServerMessage(value: unknown): RelayServerMessage | nu
 function parseRelayServerMessageUnchecked(value: unknown): RelayServerMessage | null {
   const message = snapshotOwnDataRecord(value);
   if (!message || message.protocol !== RELAY_PROTOCOL_VERSION || typeof message.type !== "string") return null;
-  if (message.type === "ready" && isHost(message.host) &&
+  const hasCapabilities = Object.prototype.hasOwnProperty.call(message, "capabilities");
+  const hasBridge = Object.prototype.hasOwnProperty.call(message, "bridge");
+  const capabilities = hasCapabilities ? snapshotOwnDataArray(message.capabilities, 32) : undefined;
+  if (message.type === "ready" &&
+      exactOwnDataKeys(message, [
+        "type", "protocol", "host", ...(hasCapabilities ? ["capabilities"] : []),
+        ...(hasBridge ? ["bridge"] : [])
+      ]) && isHost(message.host) &&
       (message.bridge === undefined || message.bridge === "native-codex-micro") &&
-      (message.capabilities === undefined || (Array.isArray(message.capabilities) && message.capabilities.length <= 32 &&
-        message.capabilities.every((item) => boundedNonblankString(item, 64))))) {
+      (capabilities === undefined || (capabilities !== null &&
+        capabilities.every((item) => boundedNonblankString(item, 64))))) {
     return message as RelayReadyMessage;
   }
-  if (message.type === "snapshot" && isHost(message.host) && validProtocolTimestamp(message.observedAt) != null && isSnapshot(message.snapshot)) {
+  if (message.type === "snapshot" &&
+      exactOwnDataKeys(message, ["type", "protocol", "host", "observedAt", "snapshot"]) &&
+      isHost(message.host) && validProtocolTimestamp(message.observedAt) != null && isSnapshot(message.snapshot)) {
     return message as RelaySnapshotMessage;
   }
-  if (message.type === "health" && isHost(message.host) && message.state === "degraded" &&
+  if (message.type === "health" &&
+      exactOwnDataKeys(message, ["type", "protocol", "host", "state", "reason", "observedAt"]) &&
+      isHost(message.host) && message.state === "degraded" &&
       message.reason === "native-signals-unavailable" && validProtocolTimestamp(message.observedAt) != null) {
     return message as RelayHealthMessage;
   }
