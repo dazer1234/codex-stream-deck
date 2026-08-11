@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
+import * as microBridgeModule from "../src/codex-micro-renderer-bridge.js";
 import { generate } from "selfsigned";
 import { CodexRelayClient, RELAY_SNAPSHOT_STALE_MS, resolveRelayHealth } from "../src/codex-relay-client.js";
 import { isAllowedRelayHost, isPrivateLanHost, privateLanAddresses } from "../src/relay-network.js";
@@ -466,6 +467,7 @@ test("relay snapshot parser strictly validates a complete active model catalog",
   add((candidate) => { delete candidate.snapshot.activeModelId; });
   add((candidate) => { delete candidate.snapshot.activeModelDisplayName; });
   add((candidate) => { delete candidate.snapshot.modelCatalog; });
+  add((candidate) => { delete candidate.snapshot.reasoningEffort; });
   add((candidate) => { candidate.snapshot.activeModelId = "missing-model"; });
   add((candidate) => { candidate.snapshot.activeModelDisplayName = "Wrong Name"; });
   add((candidate) => { candidate.snapshot.activeModelId = " bad-model"; });
@@ -491,6 +493,117 @@ test("relay snapshot parser strictly validates a complete active model catalog",
   });
   assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(accessorPacket), null));
   assert.equal(accessorReads, 0, "catalog accessors are never invoked at the relay boundary");
+
+  const revokedCatalogTarget: unknown[] = [];
+  const revokedCatalog = Proxy.revocable(revokedCatalogTarget, {});
+  revokedCatalog.revoke();
+  const revokedCatalogPacket = structuredClone(packet) as any;
+  revokedCatalogPacket.snapshot.modelCatalog = revokedCatalog.proxy;
+  assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(revokedCatalogPacket), null));
+
+  const throwingEntryPacket = structuredClone(packet) as any;
+  throwingEntryPacket.snapshot.modelCatalog[0] = new Proxy(throwingEntryPacket.snapshot.modelCatalog[0], {
+    ownKeys() { throw new Error("catalog entry trap"); }
+  });
+  assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(throwingEntryPacket), null));
+
+  const revokedEffortsTarget: unknown[] = [];
+  const revokedEfforts = Proxy.revocable(revokedEffortsTarget, {});
+  revokedEfforts.revoke();
+  const revokedEffortsPacket = structuredClone(packet) as any;
+  revokedEffortsPacket.snapshot.modelCatalog[0].supportedReasoningEfforts = revokedEfforts.proxy;
+  assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(revokedEffortsPacket), null));
+});
+
+test("outbound catalog snapshots omit the atomic model tuple when the true maximal relay packet exceeds 64 KiB", () => {
+  const boundSnapshot = Reflect.get(microBridgeModule, "boundModelCatalogForRelaySnapshot") as (
+    value: MicroSnapshot
+  ) => MicroSnapshot;
+  assert.equal(typeof boundSnapshot, "function");
+  const uuid = "00000000-0000-4000-8000-000000000000";
+  const threadKey = `${"a".repeat(32)}:${"b".repeat(32)}:${"c".repeat(32)}:${uuid}`;
+  const efforts = Array.from({ length: 16 }, (_, index) =>
+    `${String.fromCharCode(97 + index)}${"e".repeat(61)}${index.toString(16)}`.slice(0, 64));
+  const modelCatalog = Array.from({ length: 32 }, (_, index) => ({
+    modelId: `m${"x".repeat(124)}${index.toString(16).padStart(2, "0")}`,
+    displayName: `${String.fromCharCode(65 + index % 26)}${"D".repeat(77)}${index.toString(16)}`.slice(0, 80),
+    supportedReasoningEfforts: efforts
+  }));
+  const maximalSnapshot: MicroSnapshot = {
+    slots: Array.from({ length: 6 }, (_, id) => ({
+      id, threadKey, title: "T".repeat(240), status: "s".repeat(64), selected: id === 0,
+      activityAt: Number.MAX_SAFE_INTEGER, ownedByHost: true, contextUsedPercent: 100
+    })),
+    reasoningEffort: efforts[0],
+    activeModelId: modelCatalog[0]!.modelId,
+    activeModelDisplayName: modelCatalog[0]!.displayName,
+    modelCatalog,
+    fastModeEnabled: true,
+    activeThreadKey: threadKey,
+    activeThreadTitle: "A".repeat(240),
+    layout: {
+      version: 1,
+      slots: {
+        ACT06: { keycapId: "FAST", commandId: "a".repeat(128) },
+        ACT07: { keycapId: "APPR", commandId: "b".repeat(128) },
+        ACT08: { keycapId: "REJ", commandId: "c".repeat(128) },
+        ACT09: { keycapId: "SPLIT", commandId: "d".repeat(128) },
+        ACT10_ACT11: { keycapId: "CODEX", commandId: "e".repeat(128) },
+        ACT12: { keycapId: "CODEX", commandId: "f".repeat(128) }
+      },
+      analogStick: { up: {}, right: {}, down: {}, left: {} }
+    },
+    agentSource: "custom",
+    lightingAutoOff: "l".repeat(64),
+    theme: "dark",
+    usage: {
+      windows: Array.from({ length: 8 }, (_, index) => ({
+        id: `${String.fromCharCode(97 + index)}${"w".repeat(63)}`,
+        kind: "other" as const,
+        usedPercent: 100,
+        remainingPercent: 100,
+        windowDurationMins: Number.MAX_SAFE_INTEGER,
+        resetsAt: Number.MAX_SAFE_INTEGER
+      })),
+      observedAt: Number.MAX_SAFE_INTEGER,
+      resetCreditsAvailable: Number.MAX_SAFE_INTEGER,
+      resetCreditsApplicable: Number.MAX_SAFE_INTEGER
+    },
+    hostSessions: Array.from({ length: 128 }, () => ({
+      threadId: threadKey,
+      activityAt: Number.MAX_SAFE_INTEGER,
+      status: "complete" as const,
+      completionRevision: Number.MAX_SAFE_INTEGER,
+      contextUsedPercent: 100
+    }))
+  };
+  const maximalPacket = {
+    type: "snapshot", protocol: 1,
+    host: {
+      hostId: "h".repeat(128), hostName: "n".repeat(128), platform: "darwin", codexVersion: "v".repeat(64)
+    },
+    observedAt: Number.MAX_SAFE_INTEGER,
+    snapshot: maximalSnapshot
+  };
+  const smallSnapshot: MicroSnapshot = {
+    ...maximalSnapshot,
+    modelCatalog: [modelCatalog[0]!],
+    hostSessions: []
+  };
+  assert.equal(boundSnapshot(smallSnapshot), smallSnapshot,
+    "ordinary authoritative catalog snapshots retain their exact object and tuple");
+  assert.ok(Buffer.byteLength(JSON.stringify(maximalPacket), "utf8") > 64 * 1024);
+  assert.deepEqual(parseRelayServerMessage(maximalPacket), maximalPacket,
+    "the parser keeps validating the full bounded protocol independently of transport size");
+
+  const boundedSnapshot = boundSnapshot(maximalSnapshot);
+  const boundedPacket = { ...maximalPacket, snapshot: boundedSnapshot };
+  assert.equal(boundedSnapshot.reasoningEffort, efforts[0]);
+  assert.equal(boundedSnapshot.activeModelId, undefined);
+  assert.equal(boundedSnapshot.activeModelDisplayName, undefined);
+  assert.equal(boundedSnapshot.modelCatalog, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(boundedPacket), "utf8") < 64 * 1024);
+  assert.deepEqual(parseRelayServerMessage(boundedPacket), boundedPacket);
 });
 
 test("relay parser bounds host identity and ready capabilities", () => {

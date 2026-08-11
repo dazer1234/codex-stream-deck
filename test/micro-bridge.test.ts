@@ -315,6 +315,8 @@ test("renderer snapshot expression reads only authoritative reasoning triggers",
   assert.match(source, /activeModelId:\s*reasoningMetadata\.modelId/);
   assert.match(source, /activeModelDisplayName:\s*reasoningMetadata\.modelDisplayName/);
   assert.match(source, /modelCatalog:\s*reasoningMetadata\.modelCatalog/);
+  assert.match(source, /reasoningEffort:\s*reasoningMetadata\.currentEffort/);
+  assert.match(source, /fallbackReasoningEffort\s*=\s*reasoningMetadata\s*\?\s*undefined\s*:\s*readActiveReasoningEffort/);
   assert.match(source, /svg\[class\*="ModelPickerTriggerInlineFastIcon"\]/);
 });
 
@@ -1183,6 +1185,15 @@ test("model catalog exposes the complete bounded authoritative catalog and activ
     }
   ]);
   assert.deepEqual(matchActive(["5.6 Sol"], catalog), catalog?.[0]);
+
+  const unseparatedBrandCatalog = readCatalog([
+    new ReasoningQueryClientFixture([[['models', 'list'], { data: [{
+      ...records[0], displayName: "GPT5.6 Sol"
+    }] }]])
+  ]);
+  assert.equal(unseparatedBrandCatalog?.[0]?.displayName, "GPT5.6 Sol");
+  assert.equal(matchActive(["5.6 Sol"], unseparatedBrandCatalog), undefined,
+    "a bare GPT prefix cannot acquire the separated-brand authorization semantics");
 
   const readMetadata = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
     elements: Iterable<unknown>, reactRootFiber: unknown,

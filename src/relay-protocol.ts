@@ -337,6 +337,7 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   const hasActiveModelDisplayName = Object.prototype.hasOwnProperty.call(snapshot, "activeModelDisplayName");
   const hasModelCatalog = Object.prototype.hasOwnProperty.call(snapshot, "modelCatalog");
   if (!(hasActiveModelId === hasActiveModelDisplayName && hasActiveModelId === hasModelCatalog)) return false;
+  if (hasModelCatalog && snapshot.reasoningEffort === undefined) return false;
   if (hasModelCatalog && !isActiveModelCatalog(
     snapshot.activeModelId, snapshot.activeModelDisplayName, snapshot.modelCatalog
   )) return false;
@@ -413,8 +414,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function snapshotOwnDataRecord(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
   try {
+    if (!isRecord(value)) return null;
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return null;
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -438,8 +439,8 @@ function snapshotOwnDataRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function snapshotOwnDataArray(value: unknown, maximum: number): unknown[] | null {
-  if (!Array.isArray(value)) return null;
   try {
+    if (!Array.isArray(value)) return null;
     if (Object.getPrototypeOf(value) !== Array.prototype) return null;
     const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
     const lengthDescriptor = descriptors.length;

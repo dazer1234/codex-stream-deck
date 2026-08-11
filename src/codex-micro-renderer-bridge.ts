@@ -648,7 +648,7 @@ export function readReasoningModelCatalog(
           const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value, true);
           if (!normalizedDisplayName) return undefined;
           const displayName = displayNameProperty.value.trim()
-            .replace(/^gpt(?:[ -]+)?/i, "")
+            .replace(/^gpt[ -]+/i, "")
             .replace(/[ -]+/g, " ");
           if (!displayName || displayName.length > 80) return undefined;
           const effortsProperty = readOwnDataProperty(record, "supportedReasoningEfforts");
@@ -1006,31 +1006,46 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   const activeThreadTitle = activeThreadElement
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
-  const reasoningEffort = readActiveReasoningEffort(document.querySelectorAll(
-    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
-  ));
-  const fastModeEnabled = readActiveFastMode(document.querySelectorAll(
-    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
-  ));
   const reactRootProperty = readOwnDataProperty(root, reactKey);
   const reasoningMetadata = reactRootProperty?.exists
     ? readActiveReasoningMetadata(document.querySelectorAll(
       '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
     ), reactRootProperty.value)
     : undefined;
+  const fallbackReasoningEffort = reasoningMetadata ? undefined : readActiveReasoningEffort(document.querySelectorAll(
+    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+  ));
+  const fastModeEnabled = readActiveFastMode(document.querySelectorAll(
+    '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+  ));
 
   return {
     slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme,
-    ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(reasoningMetadata ? {
+      reasoningEffort: reasoningMetadata.currentEffort,
       activeModelId: reasoningMetadata.modelId,
       activeModelDisplayName: reasoningMetadata.modelDisplayName,
       modelCatalog: reasoningMetadata.modelCatalog
-    } : {}),
+    } : fallbackReasoningEffort ? { reasoningEffort: fallbackReasoningEffort } : {}),
     ...(typeof fastModeEnabled === 'boolean' ? { fastModeEnabled } : {}),
     ...(usage ? { usage } : {})
   };
 })()`;
+
+const RELAY_SNAPSHOT_JSON_BUDGET_BYTES = 60 * 1024;
+
+export function boundModelCatalogForRelaySnapshot(snapshot: MicroSnapshot): MicroSnapshot {
+  try {
+    if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= RELAY_SNAPSHOT_JSON_BUDGET_BYTES) return snapshot;
+  } catch {}
+  const {
+    activeModelId: _activeModelId,
+    activeModelDisplayName: _activeModelDisplayName,
+    modelCatalog: _modelCatalog,
+    ...bounded
+  } = snapshot;
+  return bounded;
+}
 
 export class CodexMicroRendererBridge {
   private socket?: WebSocket;
@@ -1071,7 +1086,7 @@ export class CodexMicroRendererBridge {
     if (forceUsageRefresh && !hasValidNormalizedUsage(nativeSnapshot.usage)) {
       throw new Error("Codex usage refresh returned no valid rate-limit usage.");
     }
-    const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
+    const snapshot = boundModelCatalogForRelaySnapshot(await this.sessionOwnership.annotate(nativeSnapshot));
     this.lastSnapshot = snapshot;
     return snapshot;
   }
