@@ -4,7 +4,7 @@
 
 Reasoning detents send a Codex command but do not update the Stream Deck feedback afterward. The displayed level changes only when the controller's global 1.2-second snapshot poll runs, so a successful detent takes roughly 0–1.2 seconds plus rendering time to appear. Rapid detents queue behind that work and can feel slower. Action-selector rotation is local state and renders immediately, which explains the contrast.
 
-The installed runtime log also shows repeated `Codex reasoning metadata is unavailable` failures. The earlier React-tree interpretation was disproved by a later read-only live probe: beneath the unique visible reasoning trigger, ordinary DOM contains a hidden measurement label `5.3 Codex Spark` and one visible model label `5.6 Sol`. The validated `models/list` query cache contains the uniquely matching record with `displayName` `GPT-5.6-Sol` and model ID `gpt-5.6-sol`. That record, not the DOM or a React sibling/`selectedValue` value, is authoritative for the ordered supported reasoning efforts. The current extractor therefore fails before dispatch because it authorizes the model from the wrong source even though all required data exists.
+The installed runtime log also shows repeated `Codex reasoning metadata is unavailable` failures. The earlier React-tree interpretation was disproved by a later read-only live probe: beneath the unique visible reasoning trigger, ordinary DOM contains a hidden measurement label `5.3 Codex Spark` and multiple visible leaf texts, including current effort `high` and model label `5.6 Sol`. The validated `models/list` query cache contains the one catalog record matched by those candidates: `displayName` `GPT-5.6-Sol` and model ID `gpt-5.6-sol`. That record, not the DOM or a React sibling/`selectedValue` value, is authoritative for the ordered supported reasoning efforts. The current extractor therefore fails before dispatch because it authorizes the model from the wrong source even though all required data exists.
 
 This design is a forward correction that supersedes the model-discovery behavior introduced by commits `c9067e5`, `3f8ca81`, and `3c6c7f2`. Those commits remain in history; no history rewrite is required.
 
@@ -14,7 +14,7 @@ This design is a forward correction that supersedes the model-discovery behavior
 - Keep feedback authoritative. Never invent or optimistically advance a level Codex has not reported.
 - Prevent pre-command local or remote snapshot work from regressing a confirmed feedback patch.
 - Preserve the per-knob `Include Ultra` policy and the exact temporary `ULTRA OFF` notice.
-- Discover the current model from the unique visible, non-hidden, non-measurement ordinary-DOM label beneath the unique visible reasoning trigger, then map it uniquely to a validated `models/list` record by `displayName`.
+- Discover bounded visible, non-hidden, non-measurement ordinary-DOM leaf text candidates beneath the unique visible reasoning trigger, then accept only when their normalized values identify exactly one validated `models/list` record by `displayName`.
 - Preserve protocol-v1 rolling upgrades by negotiating confirmed effort feedback separately from the existing reasoning policy.
 - Preserve local and current-generation relay behavior; legacy unrestricted peers may continue without immediate confirmed-level feedback.
 
@@ -25,7 +25,7 @@ This design is a forward correction that supersedes the model-discovery behavior
 - Do not change the Action selector, keypad Reasoning controls, Fast Mode, or native Codex confirmation dialogs.
 - Do not add optimistic animation or synthetic intermediate levels.
 - Do not use React `selectedValue`, React siblings, or any other React model value to authorize the active model.
-- Do not accept zero or multiple visible model labels, zero or multiple normalized catalog matches, or hidden, measurement, accessor-backed, proxy-backed, malformed, over-bound, or traversal-truncated model/catalog data.
+- Do not accept a candidate set that maps to zero or more than one distinct normalized catalog record, or hidden, measurement, accessor-backed, proxy-backed, malformed, over-bound, or traversal-truncated model/catalog data. Multiple visible leaves are expected; unmatched leaves such as the current effort are ignored.
 
 ## Considered Approaches
 
@@ -60,9 +60,9 @@ type ReasoningAdjustmentExecution = {
 
 ### Renderer behavior
 
-- Model-label discovery starts at the one visible semantic reasoning trigger and inspects only its ordinary DOM descendants. It excludes hidden and measurement nodes and accepts exactly one visible, non-empty, bounded label.
-- The visible label is strictly normalized and compared only with the strictly normalized `displayName` of fully validated `models/list` query-cache records. Normalization is an exact token transform: accept bounded safe strings, trim and ASCII-case-fold them, tokenize only on spaces/hyphens, remove only the exact leading `gpt` token from catalog display names, and compare the entire remaining token sequence. It is not substring or fuzzy matching. The live `5.6 Sol` label must therefore map uniquely to the `GPT-5.6-Sol` record and its model ID `gpt-5.6-sol`; React `selectedValue` and sibling model data have no authorization role.
-- Catalog extraction remains descriptor-safe and bounded. Zero or multiple label candidates, zero or multiple matching records, malformed/accessor/proxy-backed data, bounds exhaustion, or traversal ambiguity fail closed.
+- Model-label discovery starts at the one visible semantic reasoning trigger and inspects only bounded ordinary-DOM leaf text descendants. It excludes hidden and measurement nodes and collects every visible, non-empty, bounded leaf candidate; multiple candidates are normal because the trigger also renders the current effort.
+- Each DOM candidate is strictly normalized and compared only with the strictly normalized `displayName` of fully validated `models/list` query-cache records. Normalization is an exact token transform: accept bounded safe strings, trim and ASCII-case-fold them, tokenize only on spaces/hyphens, remove only the exact leading `gpt` token from catalog display names, and compare the entire remaining token sequence. It is not substring or fuzzy matching. In the live shape, `high` is unmatched and ignored while `5.6 Sol` identifies the `GPT-5.6-Sol` record and its model ID `gpt-5.6-sol`; React `selectedValue` and sibling model data have no authorization role.
+- Catalog extraction remains descriptor-safe and bounded. Accept only when the complete candidate-to-catalog comparison produces exactly one distinct matching validated record. Zero matches or more than one distinct matching record, malformed/accessor/proxy-backed data, bounds exhaustion, or traversal ambiguity fail closed; repeated/unmatched DOM leaves do not by themselves create ambiguity.
 - Restricted increases read the ordered `supportedReasoningEfforts` from that same uniquely matched, fully validated record before dispatch. If the next effort is Ultra, they return `blocked-ultra` without running a command.
 - Applied commands poll the visible reasoning trigger for a bounded confirmation and return the confirmed effort when observed.
 - If an interior adjustment cannot be confirmed, the bridge fails honestly rather than fabricating the next value. A boundary no-op may return the unchanged authoritative value only when the current supported order proves the requested direction is already at its boundary.
@@ -105,8 +105,8 @@ Command and result parsing remains exact-data-only. It rejects false/unknown fee
 
 ## Testing
 
-- Unit-test ordinary-DOM label discovery with the current live shape: hidden measurement `5.3 Codex Spark`, visible `5.6 Sol`, current effort `high`, and a uniquely matched validated catalog record whose `displayName` is `GPT-5.6-Sol` and model ID is `gpt-5.6-sol`.
-- Prove the matched record's ordered `supportedReasoningEfforts` is preserved without hardcoding an order not established by the live probe. Cover zero/multiple visible labels, normalization collisions, zero/multiple catalog matches, React-only model data, hidden/measurement nodes, accessors, proxies, malformed data, and depth/node/query traversal bounds.
+- Unit-test ordinary-DOM leaf discovery with the current live shape: hidden measurement `5.3 Codex Spark`; visible leaf candidates including effort `high` and model `5.6 Sol`; and exactly one matched validated catalog record whose `displayName` is `GPT-5.6-Sol` and model ID is `gpt-5.6-sol`.
+- Prove unmatched visible effort/other leaf candidates are ignored and the matched record's ordered `supportedReasoningEfforts` is preserved without hardcoding an order not established by the live probe. Cover zero matches, more than one distinct matching catalog record, normalization collisions, React-only model data, hidden/measurement nodes, accessors, proxies, malformed data, and depth/node/query traversal bounds.
 - Execute the serialized renderer expression and prove applied/blocked results carry only authoritative efforts.
 - Controller tests must prove immediate feedback with the global poll disabled, no update on failure/unconfirmed results, ordered rapid detents, and local generation invalidation. Deterministically hold a refresh that captured the pre-command generation, apply and render a confirmed effort, release the old refresh, and prove it cannot regress the display.
 - Relay tests must cover the additive `reasoning-feedback` capability, opt-in command/result exactness, both rolling-upgrade directions, preservation of `reasoning-policy`, malformed efforts, and current-ready-generation/host patching. A deterministic same-generation test must hold a pre-command server refresh, execute an opted-in reasoning command, release the old read, observe old snapshot then forced fresh snapshot then result, and prove the client display cannot regress after the result.
@@ -115,7 +115,7 @@ Command and result parsing remains exact-data-only. It rejects false/unknown fee
 ## Acceptance Criteria
 
 - A normal Reasoning detent updates the Stream Deck immediately after Codex confirms the new level and does not wait for the background poll.
-- The current live Codex shape yields effort `high`, visible model label `5.6 Sol`, and model ID `gpt-5.6-sol`; its supported effort order comes unchanged from that uniquely matched validated `GPT-5.6-Sol` record rather than from an unverified hardcoded order.
+- The current live Codex shape yields effort `high`, multiple visible leaf candidates including `high` and model label `5.6 Sol`, and model ID `gpt-5.6-sol`; unmatched effort text is ignored, exactly one validated `GPT-5.6-Sol` record matches, and its supported effort order is preserved rather than replaced by an unverified hardcoded order.
 - Hidden measurement label `5.3 Codex Spark`, React sibling/`selectedValue` data, ambiguous normalization matches, and unsafe or truncated catalog data cannot authorize a model.
 - Turning above the highest non-Ultra level with Ultra excluded still shows `ULTRA OFF` and runs no increase command.
 - Action-selector behavior is unchanged.
