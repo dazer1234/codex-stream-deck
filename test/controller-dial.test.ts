@@ -2950,3 +2950,126 @@ test("refused or malformed model preset results reconcile actual state without r
   }
   assert.equal(getterReads, 0, "result validation never invokes accessors");
 });
+
+test("different model preset knobs resolve in controller-wide arrival order", async () => {
+  const controller = new DeckController();
+  const firstDial = fakeDial("model-preset-global-first");
+  const secondDial = fakeDial("model-preset-global-second");
+  const state = probe(controller);
+  const firstResult = deferred<ModelPresetExecution>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      if (requests.length === 1) return firstResult.promise;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(firstDial, modelPresetSettings());
+  controller.registerDial(secondDial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(firstDial, 1);
+  controller.rotateDial(secondDial, 1);
+  await settle();
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"]
+  ], "the second knob waits to resolve until the first confirms");
+
+  firstResult.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await Promise.all([
+    state.dials.get(firstDial.id)!.queue.idle(),
+    state.dials.get(secondDial.id)!.queue.idle()
+  ]);
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"], ["gpt-5.6-terra", "medium"]
+  ]);
+  controller.unregisterDial(firstDial);
+  controller.unregisterDial(secondDial);
+});
+
+test("a model preset waits for predecessor reasoning confirmation before resolving its pair", async () => {
+  const controller = new DeckController();
+  const reasoningDial = fakeDial("reasoning-global-first");
+  const presetDial = fakeDial("model-preset-global-after-reasoning");
+  const state = probe(controller);
+  const reasoningResult = deferred<ReasoningAdjustmentExecution>();
+  const presetRequests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return reasoningResult.promise; },
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(reasoningDial, expandDialPreset("reasoning"));
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(reasoningDial, -1);
+  controller.rotateDial(presetDial, 1);
+  await settle();
+  assert.deepEqual(presetRequests, [], "preset resolution waits behind the reasoning mutation");
+
+  reasoningResult.resolve({ outcome: "applied", reasoningEffort: "medium" });
+  await Promise.all([
+    state.dials.get(reasoningDial.id)!.queue.idle(),
+    state.dials.get(presetDial.id)!.queue.idle()
+  ]);
+  assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-terra", "medium"]
+  ]);
+  controller.unregisterDial(reasoningDial);
+  controller.unregisterDial(presetDial);
+});
+
+test("reasoning waiting on the shared mutation order rechecks registration disposal", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("model-preset-global-blocker");
+  const reasoningDial = fakeDial("reasoning-global-disposed");
+  const state = probe(controller);
+  const presetResult = deferred<ModelPresetExecution>();
+  let reasoningCalls = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset() { return presetResult.promise; },
+    async adjustReasoning() {
+      reasoningCalls += 1;
+      return { outcome: "applied", reasoningEffort: "high" };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  controller.registerDial(reasoningDial, expandDialPreset("reasoning"));
+  await settle();
+  const reasoningRegistration = state.dials.get(reasoningDial.id)!;
+
+  controller.rotateDial(presetDial, 1);
+  controller.rotateDial(reasoningDial, 1);
+  await settle();
+  controller.unregisterDial(reasoningDial);
+  presetResult.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await Promise.all([
+    state.dials.get(presetDial.id)!.queue.idle(),
+    reasoningRegistration.queue.idle()
+  ]);
+
+  assert.equal(reasoningCalls, 0);
+  controller.unregisterDial(presetDial);
+});

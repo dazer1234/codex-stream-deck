@@ -181,6 +181,7 @@ export class DeckController {
   private poll?: NodeJS.Timeout;
   private animation?: NodeJS.Timeout;
   private refreshInFlight?: Promise<void>;
+  private modelReasoningMutationTail: Promise<void> = Promise.resolve();
   private localSnapshotGeneration = 0;
   private stopped = false;
   private animationFrame = 0;
@@ -251,7 +252,8 @@ export class DeckController {
             () => this.microBridge.sendJoystick(direction, distance)),
           sendEncoder: (act: 0 | 1) => runAndInvalidate(() => this.microBridge.sendEncoder(act)),
           adjustReasoning: (direction: ReasoningAdjustment, policy?: ReasoningAdjustmentPolicy) => runAndInvalidate(
-            () => this.microBridge.adjustReasoning(direction, policy)),
+            () => this.serializeModelReasoningMutation(
+              () => this.microBridge.adjustReasoning(direction, policy))),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
           refreshUsage: async () => {
@@ -517,6 +519,14 @@ export class DeckController {
       this.dials.get(registration.action.id) === registration;
   }
 
+  private serializeModelReasoningMutation<Result>(
+    operation: () => Promise<Result>
+  ): Promise<Result> {
+    const result = this.modelReasoningMutationTail.then(operation, operation);
+    this.modelReasoningMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   rotateDial(action: CodexDialAction, ticks: number): void {
     const registration = this.dials.get(action.id);
     if (!registration) return;
@@ -573,41 +583,43 @@ export class DeckController {
     direction: ModelPresetDirection
   ): void {
     const accepted = registration.queue.enqueue(async () => {
-      if (!this.isCurrentDialRegistration(registration)) return;
-      registration.settings = normalizeDialSettings(registration.settings);
-      if (registration.settings.rotation.kind !== "model-presets") return;
-      const resolution = resolveModelPresetDirection(
-        registration.settings,
-        this.dialRuntimeView(registration.settings, registration.state),
-        direction
-      );
-      if (resolution.kind !== "target") {
-        await this.renderDialSafely(registration);
-        return;
-      }
-      const route: DialHostRoute = {
-        kind: "host",
-        hostId: this.targetHostId,
-        platform: this.targetPlatform
-      };
-      const request: ModelPresetRequest = {
-        modelId: resolution.entry.modelId,
-        reasoningEffort: resolution.entry.reasoningEffort,
-        includeUltra: registration.settings.includeUltraReasoning
-      };
-      registration.state = { ...registration.state, modelPresetSwitching: true };
-      await this.renderDialSafely(registration);
-      try {
-        await this.sendModelPresetToHost(route, request);
+      await this.serializeModelReasoningMutation(async () => {
         if (!this.isCurrentDialRegistration(registration)) return;
-        registration.state = { ...registration.state, modelPresetSwitching: false };
+        registration.settings = normalizeDialSettings(registration.settings);
+        if (registration.settings.rotation.kind !== "model-presets") return;
+        const resolution = resolveModelPresetDirection(
+          registration.settings,
+          this.dialRuntimeView(registration.settings, registration.state),
+          direction
+        );
+        if (resolution.kind !== "target") {
+          await this.renderDialSafely(registration);
+          return;
+        }
+        const route: DialHostRoute = {
+          kind: "host",
+          hostId: this.targetHostId,
+          platform: this.targetPlatform
+        };
+        const request: ModelPresetRequest = {
+          modelId: resolution.entry.modelId,
+          reasoningEffort: resolution.entry.reasoningEffort,
+          includeUltra: registration.settings.includeUltraReasoning
+        };
+        registration.state = { ...registration.state, modelPresetSwitching: true };
         await this.renderDialSafely(registration);
-      } catch (error) {
-        if (!this.isCurrentDialRegistration(registration)) return;
-        registration.state = { ...registration.state, modelPresetSwitching: false };
-        await this.renderDialSafely(registration);
-        await this.reportDialCommandError(registration, error);
-      }
+        try {
+          await this.sendModelPresetToHost(route, request);
+          if (!this.isCurrentDialRegistration(registration)) return;
+          registration.state = { ...registration.state, modelPresetSwitching: false };
+          await this.renderDialSafely(registration);
+        } catch (error) {
+          if (!this.isCurrentDialRegistration(registration)) return;
+          registration.state = { ...registration.state, modelPresetSwitching: false };
+          await this.renderDialSafely(registration);
+          await this.reportDialCommandError(registration, error);
+        }
+      });
     });
     if (!accepted && this.isCurrentDialRegistration(registration)) {
       void this.reportDialCommandError(
@@ -844,9 +856,10 @@ export class DeckController {
   }
 
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
-    await this.sendToTarget({ kind: "reasoning", direction, includeUltra: true }, async () => {
-      await this.microBridge.adjustReasoning(direction, { includeUltra: true });
-    });
+    await this.serializeModelReasoningMutation(() =>
+      this.sendToTarget({ kind: "reasoning", direction, includeUltra: true }, async () => {
+        await this.microBridge.adjustReasoning(direction, { includeUltra: true });
+      }));
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
@@ -1478,41 +1491,47 @@ export class DeckController {
     const lifecycle = bindingLifecycle(binding);
     if (act === 0 && lifecycle !== "momentary") return;
     if (binding === "reasoning.decrease") {
-      const result = await this.sendDialToHost(
-        route,
-        {
-          kind: "reasoning", direction: "decrease",
-          includeUltra: gesture.includeUltraReasoning,
-          includeReasoningFeedback: true
-        },
-        () => this.microBridge.adjustReasoning("decrease", {
-          includeUltra: gesture.includeUltraReasoning
-        })
-      );
-      const outcome = reasoningResultOutcome(result);
-      if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
-      else if (reasoningResultEffort(result) !== undefined) {
-        await this.renderDialSafely(registration);
-      }
+      await this.serializeModelReasoningMutation(async () => {
+        if (!this.isCurrentDialRegistration(registration)) return;
+        const result = await this.sendDialToHost(
+          route,
+          {
+            kind: "reasoning", direction: "decrease",
+            includeUltra: gesture.includeUltraReasoning,
+            includeReasoningFeedback: true
+          },
+          () => this.microBridge.adjustReasoning("decrease", {
+            includeUltra: gesture.includeUltraReasoning
+          })
+        );
+        const outcome = reasoningResultOutcome(result);
+        if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+        else if (reasoningResultEffort(result) !== undefined) {
+          await this.renderDialSafely(registration);
+        }
+      });
       return;
     }
     if (binding === "reasoning.increase") {
-      const result = await this.sendDialToHost(
-        route,
-        {
-          kind: "reasoning", direction: "increase",
-          includeUltra: gesture.includeUltraReasoning,
-          includeReasoningFeedback: true
-        },
-        () => this.microBridge.adjustReasoning("increase", {
-          includeUltra: gesture.includeUltraReasoning
-        })
-      );
-      const outcome = reasoningResultOutcome(result);
-      if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
-      else if (reasoningResultEffort(result) !== undefined) {
-        await this.renderDialSafely(registration);
-      }
+      await this.serializeModelReasoningMutation(async () => {
+        if (!this.isCurrentDialRegistration(registration)) return;
+        const result = await this.sendDialToHost(
+          route,
+          {
+            kind: "reasoning", direction: "increase",
+            includeUltra: gesture.includeUltraReasoning,
+            includeReasoningFeedback: true
+          },
+          () => this.microBridge.adjustReasoning("increase", {
+            includeUltra: gesture.includeUltraReasoning
+          })
+        );
+        const outcome = reasoningResultOutcome(result);
+        if (outcome === "blocked-ultra") await this.showDialUltraOff(registration);
+        else if (reasoningResultEffort(result) !== undefined) {
+          await this.renderDialSafely(registration);
+        }
+      });
       return;
     }
     if (binding === "new-task") {
