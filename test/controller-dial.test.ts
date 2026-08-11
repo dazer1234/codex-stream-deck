@@ -60,6 +60,10 @@ type ControllerProbe = {
   dialRenderErrors: Set<string>;
   dialSuccessErrors: Set<string>;
   refresh(): Promise<void>;
+  adjustLocalReasoningFromRelay(
+    direction: "decrease" | "increase",
+    policy?: ReasoningAdjustmentPolicy
+  ): Promise<ReasoningAdjustmentExecution>;
   sendDialToHost(
     route: { kind: "host"; hostId?: string; platform: CodexHost["platform"] },
     command: unknown,
@@ -842,7 +846,7 @@ test("local confirmed reasoning never patches a genuinely replaced host", async 
   controller.rotateDial(action, 1);
   await idle(controller, action.id);
 
-  assert.equal(state.localSnapshotGeneration, 0);
+  assert.equal(state.localSnapshotGeneration, 1, "the pre-operation fence survives a host replacement");
   assert.equal(state.localSnapshot?.host.hostId, "host-replacement");
   assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "medium");
   assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "MEDIUM");
@@ -3072,4 +3076,116 @@ test("reasoning waiting on the shared mutation order rechecks registration dispo
 
   assert.equal(reasoningCalls, 0);
   controller.unregisterDial(presetDial);
+});
+
+test("public reasoning patches its confirmed effort before a waiting preset resolves", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("model-preset-after-public-reasoning");
+  const state = probe(controller);
+  const reasoningResult = deferred<ReasoningAdjustmentExecution>();
+  const presetRequests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return reasoningResult.promise; },
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  const reasoning = controller.adjustReasoning("decrease");
+  controller.rotateDial(presetDial, 1);
+  await settle();
+  assert.deepEqual(presetRequests, []);
+  reasoningResult.resolve({ outcome: "applied", reasoningEffort: "medium" });
+  await reasoning;
+  await state.dials.get(presetDial.id)!.queue.idle();
+
+  assert.equal(state.localSnapshotGeneration, 2, "reasoning and preset each fence older snapshots");
+  assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-terra", "medium"]
+  ]);
+  controller.unregisterDial(presetDial);
+});
+
+test("incoming relay reasoning patches before release and fences a held refresh from a waiting preset", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("model-preset-after-relay-reasoning");
+  const state = probe(controller);
+  const staleRefresh = deferred<MicroSnapshot>();
+  const reasoningResult = deferred<ReasoningAdjustmentExecution>();
+  const presetRequests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async refresh() { return staleRefresh.promise; },
+    async adjustReasoning() { return reasoningResult.promise; },
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+  const olderRefresh = state.refresh();
+  await settle();
+
+  const relayReasoning = state.adjustLocalReasoningFromRelay("decrease", { includeUltra: false });
+  controller.rotateDial(presetDial, 1);
+  await settle();
+  reasoningResult.resolve({ outcome: "applied", reasoningEffort: "medium" });
+  await relayReasoning;
+  await state.dials.get(presetDial.id)!.queue.idle();
+
+  assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-terra", "medium"]
+  ]);
+  staleRefresh.resolve(modelSnapshot("gpt-5.6-sol", "high"));
+  await olderRefresh;
+  assert.equal(state.localSnapshot.snapshot.activeModelId, "gpt-5.6-terra");
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "medium");
+  controller.unregisterDial(presetDial);
+});
+
+test("shared local reasoning validation is descriptor-safe and failures retain last-known state", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  let getterReads = 0;
+  const accessorExecution = Object.defineProperty(
+    { outcome: "applied" }, "reasoningEffort",
+    { enumerable: true, get() { getterReads += 1; return "medium"; } }
+  );
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  const retained = state.localSnapshot;
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return accessorExecution as ReasoningAdjustmentExecution; }
+  };
+
+  await assert.rejects(controller.adjustReasoning("decrease"), /invalid reasoning adjustment result/i);
+  assert.equal(getterReads, 0);
+  assert.equal(state.localSnapshot, retained);
+  assert.equal(state.localSnapshotGeneration, 1);
+  assert.equal(state.localHealth.state, "ready");
+
+  state.microBridge.adjustReasoning = async () => { throw new Error("bridge unavailable"); };
+  await assert.rejects(controller.adjustReasoning("decrease"), /bridge unavailable/);
+  assert.equal(state.localSnapshot, retained);
+  assert.equal(state.localSnapshotGeneration, 2);
+  assert.equal(state.localHealth.state, "ready");
 });

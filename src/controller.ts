@@ -252,8 +252,7 @@ export class DeckController {
             () => this.microBridge.sendJoystick(direction, distance)),
           sendEncoder: (act: 0 | 1) => runAndInvalidate(() => this.microBridge.sendEncoder(act)),
           adjustReasoning: (direction: ReasoningAdjustment, policy?: ReasoningAdjustmentPolicy) => runAndInvalidate(
-            () => this.serializeModelReasoningMutation(
-              () => this.microBridge.adjustReasoning(direction, policy))),
+            () => this.adjustLocalReasoningFromRelay(direction, policy)),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
           refreshUsage: async () => {
@@ -525,6 +524,37 @@ export class DeckController {
     const result = this.modelReasoningMutationTail.then(operation, operation);
     this.modelReasoningMutationTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private adjustLocalReasoningFromRelay(
+    direction: ReasoningAdjustment,
+    policy?: ReasoningAdjustmentPolicy
+  ): Promise<ReasoningAdjustmentExecution> {
+    return this.serializeModelReasoningMutation(
+      () => this.adjustLocalReasoning(direction, policy));
+  }
+
+  private async adjustLocalReasoning(
+    direction: ReasoningAdjustment,
+    policy?: ReasoningAdjustmentPolicy
+  ): Promise<ReasoningAdjustmentExecution> {
+    const localHost = this.localHost;
+    this.localSnapshotGeneration += 1;
+    const execution = parseReasoningExecution(
+      await this.microBridge.adjustReasoning(direction, policy)
+    );
+    if (!execution) throw new Error("Codex returned an invalid reasoning adjustment result.");
+    const current = this.localSnapshot;
+    if (execution.reasoningEffort !== undefined && localHost != null &&
+        this.localHost?.hostId === localHost.hostId &&
+        this.localHost.platform === localHost.platform && current != null &&
+        current.host.hostId === localHost.hostId && current.host.platform === localHost.platform) {
+      this.localSnapshot = {
+        ...current,
+        snapshot: { ...current.snapshot, reasoningEffort: execution.reasoningEffort }
+      };
+    }
+    return execution;
   }
 
   rotateDial(action: CodexDialAction, ticks: number): void {
@@ -858,7 +888,7 @@ export class DeckController {
   async adjustReasoning(direction: ReasoningAdjustment): Promise<void> {
     await this.serializeModelReasoningMutation(() =>
       this.sendToTarget({ kind: "reasoning", direction, includeUltra: true }, async () => {
-        await this.microBridge.adjustReasoning(direction, { includeUltra: true });
+        await this.adjustLocalReasoning(direction, { includeUltra: true });
       }));
   }
 
@@ -1500,7 +1530,7 @@ export class DeckController {
             includeUltra: gesture.includeUltraReasoning,
             includeReasoningFeedback: true
           },
-          () => this.microBridge.adjustReasoning("decrease", {
+          () => this.adjustLocalReasoning("decrease", {
             includeUltra: gesture.includeUltraReasoning
           })
         );
@@ -1522,7 +1552,7 @@ export class DeckController {
             includeUltra: gesture.includeUltraReasoning,
             includeReasoningFeedback: true
           },
-          () => this.microBridge.adjustReasoning("increase", {
+          () => this.adjustLocalReasoning("increase", {
             includeUltra: gesture.includeUltraReasoning
           })
         );
@@ -1619,20 +1649,6 @@ export class DeckController {
       const execution = await local();
       const parsed = parseReasoningExecution(execution);
       if (!parsed) return undefined;
-      const current = this.localSnapshot;
-      if (parsed.reasoningEffort !== undefined &&
-          localHost != null &&
-          this.localHost?.hostId === localHost.hostId &&
-          this.localHost.platform === localHost.platform &&
-          current != null &&
-          current.host.hostId === localHost.hostId &&
-          current.host.platform === localHost.platform) {
-        this.localSnapshotGeneration += 1;
-        this.localSnapshot = {
-          ...current,
-          snapshot: { ...current.snapshot, reasoningEffort: parsed.reasoningEffort }
-        };
-      }
       return parsed.reasoningEffort === undefined ? parsed.outcome : parsed;
     }
     const remote = this.relayClient?.currentHost();
