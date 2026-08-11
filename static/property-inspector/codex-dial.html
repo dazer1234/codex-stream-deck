@@ -987,6 +987,10 @@
         if (generation !== connectionGeneration) return;
         let event;
         try { event = JSON.parse(message.data); } catch { return; }
+        if (record(event) && event.action === CODEX_DIAL_ACTION_UUID &&
+            typeof event.context === "string" && event.context.length > 0) {
+          context = event.context;
+        }
         if (record(event) && event.event === "didReceiveSettings" && hasOwn(event, "payload") &&
             record(event.payload) && hasOwn(event.payload, "settings")) {
           applySettings(event.payload.settings);

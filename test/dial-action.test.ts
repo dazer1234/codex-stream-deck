@@ -410,6 +410,35 @@ test("reconnect resets action authority and stale sockets cannot send with an ol
   ]);
 });
 
+test("property inspector refreshes a stale registration context from the authoritative host event", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({
+      action: CODEX_DIAL_ACTION_UUID,
+      context: "stale-action-context",
+      payload: { settings: expandDialPreset("model-presets") }
+    })
+  );
+  sockets[0]?.open();
+  sockets[0]?.message({
+    action: CODEX_DIAL_ACTION_UUID,
+    context: "current-action-context",
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 4,
+      activeModelId: "gpt-5.6-sol", activeModelDisplayName: "5.6 Sol", reasoningEffort: "high",
+      modelCatalog: MODEL_CATALOG
+    }
+  });
+  field(document, "press").value = "host.toggle";
+  field(document, "press").dispatch("change");
+  const frames = rawDecodedMessages(sockets[0]!);
+  assert.equal(frames.at(-1)?.event, "setSettings");
+  assert.equal(frames.at(-1)?.context, "current-action-context");
+});
+
 test("property inspector exposes the Model Presets editor and requests live authority", async () => {
   const { document, sockets, connect } = await inspectorHarness();
   assert.match(await text("static/property-inspector/codex-dial.html"), /<option value="model-presets">Model Presets<\/option>/);
