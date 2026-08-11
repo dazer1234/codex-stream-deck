@@ -452,6 +452,97 @@ test("model preset editor caps twelve rows and rejects duplicate pairs", async (
   assert.notEqual(rerenderedSecond?.value, "high", "a duplicate edit is reverted without persistence");
 });
 
+test("model presets preserve and edit independent press and touch controls", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"),
+    customized: true,
+    press: "host.toggle" as const,
+    touchTap: "keycap.TIME" as const,
+    modelPresets: [{ modelId: "gpt-model", reasoningEffort: "high" }]
+  };
+  const { document, sockets, connect, normalize } = await inspectorHarness();
+  assert.equal(normalize({ ...settings, press: "selector.activate" }).press, "none");
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-model-gestures", payload: { settings } })
+  );
+  sockets[0]?.open();
+  assert.equal(field(document, "press").value, "host.toggle");
+  assert.equal(field(document, "touch-tap").value, "keycap.TIME");
+
+  field(document, "press").value = "micro.ACT06";
+  field(document, "press").dispatch("change");
+  field(document, "touch-tap").value = "host.toggle";
+  field(document, "touch-tap").dispatch("change");
+  const payload = decodedMessages(sockets[0]!).at(-1)?.payload as Record<string, unknown>;
+  assert.equal(payload.press, "micro.ACT06");
+  assert.equal(payload.touchTap, "host.toggle");
+  assert.deepEqual(normalizeDialSettings(payload), payload, "saved model preset settings remain runtime-valid");
+});
+
+test("model changes select a nonduplicate effort or visibly refuse the edit", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"), customized: true,
+    modelPresets: [
+      { modelId: "gpt-sol", reasoningEffort: "high" },
+      { modelId: "gpt-terra", reasoningEffort: "high" },
+      { modelId: "gpt-sol", reasoningEffort: "medium" }
+    ]
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-model-dupes", payload: { settings } })
+  );
+  sockets[0]?.open();
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+      activeModelId: "gpt-sol", activeModelDisplayName: "Sol", reasoningEffort: "high",
+      modelCatalog: [
+        { modelId: "gpt-sol", displayName: "Sol", supportedReasoningEfforts: ["high", "medium", "low"] },
+        { modelId: "gpt-terra", displayName: "Terra", supportedReasoningEfforts: ["high"] }
+      ]
+    }
+  });
+  const secondModel = modelPresetRows(document)[1]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "model");
+  assert.ok(secondModel);
+  secondModel.value = "gpt-sol";
+  secondModel.dispatch("change");
+  const changed = decodedMessages(sockets[0]!).at(-1)?.payload as {
+    modelPresets: Array<{ modelId: string; reasoningEffort: string }>;
+  };
+  assert.deepEqual(changed.modelPresets[1], { modelId: "gpt-sol", reasoningEffort: "low" });
+  assert.equal(new Set(changed.modelPresets.map(({ modelId, reasoningEffort }) => `${modelId}:${reasoningEffort}`)).size, 3);
+
+  const onlyUsedSettings = {
+    ...settings,
+    modelPresets: [
+      { modelId: "gpt-sol", reasoningEffort: "high" },
+      { modelId: "gpt-sol", reasoningEffort: "medium" },
+      { modelId: "gpt-sol", reasoningEffort: "low" },
+      { modelId: "gpt-terra", reasoningEffort: "high" }
+    ]
+  };
+  sockets[0]?.message({ event: "didReceiveSettings", payload: { settings: onlyUsedSettings } });
+  const before = decodedMessages(sockets[0]!).length;
+  const fourthModel = modelPresetRows(document)[3]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "model");
+  assert.ok(fourthModel);
+  fourthModel.value = "gpt-sol";
+  fourthModel.dispatch("change");
+  assert.equal(decodedMessages(sockets[0]!).length, before, "refused duplicate edit is not persisted");
+  assert.equal(
+    modelPresetRows(document)[3]?.descendants().find(({ tagName, dataset }) =>
+      tagName === "SELECT" && dataset.field === "model")?.value,
+    "gpt-terra"
+  );
+  assert.match(field(document, "model-editor-status").textContent, /duplicate|already configured/i);
+});
+
 test("Codex Dial registration paths reject non-dial actions", () => {
   const { adapter, calls } = adapterHarness();
   const key = { id: "key-1", isDial: () => false };

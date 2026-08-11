@@ -385,6 +385,8 @@ export class DeckController {
   }
 
   registerDialPropertyInspector(action: CodexDialAction): void {
+    const prior = this.dialInspectors.get(action.id);
+    if (prior) prior.generation = -Math.abs(prior.generation);
     const registration: DialInspectorRegistration = {
       action,
       generation: ++this.nextDialInspectorGeneration
@@ -395,7 +397,7 @@ export class DeckController {
 
   unregisterDialPropertyInspector(action: ActionIdentity): void {
     const registration = this.dialInspectors.get(action.id);
-    if (!registration) return;
+    if (!registration || registration.action !== action) return;
     registration.generation = -Math.abs(registration.generation);
     this.dialInspectors.delete(action.id);
   }

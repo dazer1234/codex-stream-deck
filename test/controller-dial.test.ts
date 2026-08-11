@@ -2595,3 +2595,32 @@ test("late catalog send from a disappeared inspector carries an older fenced rev
   assert.deepEqual(delivered.map(({ payload }) => (payload as { catalogRevision: number }).catalogRevision), [2, 1]);
   controller.unregisterDialPropertyInspector(replacement);
 });
+
+test("stale same-id inspector disappear cannot unregister its replacement", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const oldSent: unknown[] = [];
+  const replacementSent: unknown[] = [];
+  const oldAction = fakeDial("catalog-replaced") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  oldAction.sendToPropertyInspector = async (payload) => { oldSent.push(payload); };
+  const replacement = fakeDial("catalog-replaced") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  replacement.sendToPropertyInspector = async (payload) => { replacementSent.push(payload); };
+  state.localHost = HOST;
+  state.targetPlatform = HOST.platform;
+  state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: 1_000 };
+
+  controller.registerDialPropertyInspector(oldAction);
+  controller.registerDialPropertyInspector(replacement);
+  await settle();
+  controller.unregisterDialPropertyInspector(oldAction);
+  controller.handleDialPropertyInspectorMessage(replacement, {
+    kind: "request-model-catalog", requestGeneration: 8
+  });
+  await settle();
+
+  assert.equal(oldSent.length, 1);
+  assert.equal(replacementSent.length, 2, "replacement remains registered after stale disappear");
+  assert.equal((replacementSent.at(-1) as { requestGeneration: number }).requestGeneration, 8);
+  controller.unregisterDialPropertyInspector(replacement);
+});

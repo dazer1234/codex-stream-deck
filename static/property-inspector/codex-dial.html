@@ -147,6 +147,7 @@
     <section id="model-presets-panel" class="panel" hidden>
       <h2 class="panel-title">Model Presets</h2>
       <p id="model-catalog-status" class="hint" role="status" aria-live="polite">Live model catalog unavailable.</p>
+      <p id="model-editor-status" class="hint" role="status" aria-live="polite"></p>
       <p class="hint">Each detent immediately applies the next model and reasoning pair. Drag rows or use the accessible arrows to reorder.</p>
       <div id="model-preset-items"></div>
       <button id="add-model-preset" type="button">Add preset</button>
@@ -462,8 +463,10 @@
           customized: hasOwn(input, "customized") && input.customized === true,
           includeUltraReasoning: hasOwn(input, "includeUltraReasoning") && input.includeUltraReasoning === true,
           rotation: { kind: "model-presets" },
-          press: "none",
-          touchTap: "keycap.FAST",
+          press: hasOwn(input, "press") && input.press !== "selector.activate" && bindingAllowed(input.press, "press")
+            ? input.press : fallback.press,
+          touchTap: hasOwn(input, "touchTap") && bindingAllowed(input.touchTap, "touch")
+            ? input.touchTap : fallback.touchTap,
           feedback: "model-presets",
           modelPresets: normalizeModelPresetRows(input.modelPresets)
         };
@@ -621,18 +624,28 @@
         effort.value = entry.reasoningEffort;
         model.addEventListener("change", () => {
           const target = catalogEntry(model.value);
-          const candidate = target?.supportedReasoningEfforts.find((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra");
-          if (!candidate) return;
+          const candidate = target?.supportedReasoningEfforts.find((value) =>
+            (element("include-ultra").checked || value.toLowerCase() !== "ultra") &&
+            !modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
+              rowEntry.modelId === model.value && rowEntry.reasoningEffort === value));
+          if (!candidate) {
+            element("model-editor-status").textContent = "That model's available pairs are already configured; duplicate preset refused.";
+            renderModelPresetItems();
+            return;
+          }
           modelPresetRows[index] = { modelId: model.value, reasoningEffort: candidate };
+          element("model-editor-status").textContent = "";
           renderModelPresetItems(); persistAndQueue(true);
         });
         effort.addEventListener("change", () => {
           const candidate = { modelId: entry.modelId, reasoningEffort: effort.value };
           if (modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
               rowEntry.modelId === candidate.modelId && rowEntry.reasoningEffort === candidate.reasoningEffort)) {
+            element("model-editor-status").textContent = "That model and reasoning pair is already configured; duplicate preset refused.";
             renderModelPresetItems(); return;
           }
           modelPresetRows[index] = candidate;
+          element("model-editor-status").textContent = "";
           persistAndQueue(true);
         });
         const buttons = document.createElement("span");
@@ -731,8 +744,8 @@
           customized: true,
           includeUltraReasoning: element("include-ultra").checked,
           rotation: { kind: "model-presets" },
-          press: "none",
-          touchTap: "keycap.FAST",
+          press: element("press").value,
+          touchTap: element("touch-tap").value,
           feedback: "model-presets",
           modelPresets: clone(modelPresetRows).slice(0, 12)
         };
