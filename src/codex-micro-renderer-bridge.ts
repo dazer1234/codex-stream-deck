@@ -639,7 +639,8 @@ export function readActiveReasoningMetadata(
     const visibleTriggers: ReasoningTriggerElement[] = [];
     for (const element of elements) {
       if (element.getAttribute("data-codex-intelligence-trigger") !== "true" ||
-          element.getAttribute("data-composer-navigation-target") !== "reasoning" || !isVisible(element)) continue;
+          element.getAttribute("data-composer-navigation-target") !== "reasoning" || !isVisible(element) ||
+          isExplicitlyHidden(element)) continue;
       visibleTriggers.push(element);
     }
     if (visibleTriggers.length !== 1) return undefined;

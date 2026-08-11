@@ -499,6 +499,61 @@ test("reasoning metadata maps model and effort leaves without depending on their
     (node) => node.visibleGeometry === true, () => false)?.modelId, "gpt-5.6-terra");
 });
 
+test("explicitly hidden reasoning triggers cannot authorize metadata", () => {
+  const read = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<Record<string, any>>,
+    reactRootFiber: unknown,
+    isVisible: (element: Record<string, any>) => boolean,
+    isExplicitlyHidden: (element: Record<string, any>) => boolean
+  ) => unknown;
+  const query = reasoningTrustQuery();
+  const queryClient = new ReasoningQueryClientFixture([[query.queryKey, query.state.data]]);
+  const reactRootFiber = { memoizedProps: { value: queryClient }, child: null, sibling: null };
+  const trigger = (state: Record<string, unknown>) => {
+    const result: Record<string, any> = {
+      visibleGeometry: true,
+      display: "block",
+      visibility: "visible",
+      getAttribute: (name: string) => ({
+        "data-codex-intelligence-trigger": "true",
+        "data-composer-navigation-target": "reasoning",
+        "data-selected-reasoning-effort": "high",
+        "aria-hidden": state.ariaHidden ? "true" : null,
+        hidden: state.hidden ? "" : null,
+        class: state.measurement ? "ModelPickerTriggerMeasurement_probe" : null
+      })[name] ?? null,
+      ...state
+    };
+    const modelLeaf = {
+      visibleGeometry: true,
+      display: "inline",
+      visibility: "visible",
+      parentElement: result,
+      children: [],
+      textContent: "5.6 Sol",
+      getAttribute: () => null
+    };
+    result.querySelectorAll = () => [modelLeaf];
+    return result;
+  };
+  const hasGeometry = (node: Record<string, any>) => node.visibleGeometry === true;
+  const isExplicitlyHidden = (node: Record<string, any>) => node.display === "none" ||
+    node.visibility === "hidden" || node.visibility === "collapse" ||
+    node.getAttribute?.("aria-hidden") === "true" || node.getAttribute?.("hidden") !== null ||
+    /ModelPickerTriggerMeasurement/i.test(node.getAttribute?.("class") ?? "");
+
+  const hiddenStates = [
+    { ariaHidden: true },
+    { hidden: true },
+    { display: "none" },
+    { visibility: "collapse" },
+    { measurement: true }
+  ];
+  assert.deepEqual(hiddenStates.map((state) =>
+    read([trigger(state)], reactRootFiber, hasGeometry, isExplicitlyHidden)
+  ), hiddenStates.map(() => undefined));
+});
+
 test("reasoning discovery does not clone unrelated contexts or invoke nested accessors", () => {
   let nestedGetterReads = 0;
   const nested: Record<string, unknown> = {};
