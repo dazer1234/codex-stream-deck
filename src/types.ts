@@ -32,6 +32,15 @@ export type ReasoningAdjustmentExecution = {
   outcome: ReasoningAdjustmentResult;
   reasoningEffort?: string;
 };
+export type ModelPresetRequest = {
+  modelId: string;
+  reasoningEffort: string;
+  includeUltra: boolean;
+};
+export type ModelPresetExecution = {
+  modelId: string;
+  reasoningEffort: string;
+};
 
 export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength &&

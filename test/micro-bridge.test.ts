@@ -7,7 +7,7 @@ import {
 import * as microBridgeModule from "../src/codex-micro-renderer-bridge.js";
 import { ADDITIONAL_KEYCAPS, OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
 import { visualStatusFromMicro } from "../src/status.js";
-import type { MicroSnapshot } from "../src/types.js";
+import type { MicroSnapshot, ModelPresetRequest } from "../src/types.js";
 
 let guardedRendererHarnessId = 0;
 
@@ -157,6 +157,131 @@ function createGuardedRendererHarness(options: {
       } finally {
         if (--activeEvaluations === 0) delete runtime[globalKey];
       }
+    }
+  };
+}
+
+function createModelPresetHarness(options: {
+  modelId?: string;
+  reasoningEffort?: string;
+  confirmation?: "microtask" | "macrotask" | "none" | "model-only" | "missing-seam";
+  visibleTriggerCount?: number;
+  duplicateAncestor?: boolean;
+  partialAncestor?: boolean;
+  ancestorTailDepth?: number;
+  hiddenTrigger?: boolean;
+  modelSource?: string;
+  reasoningSource?: string;
+} = {}): {
+  evaluate: <T>(expression: string) => Promise<T>;
+  selectorCalls: Array<[string, string]>;
+} {
+  let modelId = options.modelId ?? "gpt-5.6-sol";
+  let reasoningEffort = options.reasoningEffort ?? "high";
+  const selectorCalls: Array<[string, string]> = [];
+  const records = [
+    {
+      displayName: "GPT-5.6-Sol",
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"].map((value) => ({ reasoningEffort: value }))
+    },
+    {
+      displayName: "GPT-5.6-Terra",
+      model: "gpt-5.6-terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"].map((value) => ({ reasoningEffort: value }))
+    }
+  ];
+  const queryClient = new ReasoningQueryClientFixture([[ ["models", "list"], { data: records } ]]);
+  const root = { "__reactContainer$modelPreset": { memoizedProps: { value: queryClient }, child: null, sibling: null } };
+  let trigger: Record<string, any>;
+  let componentFiber: Record<string, any>;
+  const ye = (nextModel: string, nextEffort: string) => {
+    selectorCalls.push([nextModel, nextEffort]);
+    const commit = () => {
+      modelId = nextModel;
+      if (options.confirmation !== "model-only") reasoningEffort = nextEffort;
+      if (options.confirmation === "missing-seam") delete trigger["__reactFiber$modelPreset"];
+      componentFiber.memoizedProps = makeProps();
+    };
+    if (options.confirmation === "none") return;
+    if (options.confirmation === "macrotask") setTimeout(commit, 12);
+    else queueMicrotask(commit);
+  };
+  const makeCallback = (source: string) => eval(`(${source})`) as (...args: string[]) => void;
+  const makeProps = () => ({
+    model: modelId,
+    reasoningEffort,
+    models: records,
+    onSelectModel: makeCallback(options.modelSource ?? "(e,t)=>{ye(e,t)}"),
+    onSelectReasoningEffort: makeCallback(options.reasoningSource ?? "e=>{ye(modelId,e)}")
+  });
+  componentFiber = { memoizedProps: makeProps(), return: null };
+  if (options.duplicateAncestor) componentFiber.return = { memoizedProps: makeProps(), return: null };
+  if (options.partialAncestor) componentFiber.return = { memoizedProps: { model: modelId }, return: null };
+  if (options.ancestorTailDepth) {
+    let tail = componentFiber;
+    for (let index = 0; index < options.ancestorTailDepth; index++) {
+      tail.return = { memoizedProps: {}, return: null };
+      tail = tail.return;
+    }
+  }
+  trigger = {
+    isConnected: true,
+    getClientRects: () => ({ length: options.hiddenTrigger ? 0 : 1 }),
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": reasoningEffort
+    })[name] ?? null,
+    querySelectorAll: (selector: string) => selector === "*" ? [{
+      isConnected: true,
+      getClientRects: () => ({ length: 1 }),
+      getAttribute: () => null,
+      parentElement: trigger,
+      children: [],
+      get textContent() { return modelId === "gpt-5.6-sol" ? "5.6 Sol" : "5.6 Terra"; }
+    }] : [],
+    "__reactFiber$modelPreset": componentFiber
+  };
+  const triggers = Array.from({ length: options.visibleTriggerCount ?? 1 }, () => trigger);
+  const runtime = globalThis as unknown as Record<string, unknown>;
+  const runnerKey = `__codexDeckModelPresetRunner${++guardedRendererHarnessId}`;
+  runtime[runnerKey] = {
+    run(command: string) {
+      const efforts = ["low", "medium", "high", "xhigh", "ultra"];
+      const index = efforts.indexOf(reasoningEffort);
+      const next = command === "composer.increaseReasoningEffort" ? index + 1 : index - 1;
+      if (next < 0 || next >= efforts.length) return true;
+      queueMicrotask(() => {
+        reasoningEffort = efforts[next]!;
+        componentFiber.memoizedProps = makeProps();
+      });
+      return true;
+    }
+  };
+  const runnerSource = `export function guarded(command,source){return globalThis[${JSON.stringify(runnerKey)}].run(command,source)}`;
+  const runnerUrl = `data:text/javascript,${encodeURIComponent(runnerSource)}`;
+  const bridgeUrl = `https://codex.example/assets/codex-micro-bridge-model-${guardedRendererHarnessId}.js`;
+  const bridgeSource = `import{guarded as he}from${JSON.stringify(runnerUrl)};enabled&&he('composer.increaseReasoningEffort','codex_micro_hid')`;
+  const document = {
+    getElementById: (id: string) => id === "root" ? root : null,
+    querySelectorAll: (selector: string) => selector === "link[href], script[src]"
+      ? [{ href: bridgeUrl, src: "" }]
+      : selector === '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+        ? triggers : []
+  };
+  const getComputedStyle = () => ({ display: "block", visibility: "visible" });
+  const performance = { getEntriesByType: () => [] };
+  const fetch = async (url: string) => {
+    assert.equal(url, bridgeUrl);
+    return { text: async () => bridgeSource };
+  };
+  return {
+    selectorCalls,
+    evaluate: async <T>(expression: string): Promise<T> => {
+      const run = new Function("document", "getComputedStyle", "performance", "fetch", `return (${expression});`) as
+        (document: unknown, getComputedStyle: unknown, performance: unknown, fetch: unknown) => Promise<T>;
+      return await run(document, getComputedStyle, performance, fetch);
     }
   };
 }
@@ -1920,6 +2045,230 @@ test("concurrent serialized guarded increases recheck live effort immediately be
   ]);
   assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
   assert.equal(harness.currentEffort(), "max");
+});
+
+test("paired model preset selector invokes the exact native pair once and confirms a microtask re-render", async () => {
+  const harness = createModelPresetHarness();
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  const request: ModelPresetRequest = {
+    modelId: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+    includeUltra: false
+  };
+  assert.deepEqual(await bridge.applyModelPreset(request), {
+    modelId: "gpt-5.6-terra",
+    reasoningEffort: "medium"
+  });
+  assert.deepEqual(harness.selectorCalls, [["gpt-5.6-terra", "medium"]]);
+});
+
+test("paired model preset selector validates direct shared-callee forwarders before invocation", async () => {
+  const hostileSources = [
+    { modelSource: "async(e,t)=>{ye(e,t)}" },
+    { modelSource: "(e,t)=>{return ye(e,t)}" },
+    { modelSource: "(e,t)=>{ye.call(null,e,t)}" },
+    { modelSource: "(e,t)=>{ye(e,t);ye(e,t)}" },
+    { modelSource: "e=>{ye(e,modelId)}" },
+    { modelSource: "(e,t)=>{other(e,t)}" },
+    { reasoningSource: "e=>{other(modelId,e)}" },
+    { reasoningSource: "e=>{return ye(modelId,e)}" }
+  ];
+  for (const hostile of hostileSources) {
+    const harness = createModelPresetHarness(hostile);
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+    await assert.rejects(
+      bridge.applyModelPreset({ modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false }),
+      /metadata|selector/i
+    );
+    assert.equal(harness.selectorCalls.length, 0);
+  }
+});
+
+test("paired model preset operation is a zero-call no-op for the confirmed current pair", async () => {
+  const harness = createModelPresetHarness();
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  assert.deepEqual(await bridge.applyModelPreset({
+    modelId: "gpt-5.6-sol", reasoningEffort: "high", includeUltra: false
+  }), { modelId: "gpt-5.6-sol", reasoningEffort: "high" });
+  assert.equal(harness.selectorCalls.length, 0);
+});
+
+test("paired model preset operation refuses Ultra, duplicate seams, and ambiguous triggers without invocation", async () => {
+  for (const options of [
+    { duplicateAncestor: true }, { partialAncestor: true }, { visibleTriggerCount: 2 }, { hiddenTrigger: true }
+  ]) {
+    const harness = createModelPresetHarness(options);
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+    await assert.rejects(bridge.applyModelPreset({
+      modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+    }), /metadata|selector/i);
+    assert.equal(harness.selectorCalls.length, 0);
+  }
+  const ultraHarness = createModelPresetHarness();
+  const ultraBridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const ultraTestBridge = ultraBridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof ultraHarness.evaluate };
+  ultraTestBridge.ensureConnected = async () => {};
+  ultraTestBridge.evaluate = ultraHarness.evaluate;
+  await assert.rejects(ultraBridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "ultra", includeUltra: false
+  }), /Ultra|metadata/i);
+  await assert.rejects(ultraBridge.applyModelPreset({
+    modelId: "gpt-5.6-luna", reasoningEffort: "medium", includeUltra: true
+  }), /metadata/i);
+  assert.equal(ultraHarness.selectorCalls.length, 0);
+});
+
+test("paired model preset operation reserves uncertain partial and timed-out transitions", async () => {
+  for (const confirmation of ["none", "model-only", "missing-seam"] as const) {
+    const harness = createModelPresetHarness({ confirmation });
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+    await assert.rejects(bridge.applyModelPreset({
+      modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+    }), /metadata|confirm/i);
+    assert.equal(harness.selectorCalls.length, 1);
+    await assert.rejects(bridge.applyModelPreset({
+      modelId: "gpt-5.6-sol", reasoningEffort: "medium", includeUltra: false
+    }), /metadata|confirm/i);
+    assert.equal(harness.selectorCalls.length, 1, "uncertainty blocks a later protected change");
+  }
+});
+
+test("paired model preset operation confirms a bounded macrotask re-render", async () => {
+  const harness = createModelPresetHarness({ confirmation: "macrotask" });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  assert.deepEqual(await bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  }), { modelId: "gpt-5.6-terra", reasoningEffort: "medium" });
+});
+
+test("paired model preset requests serialize in arrival order and re-read confirmed state", async () => {
+  const harness = createModelPresetHarness();
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  const first = bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  });
+  const second = bridge.applyModelPreset({
+    modelId: "gpt-5.6-sol", reasoningEffort: "medium", includeUltra: false
+  });
+  assert.deepEqual(await Promise.all([first, second]), [
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "medium" }
+  ]);
+  assert.deepEqual(harness.selectorCalls, [
+    ["gpt-5.6-terra", "medium"],
+    ["gpt-5.6-sol", "medium"]
+  ]);
+});
+
+test("ordinary reasoning and paired model presets share the renderer-global serialization guard", async () => {
+  const harness = createModelPresetHarness();
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  const reasoning = bridge.adjustReasoning("increase", { includeUltra: false });
+  const preset = bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  });
+  assert.deepEqual(await reasoning, { outcome: "applied", reasoningEffort: "xhigh" });
+  assert.deepEqual(await preset, { modelId: "gpt-5.6-terra", reasoningEffort: "medium" });
+  assert.deepEqual(harness.selectorCalls, [["gpt-5.6-terra", "medium"]]);
+});
+
+test("paired model preset request validation rejects accessors and proxies without reading or connecting", async () => {
+  let getterCalls = 0;
+  const accessorRequest = Object.defineProperties({}, {
+    modelId: { enumerable: true, get() { getterCalls++; return "gpt-5.6-terra"; } },
+    reasoningEffort: { enumerable: true, value: "medium" },
+    includeUltra: { enumerable: true, value: false }
+  });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  let connected = 0;
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void> };
+  testBridge.ensureConnected = async () => { connected++; };
+  await assert.rejects(bridge.applyModelPreset(accessorRequest as ModelPresetRequest), /Invalid/);
+  assert.equal(getterCalls, 0);
+  await assert.rejects(bridge.applyModelPreset(new Proxy({}, {
+    ownKeys() { throw new Error("hostile"); }
+  }) as ModelPresetRequest), /Invalid/);
+  await assert.rejects(bridge.applyModelPreset(Object.assign(Object.create({ inherited: true }), {
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  }) as ModelPresetRequest), /Invalid/);
+  assert.equal(connected, 0);
+});
+
+test("paired model preset selector fails closed when the React ancestor traversal exceeds its bound", async () => {
+  const harness = createModelPresetHarness({ ancestorTailDepth: 50 });
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+  await assert.rejects(bridge.applyModelPreset({
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+  }), /metadata|selector/i);
+  assert.equal(harness.selectorCalls.length, 0);
+});
+
+test("paired model preset transport failures rotate the renderer guard namespace while metadata refusals preserve it", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const namespaces: string[] = [];
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    const encoded = source.match(/const guardNamespace = ("[^"]+")/)?.[1];
+    assert.ok(encoded);
+    namespaces.push(JSON.parse(encoded));
+    if (namespaces.length === 1) throw new Error("transport failed");
+    return "metadata-unavailable" as T;
+  };
+  const request = { modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false };
+  await assert.rejects(bridge.applyModelPreset(request), /transport failed/);
+  await assert.rejects(bridge.applyModelPreset(request), /metadata|selector/i);
+  assert.notEqual(namespaces[0], namespaces[1]);
+
+  const preservedBridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  let disconnects = 0;
+  const preserved = preservedBridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+    disconnect: () => void;
+  };
+  preserved.ensureConnected = async () => {};
+  preserved.evaluate = async <T>() => "metadata-unavailable" as T;
+  preserved.disconnect = () => { disconnects++; };
+  await assert.rejects(preservedBridge.applyModelPreset(request), /metadata|selector/i);
+  assert.equal(disconnects, 0);
 });
 
 test("an unconfirmed guarded transition fails and reserves its prior state against later increases", async () => {

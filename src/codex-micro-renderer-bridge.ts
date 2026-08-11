@@ -9,7 +9,8 @@ import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import { isSafeReasoningIdentifier } from "./types.js";
 import type {
-  CodexModelCatalogEntry, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
+  CodexModelCatalogEntry, MicroActionSlot, MicroDirection, MicroSnapshot, ModelPresetExecution, ModelPresetRequest,
+  ReasoningAdjustment, ReasoningAdjustmentPolicy,
   ReasoningAdjustmentExecution, ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
 } from "./types.js";
 
@@ -750,6 +751,167 @@ export function readActiveReasoningMetadata(
   } catch { return undefined; }
 }
 
+type ModelPresetSelector = {
+  modelId: string;
+  reasoningEffort: string;
+  select: (modelId: string, reasoningEffort: string) => unknown;
+};
+
+export function readComponentModelCatalog(value: unknown): CodexModelCatalogEntry[] | undefined {
+  try {
+    const records = readBoundedOwnDataArray(value, 32);
+    if (!records || records.length === 0 || Object.getOwnPropertySymbols(value).length > 0) return undefined;
+    const catalog: CodexModelCatalogEntry[] = [];
+    const seen = new Set<string>();
+    for (const record of records) {
+      if (!record || typeof record !== "object" || Array.isArray(record) ||
+          Object.getOwnPropertySymbols(record).length > 0) return undefined;
+      const model = readOwnDataProperty(record, "model");
+      const displayName = readOwnDataProperty(record, "displayName");
+      const effortRecords = readOwnDataProperty(record, "supportedReasoningEfforts");
+      if (!model?.exists || !displayName?.exists || !effortRecords?.exists ||
+          !isSafeReasoningIdentifier(model.value, 128) || seen.has(model.value) ||
+          typeof displayName.value !== "string" || displayName.value.length === 0 ||
+          displayName.value.length > 80) return undefined;
+      const normalizedName = normalizeReasoningModelLabel(displayName.value, true);
+      const efforts = normalizeReasoningEffortOrder(effortRecords.value);
+      if (!normalizedName || !efforts || efforts.length > 16) return undefined;
+      const normalizedDisplayName = displayName.value.trim().replace(/^gpt[ -]+/i, "").replace(/[ -]+/g, " ");
+      if (!normalizedDisplayName || normalizedDisplayName.length > 80) return undefined;
+      seen.add(model.value);
+      catalog.push({ modelId: model.value, displayName: normalizedDisplayName, supportedReasoningEfforts: efforts });
+    }
+    return catalog;
+  } catch { return undefined; }
+}
+
+export function areModelCatalogsEqual(leftValue: unknown, rightValue: unknown): boolean {
+  try {
+      const left = readBoundedOwnDataArray(leftValue, 32);
+      const right = readBoundedOwnDataArray(rightValue, 32);
+      if (!left || !right || left.length === 0 || left.length !== right.length) return false;
+      for (let index = 0; index < left.length; index++) {
+        const leftEntry = left[index];
+        const rightEntry = right[index];
+        if (!leftEntry || typeof leftEntry !== "object" || !rightEntry || typeof rightEntry !== "object" ||
+            Object.getOwnPropertySymbols(leftEntry).length > 0 ||
+            Object.getOwnPropertySymbols(rightEntry).length > 0) return false;
+        const leftId = readOwnDataProperty(leftEntry, "modelId");
+        const rightId = readOwnDataProperty(rightEntry, "modelId");
+        const leftName = readOwnDataProperty(leftEntry, "displayName");
+        const rightName = readOwnDataProperty(rightEntry, "displayName");
+        const leftEfforts = readOwnDataProperty(leftEntry, "supportedReasoningEfforts");
+        const rightEfforts = readOwnDataProperty(rightEntry, "supportedReasoningEfforts");
+        if (!leftId?.exists || !rightId?.exists || leftId.value !== rightId.value ||
+            !leftName?.exists || !rightName?.exists || leftName.value !== rightName.value ||
+            !leftEfforts?.exists || !rightEfforts?.exists) return false;
+        const leftItems = readBoundedOwnDataArray(leftEfforts.value, 16);
+        const rightItems = readBoundedOwnDataArray(rightEfforts.value, 16);
+        if (!leftItems || !rightItems || leftItems.length === 0 || leftItems.length !== rightItems.length ||
+            leftItems.some((effort, effortIndex) => effort !== rightItems[effortIndex])) return false;
+      }
+      return true;
+  } catch { return false; }
+}
+
+export function readModelPresetSelector(
+  elements: Iterable<ReasoningTriggerElement>,
+  authoritativeCatalog: unknown,
+  isVisible = isVisibleReasoningTrigger,
+  isExplicitlyHidden = isExplicitlyHiddenReasoningElement
+): ModelPresetSelector | undefined {
+  try {
+    const visibleTriggers: ReasoningTriggerElement[] = [];
+    for (const element of elements) {
+      if (element.getAttribute("data-codex-intelligence-trigger") !== "true" ||
+          element.getAttribute("data-composer-navigation-target") !== "reasoning" ||
+          !isVisible(element) || isExplicitlyHidden(element)) continue;
+      visibleTriggers.push(element);
+    }
+    if (visibleTriggers.length !== 1) return undefined;
+    const trigger = visibleTriggers[0] as unknown as object;
+    const reactKeys = Object.getOwnPropertyNames(trigger).filter((key) => key.startsWith("__reactFiber$"));
+    if (reactKeys.length !== 1 || Object.getOwnPropertySymbols(trigger).length > 0) return undefined;
+    const fiberProperty = readOwnDataProperty(trigger, reactKeys[0]!);
+    if (!fiberProperty?.exists || !fiberProperty.value || typeof fiberProperty.value !== "object") return undefined;
+    const authoritative = readBoundedOwnDataArray(authoritativeCatalog, 32);
+    if (!authoritative || authoritative.length === 0) return undefined;
+    const candidates: ModelPresetSelector[] = [];
+    let fiber: unknown = fiberProperty.value;
+    const seen = new Set<object>();
+    for (let depth = 0; fiber && typeof fiber === "object" && depth < 50; depth++) {
+      if (seen.has(fiber as object)) return undefined;
+      seen.add(fiber as object);
+      const propsProperty = readOwnDataProperty(fiber, "memoizedProps");
+      if (!propsProperty) return undefined;
+      const props = propsProperty.value;
+      if (propsProperty.exists && props && typeof props === "object" && !Array.isArray(props)) {
+        const model = readOwnDataProperty(props, "model");
+        const effort = readOwnDataProperty(props, "reasoningEffort");
+        const models = readOwnDataProperty(props, "models");
+        const selectModel = readOwnDataProperty(props, "onSelectModel");
+        const selectEffort = readOwnDataProperty(props, "onSelectReasoningEffort");
+        const hasCoreProperty = model?.exists || effort?.exists || models?.exists ||
+          selectModel?.exists || selectEffort?.exists;
+        if (hasCoreProperty && (!model?.exists || !effort?.exists || !models?.exists ||
+            !selectModel?.exists || !selectEffort?.exists ||
+            !isSafeReasoningIdentifier(model.value, 128) || !isSafeReasoningIdentifier(effort.value) ||
+            typeof selectModel.value !== "function" || selectModel.value.length !== 2 ||
+            typeof selectEffort.value !== "function" || selectEffort.value.length !== 1)) return undefined;
+        if (hasCoreProperty) {
+          const currentModel = model!.value as string;
+          const currentEffort = effort!.value as string;
+          const modelSelector = selectModel!.value as ModelPresetSelector["select"];
+          const effortSelector = selectEffort!.value as (reasoningEffort: string) => unknown;
+          const componentCatalog = readComponentModelCatalog(models!.value);
+          let modelSource: string;
+          let effortSource: string;
+          try {
+            modelSource = Function.prototype.toString.call(modelSelector).replace(/\s+/g, "");
+            effortSource = Function.prototype.toString.call(effortSelector).replace(/\s+/g, "");
+          } catch { return undefined; }
+          const modelMatch = /^\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)=>\{([A-Za-z_$][\w$]*)\(\1,\2\)\}$/.exec(modelSource);
+          const effortMatch = /^([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\1\)\}$/.exec(effortSource);
+          const active = componentCatalog?.find((entry) => entry.modelId === currentModel);
+          if (!componentCatalog || !areModelCatalogsEqual(componentCatalog, authoritative) || !active ||
+              !active.supportedReasoningEfforts.includes(currentEffort) || !modelMatch || !effortMatch ||
+              modelMatch[3] !== effortMatch[2]) return undefined;
+          candidates.push({
+            modelId: currentModel,
+            reasoningEffort: currentEffort,
+            select: modelSelector
+          });
+        }
+      }
+      const returnProperty = readOwnDataProperty(fiber, "return");
+      if (!returnProperty) return undefined;
+      fiber = returnProperty.value;
+    }
+    if (fiber != null) return undefined;
+    return candidates.length === 1 ? candidates[0] : undefined;
+  } catch { return undefined; }
+}
+
+function normalizeModelPresetRequest(value: unknown): ModelPresetRequest | undefined {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.getOwnPropertySymbols(value).length > 0) {
+      return undefined;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const names = Object.getOwnPropertyNames(value);
+    if (names.length !== 3 || !names.includes("modelId") || !names.includes("reasoningEffort") ||
+        !names.includes("includeUltra")) return undefined;
+    const modelId = readOwnDataProperty(value, "modelId");
+    const reasoningEffort = readOwnDataProperty(value, "reasoningEffort");
+    const includeUltra = readOwnDataProperty(value, "includeUltra");
+    if (!modelId?.exists || !reasoningEffort?.exists || !includeUltra?.exists ||
+        !isSafeReasoningIdentifier(modelId.value, 128) || !isSafeReasoningIdentifier(reasoningEffort.value) ||
+        typeof includeUltra.value !== "boolean") return undefined;
+    return { modelId: modelId.value, reasoningEffort: reasoningEffort.value, includeUltra: includeUltra.value };
+  } catch { return undefined; }
+}
+
 export function decideReasoningAdjustment(
   direction: ReasoningAdjustment,
   policy: ReasoningAdjustmentPolicy,
@@ -1222,7 +1384,10 @@ export class CodexMicroRendererBridge {
       };
       let metadata = readLiveMetadata();
       if (guardState.uncertain) {
-        if (!metadata || (metadata.modelId === guardState.uncertain.modelId &&
+        if (guardState.uncertain.targetModelId) {
+          if (!metadata || metadata.modelId !== guardState.uncertain.targetModelId ||
+              metadata.currentEffort !== guardState.uncertain.targetEffort) return 'metadata-unavailable';
+        } else if (!metadata || (metadata.modelId === guardState.uncertain.modelId &&
             metadata.currentEffort === guardState.uncertain.currentEffort)) return 'metadata-unavailable';
         guardState.uncertain = null;
       }
@@ -1293,6 +1458,132 @@ export class CodexMicroRendererBridge {
       throw error;
     }
     if (result === "metadata-unavailable") throw new Error("Codex reasoning metadata is unavailable.");
+    return result;
+  }
+
+  async applyModelPreset(request: ModelPresetRequest): Promise<ModelPresetExecution> {
+    const normalizedRequest = normalizeModelPresetRequest(request);
+    if (!normalizedRequest) throw new Error("Invalid Codex model preset request.");
+    await this.ensureConnected();
+    const expression = `(async () => {
+      const guardNamespace = ${JSON.stringify(this.evaluationNamespace)};
+      const guardStore = globalThis.__codexDeckReasoningGuardStates ??= new Map();
+      let guardState = guardStore.get(guardNamespace);
+      if (!guardState) {
+        guardState = { tail: Promise.resolve(), uncertain: null };
+        guardStore.set(guardNamespace, guardState);
+      }
+      const predecessor = guardState.tail;
+      let releaseGuard;
+      guardState.tail = new Promise((resolve) => { releaseGuard = resolve; });
+      await predecessor;
+      try {
+        const request = ${JSON.stringify(normalizedRequest)};
+        const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
+        const readOwnDataProperty = (${readOwnDataProperty.toString()});
+        const readDataPropertyInPrototypeChain = (${readDataPropertyInPrototypeChain.toString()});
+        const isCloneableReasoningQueryClient = (${isCloneableReasoningQueryClient.toString()});
+        const readBoundedOwnDataArray = (${readBoundedOwnDataArray.toString()});
+        const readExactBoundedOwnDataArray = (${readExactBoundedOwnDataArray.toString()});
+        const isStructuredCloneSafePlainData = (${isStructuredCloneSafePlainData.toString()});
+        const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
+        const normalizeReasoningModelLabel = (${normalizeReasoningModelLabel.toString()});
+        const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
+        const isExplicitlyHiddenReasoningElement = (${isExplicitlyHiddenReasoningElement.toString()});
+        const readVisibleReasoningModelLabels = (${readVisibleReasoningModelLabels.toString()});
+        const findRendererQueryClients = (${findRendererQueryClients.toString()});
+        const readReasoningModelCatalog = (${readReasoningModelCatalog.toString()});
+        const matchActiveReasoningModel = (${matchActiveReasoningModel.toString()});
+        const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
+        const readComponentModelCatalog = (${readComponentModelCatalog.toString()});
+        const areModelCatalogsEqual = (${areModelCatalogsEqual.toString()});
+        const readModelPresetSelector = (${readModelPresetSelector.toString()});
+        const reasoningSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]';
+        const readAuthority = () => {
+          const root = document.getElementById('root');
+          if (!root) return undefined;
+          let rootKeys;
+          try { rootKeys = Object.getOwnPropertyNames(root).filter((key) => key.startsWith('__reactContainer$')); }
+          catch { return undefined; }
+          if (rootKeys.length !== 1) return undefined;
+          const reactRoot = readOwnDataProperty(root, rootKeys[0]);
+          return reactRoot?.exists
+            ? readActiveReasoningMetadata(document.querySelectorAll(reasoningSelector), reactRoot.value)
+            : undefined;
+        };
+        const readSeam = (metadata) => metadata
+          ? readModelPresetSelector(document.querySelectorAll(reasoningSelector), metadata.modelCatalog)
+          : undefined;
+        let metadata = readAuthority();
+        if (guardState.uncertain) {
+          if (guardState.uncertain.targetModelId) {
+            if (!metadata || metadata.modelId !== guardState.uncertain.targetModelId ||
+                metadata.currentEffort !== guardState.uncertain.targetEffort) return 'metadata-unavailable';
+          } else if (!metadata || (metadata.modelId === guardState.uncertain.modelId &&
+              metadata.currentEffort === guardState.uncertain.currentEffort)) return 'metadata-unavailable';
+          guardState.uncertain = null;
+        }
+        if (!metadata) return 'metadata-unavailable';
+        const targetModel = metadata.modelCatalog.find((entry) => entry.modelId === request.modelId);
+        if (!targetModel || !targetModel.supportedReasoningEfforts.includes(request.reasoningEffort) ||
+            (!request.includeUltra && request.reasoningEffort === 'ultra')) return 'metadata-unavailable';
+        if (metadata.modelId === request.modelId && metadata.currentEffort === request.reasoningEffort) {
+          return { modelId: metadata.modelId, reasoningEffort: metadata.currentEffort };
+        }
+        const selector = readSeam(metadata);
+        if (!selector || selector.modelId !== metadata.modelId ||
+            selector.reasoningEffort !== metadata.currentEffort) return 'metadata-unavailable';
+        guardState.uncertain = {
+          modelId: metadata.modelId,
+          currentEffort: metadata.currentEffort,
+          targetModelId: request.modelId,
+          targetEffort: request.reasoningEffort
+        };
+        try { selector.select(request.modelId, request.reasoningEffort); }
+        catch { return 'metadata-unavailable'; }
+        const readConfirmedPair = () => {
+          const confirmedMetadata = readAuthority();
+          const confirmedSelector = readSeam(confirmedMetadata);
+          return confirmedMetadata && confirmedSelector &&
+            confirmedMetadata.modelId === request.modelId &&
+            confirmedMetadata.currentEffort === request.reasoningEffort &&
+            confirmedSelector.modelId === request.modelId &&
+            confirmedSelector.reasoningEffort === request.reasoningEffort
+            ? { modelId: request.modelId, reasoningEffort: request.reasoningEffort }
+            : undefined;
+        };
+        let confirmed = readConfirmedPair();
+        if (confirmed) {
+          guardState.uncertain = null;
+          return confirmed;
+        }
+        await Promise.resolve();
+        confirmed = readConfirmedPair();
+        if (confirmed) {
+          guardState.uncertain = null;
+          return confirmed;
+        }
+        for (let attempt = 0; attempt < 8; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 8));
+          confirmed = readConfirmedPair();
+          if (confirmed) {
+            guardState.uncertain = null;
+            return confirmed;
+          }
+        }
+        return 'metadata-unavailable';
+      } finally {
+        releaseGuard();
+      }
+    })()`;
+    let result: ModelPresetExecution | "metadata-unavailable";
+    try {
+      result = await this.evaluate<ModelPresetExecution | "metadata-unavailable">(expression);
+    } catch (error) {
+      this.disconnect();
+      throw error;
+    }
+    if (result === "metadata-unavailable") throw new Error("Codex model preset metadata or selector is unavailable.");
     return result;
   }
 
