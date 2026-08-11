@@ -32,6 +32,7 @@ type ControllerProbe = {
   targetHostId?: string;
   targetPlatform: CodexHost["platform"];
   localSnapshotGeneration: number;
+  committedLocalSnapshotGeneration: number;
   modelReasoningMutationPending: number;
   relayClient?: {
     currentHost(): CodexHost | undefined;
@@ -768,7 +769,8 @@ test("local confirmed reasoning renders immediately and supersedes an older refr
   await settle();
 
   assert.equal(immediateValue, "XHIGH", "feedback must not wait for the 1.2 second poll");
-  assert.equal(confirmedGeneration, 1);
+  assert.equal(confirmedGeneration, 2, "the older poll and confirmed mutation own distinct generations");
+  assert.equal(state.committedLocalSnapshotGeneration, 2);
   assert.notEqual(confirmedSnapshot, originalSnapshot);
   assert.notEqual(confirmedSnapshot.snapshot, originalSnapshot.snapshot);
   assert.equal(confirmedSnapshot.observedAt, originalObservedAt);
@@ -3435,6 +3437,7 @@ test("delayed reasoning confirmation cannot overwrite a newer authoritative gene
     snapshot: modelSnapshot("gpt-5.6-terra", "medium")
   };
   state.localSnapshotGeneration += 1;
+  state.committedLocalSnapshotGeneration = state.localSnapshotGeneration;
   state.localSnapshot = newerSnapshot;
   heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
 
@@ -3474,6 +3477,7 @@ test("delayed model preset confirmation cannot overwrite a newer authoritative g
     snapshot: modelSnapshot("gpt-5.6-terra", "medium")
   };
   state.localSnapshotGeneration += 1;
+  state.committedLocalSnapshotGeneration = state.localSnapshotGeneration;
   state.localSnapshot = newerSnapshot;
   heldPreset.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
   await idle(controller, dial.id);
@@ -3481,4 +3485,152 @@ test("delayed model preset confirmation cannot overwrite a newer authoritative g
   assert.equal(state.localSnapshot, newerSnapshot);
   assert.equal((dial.feedbackCalls.at(-1) as { value: string }).value, "5.6 TERRA");
   controller.unregisterDial(dial);
+});
+
+test("reasoning waits for a newer refresh commit before releasing a dependent preset", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("reasoning-awaits-refresh-commit");
+  const state = probe(controller);
+  const heldReasoning = deferred<ReasoningAdjustmentExecution>();
+  const heldRefresh = deferred<MicroSnapshot>();
+  const presetRequests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.localSnapshotGeneration = 0;
+  state.committedLocalSnapshotGeneration = 0;
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return heldReasoning.promise; },
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  let reasoningSettled = false;
+  const adjustment = state.adjustLocalReasoningFromRelay("increase", { includeUltra: true })
+    .finally(() => { reasoningSettled = true; });
+  await settle();
+  const refreshGeneration = ++state.localSnapshotGeneration;
+  const refresh = heldRefresh.promise.then((snapshot) => {
+    state.localSnapshot = { host: HOST, observedAt: 2_000, snapshot };
+    state.committedLocalSnapshotGeneration = refreshGeneration;
+    state.localHealth = { state: "ready", changedAt: 2_000 };
+  });
+  state.refreshInFlight = refresh;
+  await settle();
+  controller.rotateDial(presetDial, 1);
+  heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
+  await settle();
+
+  assert.equal(reasoningSettled, false);
+  assert.equal(presetRequests.length, 0, "dependent preset remains behind uncommitted authority");
+  heldRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
+  await refresh;
+  assert.deepEqual(await adjustment, { outcome: "applied", reasoningEffort: "medium" });
+  await idle(controller, presetDial.id);
+  assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "high"]
+  ]);
+  controller.unregisterDial(presetDial);
+});
+
+test("model preset waits for a newer refresh commit before its queued successor resolves", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("preset-awaits-refresh-commit");
+  const state = probe(controller);
+  const heldPreset = deferred<ModelPresetExecution>();
+  const heldRefresh = deferred<MicroSnapshot>();
+  const presetRequests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.localSnapshotGeneration = 0;
+  state.committedLocalSnapshotGeneration = 0;
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      if (presetRequests.length === 1) return heldPreset.promise;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(presetDial, 2);
+  await settle();
+  const refreshGeneration = ++state.localSnapshotGeneration;
+  const refresh = heldRefresh.promise.then((snapshot) => {
+    state.localSnapshot = { host: HOST, observedAt: 2_000, snapshot };
+    state.committedLocalSnapshotGeneration = refreshGeneration;
+    state.localHealth = { state: "ready", changedAt: 2_000 };
+  });
+  state.refreshInFlight = refresh;
+  await settle();
+  heldPreset.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await settle();
+
+  assert.equal(presetRequests.length, 1, "queued successor waits for committed authority");
+  heldRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
+  await refresh;
+  await idle(controller, presetDial.id);
+  assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"],
+    ["gpt-5.6-sol", "high"]
+  ]);
+  controller.unregisterDial(presetDial);
+});
+
+test("failed newer refresh degrades and blocks reasoning plus its dependent preset", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("reasoning-refresh-failure");
+  const state = probe(controller);
+  const heldReasoning = deferred<ReasoningAdjustmentExecution>();
+  const heldRefresh = deferred<void>();
+  let presetCalls = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.localSnapshotGeneration = 0;
+  state.committedLocalSnapshotGeneration = 0;
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return heldReasoning.promise; },
+    async applyModelPreset(request) {
+      presetCalls += 1;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  const adjustment = state.adjustLocalReasoningFromRelay("increase", { includeUltra: true });
+  await settle();
+  state.localSnapshotGeneration += 1;
+  state.refreshInFlight = heldRefresh.promise.catch(() => {
+    state.localHealth = {
+      state: "degraded", reason: "local-bridge-unavailable", changedAt: 2_000
+    };
+  });
+  controller.rotateDial(presetDial, 1);
+  heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
+  await settle();
+  heldRefresh.reject(new Error("refresh failed"));
+
+  await assert.rejects(adjustment, /authoritative reasoning state is unavailable/i);
+  await idle(controller, presetDial.id);
+  assert.equal(state.localHealth.state, "degraded");
+  assert.equal(presetCalls, 0);
+  assert.equal(presetDial.alerts, 1);
+  controller.unregisterDial(presetDial);
 });

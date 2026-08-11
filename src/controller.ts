@@ -188,6 +188,7 @@ export class DeckController {
   private modelReasoningMutationPending = 0;
   private readonly modelReasoningLifecycleCancellations = new Set<() => void>();
   private localSnapshotGeneration = 0;
+  private committedLocalSnapshotGeneration = 0;
   private controllerLifecycleGeneration = 0;
   private stopped = false;
   private animationFrame = 0;
@@ -656,7 +657,7 @@ export class DeckController {
       if (authoritativeEffort !== undefined) {
         return { outcome: "applied", reasoningEffort: authoritativeEffort };
       }
-      return this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
+      return this.awaitSupersedingLocalReasoning(lifecycleGeneration, operationHost);
     }
     const current = this.localSnapshot;
     if (execution.reasoningEffort !== undefined && operationHost != null &&
@@ -669,6 +670,7 @@ export class DeckController {
         ...current,
         snapshot: { ...current.snapshot, reasoningEffort: execution.reasoningEffort }
       };
+      this.committedLocalSnapshotGeneration = mutationGeneration;
     }
     return execution;
   }
@@ -676,7 +678,8 @@ export class DeckController {
   private authoritativeLocalReasoningEffort(operationHost?: CodexHost): string | undefined {
     const current = this.localSnapshot;
     const effort = current?.snapshot.reasoningEffort;
-    if (this.localHealth.state !== "ready" || operationHost == null || current == null ||
+    if (this.committedLocalSnapshotGeneration !== this.localSnapshotGeneration ||
+        this.localHealth.state !== "ready" || operationHost == null || current == null ||
         this.localHost?.hostId !== operationHost.hostId ||
         this.localHost.platform !== operationHost.platform ||
         current.host.hostId !== operationHost.hostId ||
@@ -685,6 +688,28 @@ export class DeckController {
       return undefined;
     }
     return effort;
+  }
+
+  private async awaitSupersedingLocalReasoning(
+    lifecycleGeneration: number,
+    operationHost?: CodexHost
+  ): Promise<ReasoningAdjustmentExecution> {
+    const pendingRefresh = this.refreshInFlight;
+    if (pendingRefresh) {
+      try { await pendingRefresh; }
+      catch { /* Authority and health are checked below. */ }
+      this.assertControllerLifecycle(lifecycleGeneration);
+    }
+    const authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
+    if (authoritativeEffort !== undefined) {
+      return { outcome: "applied", reasoningEffort: authoritativeEffort };
+    }
+    this.localHealth = {
+      state: "degraded",
+      reason: "local-bridge-unavailable",
+      changedAt: Date.now()
+    };
+    throw new Error("Authoritative reasoning state is unavailable after the newer refresh.");
   }
 
   private async reconcileUnconfirmedLocalReasoning(
@@ -1120,7 +1145,16 @@ export class DeckController {
     await this.refreshLocalUsage();
   }
 
-  private async refreshLocalUsage(): Promise<MicroSnapshot> {
+  private refreshLocalUsage(): Promise<MicroSnapshot> {
+    const pending = this.refreshLocalUsageOnce();
+    const tracked = pending.then(() => undefined, () => undefined);
+    this.refreshInFlight = tracked;
+    return pending.finally(() => {
+      if (this.refreshInFlight === tracked) this.refreshInFlight = undefined;
+    });
+  }
+
+  private async refreshLocalUsageOnce(): Promise<MicroSnapshot> {
     const generation = ++this.localSnapshotGeneration;
     let snapshot: MicroSnapshot;
     try {
@@ -1134,6 +1168,7 @@ export class DeckController {
       this.mobileRelayServer?.updateHost(host);
       this.localMobileRelayServer?.updateHost(host);
       this.localSnapshot = { host, snapshot, observedAt };
+      this.committedLocalSnapshotGeneration = generation;
       this.localHealth = { state: "ready", changedAt: observedAt };
       this.lastError = "";
     } catch (error) {
@@ -1160,7 +1195,7 @@ export class DeckController {
   }
 
   private async refreshOnce(): Promise<void> {
-    const generation = this.localSnapshotGeneration;
+    const generation = ++this.localSnapshotGeneration;
     try {
       const snapshot = await this.microBridge.refresh();
       if (generation !== this.localSnapshotGeneration) return;
@@ -1170,6 +1205,7 @@ export class DeckController {
       this.mobileRelayServer?.updateHost(host);
       this.localMobileRelayServer?.updateHost(host);
       this.localSnapshot = { host, snapshot, observedAt: Date.now() };
+      this.committedLocalSnapshotGeneration = generation;
       this.localHealth = { state: "ready", changedAt: Date.now() };
       this.lastError = "";
     } catch (error) {
@@ -1925,6 +1961,7 @@ export class DeckController {
           reasoningEffort: parsed.reasoningEffort
         }
       };
+      this.committedLocalSnapshotGeneration = mutationGeneration;
       return parsed;
     } catch (error) {
       this.assertControllerLifecycle(lifecycleGeneration);
@@ -1944,7 +1981,8 @@ export class DeckController {
     const current = this.localSnapshot;
     const modelId = current?.snapshot.activeModelId;
     const reasoningEffort = current?.snapshot.reasoningEffort;
-    if (this.localHealth.state !== "ready" || localHost == null || current == null ||
+    if (this.committedLocalSnapshotGeneration !== this.localSnapshotGeneration ||
+        this.localHealth.state !== "ready" || localHost == null || current == null ||
         this.localHost?.hostId !== localHost.hostId || this.localHost.platform !== localHost.platform ||
         current.host.hostId !== localHost.hostId || current.host.platform !== localHost.platform ||
         typeof modelId !== "string" || !isSafeReasoningIdentifier(reasoningEffort)) {
@@ -1960,9 +1998,14 @@ export class DeckController {
     lifecycleGeneration: number,
     localHost?: CodexHost
   ): Promise<ModelPresetExecution> {
-    if (this.refreshInFlight) {
-      try { await this.refreshInFlight; }
-      catch { /* A fresh refresh is still attempted below. */ }
+    const pendingRefresh = this.refreshInFlight;
+    if (pendingRefresh) {
+      try { await pendingRefresh; }
+      catch { /* Authority and health are checked below. */ }
+      this.assertControllerLifecycle(lifecycleGeneration);
+      const committed = this.authoritativeLocalModelPreset(localHost);
+      if (committed) return committed;
+      throw new Error("Authoritative model preset state is unavailable after the newer refresh.");
     }
     this.assertControllerLifecycle(lifecycleGeneration);
     await this.refresh();
