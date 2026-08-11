@@ -3321,6 +3321,14 @@ test("shutdown invalidates an in-flight preset and cancels queued dial and publi
   await settle();
   controller.stop();
   const feedbackCount = presetDial.feedbackCalls.length;
+  const queuedPublicOutcome = queuedPublic.then(
+    () => "resolved" as const,
+    () => "rejected" as const
+  );
+  assert.equal(await Promise.race([
+    queuedPublicOutcome,
+    settle().then(() => "pending" as const)
+  ]), "rejected", "shutdown rejects queued callers without waiting for the held bridge call");
   firstResult.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
   await registration.queue.idle();
   await assert.rejects(queuedPublic, /stopped|superseded|lifecycle/i);

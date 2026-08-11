@@ -186,6 +186,7 @@ export class DeckController {
   private refreshInFlight?: Promise<void>;
   private modelReasoningMutationTail: Promise<void> = Promise.resolve();
   private modelReasoningMutationPending = 0;
+  private readonly modelReasoningLifecycleCancellations = new Set<() => void>();
   private localSnapshotGeneration = 0;
   private controllerLifecycleGeneration = 0;
   private stopped = false;
@@ -202,6 +203,7 @@ export class DeckController {
   private catalogRevision = 0;
 
   async start(): Promise<void> {
+    this.cancelModelReasoningLifecycle();
     this.controllerLifecycleGeneration += 1;
     this.stopped = false;
     try {
@@ -295,6 +297,7 @@ export class DeckController {
   stop(): void {
     this.controllerLifecycleGeneration += 1;
     this.stopped = true;
+    this.cancelModelReasoningLifecycle();
     if (this.poll) clearInterval(this.poll);
     if (this.animation) clearInterval(this.animation);
     for (const registration of [...this.dials.values()]) {
@@ -546,7 +549,24 @@ export class DeckController {
       return result;
     };
     const ordered = this.modelReasoningMutationTail.then(guardedOperation, guardedOperation);
-    const result = ordered.finally(() => this.releaseModelReasoningMutation(reservation));
+    const cancelable = new Promise<Result>((resolve, reject) => {
+      let settled = false;
+      const finish = (complete: () => void): void => {
+        if (settled) return;
+        settled = true;
+        this.modelReasoningLifecycleCancellations.delete(onCancel);
+        complete();
+      };
+      const onCancel = (): void => finish(() => reject(
+        new Error("Codex controller lifecycle was stopped or superseded.")));
+      this.modelReasoningLifecycleCancellations.add(onCancel);
+      void ordered.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error))
+      );
+      if (this.stopped || lifecycleGeneration !== this.controllerLifecycleGeneration) onCancel();
+    });
+    const result = cancelable.finally(() => this.releaseModelReasoningMutation(reservation));
     this.modelReasoningMutationTail = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -563,6 +583,10 @@ export class DeckController {
       { length: count },
       (): ModelReasoningMutationReservation => ({ released: false })
     );
+  }
+
+  private cancelModelReasoningLifecycle(): void {
+    for (const cancel of [...this.modelReasoningLifecycleCancellations]) cancel();
   }
 
   private releaseModelReasoningMutation(reservation: ModelReasoningMutationReservation): void {
