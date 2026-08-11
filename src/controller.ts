@@ -1377,7 +1377,14 @@ export class DeckController {
         throw new Error("The captured Codex host is not ready.");
       }
       const execution = await local();
-      return execution?.outcome;
+      if (!execution || typeof execution !== "object" || Array.isArray(execution)) return undefined;
+      try {
+        const property = Object.getOwnPropertyDescriptor(execution, "outcome");
+        const outcome = property && Object.prototype.hasOwnProperty.call(property, "value")
+          ? property.value
+          : undefined;
+        return outcome === "applied" || outcome === "blocked-ultra" ? outcome : undefined;
+      } catch { return undefined; }
     }
     const remote = this.relayClient?.currentHost();
     if (!remote || (route.hostId != null

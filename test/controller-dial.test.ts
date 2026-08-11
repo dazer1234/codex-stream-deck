@@ -56,6 +56,12 @@ type ControllerProbe = {
   dialRenderErrors: Set<string>;
   dialSuccessErrors: Set<string>;
   refresh(): Promise<void>;
+  sendDialToHost(
+    route: { kind: "host"; hostId?: string; platform: CodexHost["platform"] },
+    command: unknown,
+    local: () => Promise<unknown>,
+    requireReady?: boolean
+  ): Promise<ReasoningAdjustmentResult | undefined>;
   refreshInFlight?: Promise<void>;
   refreshLocalUsage(): Promise<MicroSnapshot>;
   renderAll(): Promise<void>;
@@ -662,6 +668,24 @@ test("local reasoning detents capture and pass each dial's explicit Ultra policy
     ["increase", { includeUltra: false }],
     ["decrease", { includeUltra: true }]
   ]);
+});
+
+test("local dial outcome extraction ignores malformed structured executions", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+
+  const outcome = await state.sendDialToHost(
+    { kind: "host", hostId: HOST.hostId, platform: HOST.platform },
+    { kind: "reasoning", direction: "increase", includeUltra: true },
+    async () => ({ outcome: "unexpected" }),
+    false
+  );
+
+  assert.equal(outcome, undefined);
 });
 
 test("remote reasoning detents carry each dial's explicit Ultra policy", async () => {

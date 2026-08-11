@@ -1196,10 +1196,11 @@ test("relay server fails closed when a reasoning control returns an invalid outc
 
 test("relay client receives an error when a reasoning control omits its mandatory outcome", async (t) => {
   const port = await freePort();
+  let execution: unknown;
   const control = {
     refresh: async () => snapshot,
     sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
-    sendEncoder: async () => {}, adjustReasoning: async () => undefined as never,
+    sendEncoder: async () => {}, adjustReasoning: async () => execution as never,
     runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
   };
   const server = new CodexRelayServer(
@@ -1216,9 +1217,11 @@ test("relay client receives an error when a reasoning control omits its mandator
   client.start();
   await waitUntil(() => client.currentHealth().state === "ready");
 
-  await assert.rejects(client.send({
-    kind: "reasoning", direction: "increase", includeUltra: true
-  }), /invalid reasoning adjustment result/i);
+  for (execution of [undefined, null, {}, { outcome: "unexpected" }]) {
+    await assert.rejects(client.send({
+      kind: "reasoning", direction: "increase", includeUltra: true
+    }), /invalid reasoning adjustment result/i);
+  }
 });
 
 test("relay client rejects an outcome-less reasoning success from a malformed peer", async (t) => {

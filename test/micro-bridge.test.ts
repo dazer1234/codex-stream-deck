@@ -33,6 +33,7 @@ function createGuardedRendererHarness(options: {
   modelId?: string;
   supportedEfforts?: string[];
   advanceEffortOnCommand?: boolean;
+  confirmationDelayMs?: number;
   confirmationEffortOnCommand?: string;
   confirmationTriggerCount?: number;
   failConfirmationReadAfterCommand?: boolean;
@@ -60,7 +61,9 @@ function createGuardedRendererHarness(options: {
         const index = currentEffort == null ? -1 : supportedEfforts.indexOf(currentEffort);
         const delta = command === "composer.increaseReasoningEffort" ? 1 : -1;
         if (index >= 0 && index + delta >= 0 && index + delta < supportedEfforts.length) {
-          queueMicrotask(() => { currentEffort = supportedEfforts[index + delta]; });
+          const commit = () => { currentEffort = supportedEfforts[index + delta]; };
+          if (options.confirmationDelayMs != null) setTimeout(commit, options.confirmationDelayMs);
+          else queueMicrotask(commit);
         }
       }
       return true;
@@ -1344,6 +1347,26 @@ test("serialized guarded reasoning returns the effort only after the visible tri
   const harness = createGuardedRendererHarness({
     currentEffort: "high",
     advanceEffortOnCommand: true
+  });
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = harness.evaluate;
+
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
+    outcome: "applied", reasoningEffort: "xhigh"
+  });
+  assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
+});
+
+test("serialized reasoning awaits a bounded macrotask DOM confirmation", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({
+    currentEffort: "high",
+    advanceEffortOnCommand: true,
+    confirmationDelayMs: 0
   });
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;

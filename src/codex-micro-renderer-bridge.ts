@@ -1153,8 +1153,19 @@ export class CodexMicroRendererBridge {
         guardState.uncertain = null;
         throw new Error('This Codex command is not active in the current view.');
       }
+      let confirmedEffort = readConfirmedEffort();
+      if (confirmedEffort === plan.expectedEffort) {
+        guardState.uncertain = null;
+        return { outcome: 'applied', reasoningEffort: confirmedEffort };
+      }
+      await Promise.resolve();
+      confirmedEffort = readConfirmedEffort();
+      if (confirmedEffort === plan.expectedEffort) {
+        guardState.uncertain = null;
+        return { outcome: 'applied', reasoningEffort: confirmedEffort };
+      }
       for (let attempt = 0; attempt < 8; attempt++) {
-        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 8));
         const confirmedEffort = readConfirmedEffort();
         if (confirmedEffort === plan.expectedEffort) {
           guardState.uncertain = null;

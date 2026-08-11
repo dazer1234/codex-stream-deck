@@ -373,7 +373,7 @@ export function relayDiscoveryTxt(
 async function executeRelayCommand(
   control: RelayControl,
   command: RelayCommand
-): Promise<ReasoningAdjustmentResult | undefined> {
+): Promise<unknown> {
   if (command.kind === "agent") {
     await control.sendAgent(command.slot, command.act, command.threadKey);
     return undefined;
@@ -391,8 +391,7 @@ async function executeRelayCommand(
     return undefined;
   }
   if (command.kind === "reasoning") {
-    const execution = await control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
-    return execution.outcome;
+    return control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
   }
   if (command.kind === "usage-refresh") {
     await control.refreshUsage();
@@ -410,7 +409,22 @@ function validatedRelayOutcome(
   command: RelayCommand,
   value: unknown
 ): ReasoningAdjustmentResult | undefined {
-  if (command.kind === "reasoning" && (value === "applied" || value === "blocked-ultra")) return value;
+  if (command.kind === "reasoning") {
+    let outcome: unknown;
+    try {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      const property = Object.getOwnPropertyDescriptor(value, "outcome");
+      if (!property || !Object.prototype.hasOwnProperty.call(property, "value")) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      outcome = property.value;
+    } catch {
+      throw new Error("Invalid reasoning adjustment result.");
+    }
+    if (outcome === "applied" || outcome === "blocked-ultra") return outcome;
+  }
   if (command.kind !== "reasoning" && value === undefined) return undefined;
   throw new Error("Invalid reasoning adjustment result.");
 }
