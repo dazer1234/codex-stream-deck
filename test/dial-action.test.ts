@@ -35,6 +35,7 @@ class FakeElement {
   private currentValue = "";
   checked = false;
   disabled = false;
+  draggable = false;
   hidden = false;
   type = "";
   textContent = "";
@@ -541,6 +542,127 @@ test("model changes select a nonduplicate effort or visibly refuse the edit", as
     "gpt-terra"
   );
   assert.match(field(document, "model-editor-status").textContent, /duplicate|already configured/i);
+});
+
+test("first authoritative catalog falls back to its valid active pair when preferred pairs are absent", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-active-seed", payload: { settings: expandDialPreset("model-presets") } })
+  );
+  sockets[0]?.open();
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+      activeModelId: "gpt-next", activeModelDisplayName: "Next", reasoningEffort: "xhigh",
+      modelCatalog: [{ modelId: "gpt-next", displayName: "Next", supportedReasoningEfforts: ["medium", "xhigh"] }]
+    }
+  });
+  const seeded = decodedMessages(sockets[0]!).at(-1)?.payload as {
+    modelPresets: Array<{ modelId: string; reasoningEffort: string }>;
+  };
+  assert.deepEqual(seeded.modelPresets, [{ modelId: "gpt-next", reasoningEffort: "xhigh" }]);
+  assert.equal(modelPresetRows(document).length, 1);
+
+  const blocked = await inspectorHarness();
+  blocked.connect(
+    "24681", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-blocked-seed", payload: { settings: expandDialPreset("model-presets") } })
+  );
+  blocked.sockets[0]?.open();
+  blocked.sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+      activeModelId: "gpt-next", activeModelDisplayName: "Next", reasoningEffort: "ultra",
+      modelCatalog: [{ modelId: "gpt-next", displayName: "Next", supportedReasoningEfforts: ["ultra"] }]
+    }
+  });
+  assert.equal(modelPresetRows(blocked.document).length, 0, "Ultra-disabled active pair is not seeded");
+  assert.equal(decodedMessages(blocked.sockets[0]!).filter(({ event }) => event === "setSettings").length, 0);
+});
+
+test("saved rows distinguish offline authority from catalog-proven unavailable efforts", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"), customized: true,
+    modelPresets: [{ modelId: "gpt-sol", reasoningEffort: "xhigh" }]
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-unavailable-effort", payload: { settings } })
+  );
+  sockets[0]?.open();
+  let model = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "model");
+  let effort = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.equal(model?.disabled, true);
+  assert.equal(effort?.disabled, true);
+  assert.match(model?.options[0]?.textContent ?? "", /unknown|offline/i);
+  assert.match(effort?.options[0]?.textContent ?? "", /unknown|offline/i);
+
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+      activeModelId: "gpt-sol", activeModelDisplayName: "Sol", reasoningEffort: "high",
+      modelCatalog: [{ modelId: "gpt-sol", displayName: "Sol", supportedReasoningEfforts: ["low", "high"] }]
+    }
+  });
+  model = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "model");
+  effort = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.equal(model?.disabled, false);
+  assert.equal(effort?.disabled, false);
+  assert.equal(effort?.value, "xhigh");
+  assert.match(effort?.options.find(({ value }) => value === "xhigh")?.textContent ?? "", /unavailable/i);
+
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: { kind: "model-catalog", requestGeneration: 1, catalogRevision: 2, available: false }
+  });
+  model = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "model");
+  effort = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.equal(model?.disabled, true);
+  assert.equal(effort?.disabled, true);
+  assert.equal(effort?.value, "xhigh", "offline transition preserves the saved effort");
+});
+
+test("each model preset row has labeled selects and an explicit draggable handle", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"), customized: true,
+    modelPresets: [
+      { modelId: "gpt-sol", reasoningEffort: "high" },
+      { modelId: "gpt-terra", reasoningEffort: "medium" }
+    ]
+  };
+  const { document, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-accessible-rows", payload: { settings } })
+  );
+  for (const [index, row] of modelPresetRows(document).entries()) {
+    assert.equal(row.draggable, false, "the whole row is not an unlabeled drag target");
+    const selects = row.descendants().filter(({ tagName }) => tagName === "SELECT");
+    const labels = row.descendants().filter(({ tagName }) => tagName === "LABEL");
+    assert.equal(selects.length, 2);
+    assert.equal(new Set(selects.map(({ id }) => id)).size, 2);
+    assert.equal(labels.some(({ htmlFor }) => htmlFor === selects[0]?.id), true);
+    assert.equal(labels.some(({ htmlFor }) => htmlFor === selects[1]?.id), true);
+    const handle = row.descendants().find(({ tagName, dataset }) =>
+      tagName === "BUTTON" && dataset.action === "drag-handle");
+    assert.ok(handle);
+    assert.equal(handle.draggable, true);
+    assert.match(handle.getAttribute("aria-label") ?? "", new RegExp(`Drag preset ${index + 1}`, "i"));
+  }
 });
 
 test("Codex Dial registration paths reject non-dial actions", () => {

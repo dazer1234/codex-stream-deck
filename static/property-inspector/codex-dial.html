@@ -89,13 +89,16 @@
     .action-row:last-child { border-bottom: 0; }
     .model-preset-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) auto;
+      grid-template-columns: auto minmax(0, 1fr) minmax(0, .8fr) auto;
       gap: 5px;
       align-items: center;
       padding: 6px 0;
       border-bottom: 1px solid #34373d;
     }
     .model-preset-row:last-child { border-bottom: 0; }
+    .model-preset-field { display: grid; gap: 3px; min-width: 0; }
+    .model-preset-field > span { color: var(--muted); font-size: 10px; }
+    .drag-handle { width: 28px; padding: 0; cursor: grab; }
     button {
       min-height: 28px; color: var(--text); background: var(--field);
       border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
@@ -585,9 +588,8 @@
       modelPresetRows.forEach((entry, index) => {
         const row = document.createElement("div");
         row.className = "model-preset-row";
-        row.draggable = true;
+        row.draggable = false;
         row.dataset.index = String(index);
-        row.addEventListener("dragstart", () => { draggedModelPreset = index; });
         row.addEventListener("dragover", (event) => event.preventDefault());
         row.addEventListener("drop", (event) => {
           event.preventDefault();
@@ -598,11 +600,24 @@
           renderModelPresetItems();
           persistAndQueue(true);
         });
+        const handle = document.createElement("button");
+        handle.type = "button";
+        handle.className = "drag-handle";
+        handle.dataset.action = "drag-handle";
+        handle.textContent = "⋮⋮";
+        handle.draggable = true;
+        handle.setAttribute("aria-label", `Drag preset ${index + 1}: ${entry.modelId} ${entry.reasoningEffort}`);
+        handle.addEventListener("dragstart", () => { draggedModelPreset = index; });
         const model = document.createElement("select");
         model.dataset.field = "model";
+        model.id = `model-preset-model-${index}`;
         const models = modelCatalog ? [...modelCatalog] : [];
         if (!models.some((item) => item.modelId === entry.modelId)) {
-          models.unshift({ modelId: entry.modelId, displayName: `${entry.modelId} (unavailable)`, supportedReasoningEfforts: [entry.reasoningEffort] });
+          models.unshift({
+            modelId: entry.modelId,
+            displayName: `${entry.modelId} (${modelCatalog ? "unavailable" : "availability unknown offline"})`,
+            supportedReasoningEfforts: [entry.reasoningEffort]
+          });
         }
         for (const item of models) {
           const option = document.createElement("option");
@@ -611,17 +626,43 @@
           model.appendChild(option);
         }
         model.value = entry.modelId;
+        model.disabled = modelCatalog == null;
         const effort = document.createElement("select");
         effort.dataset.field = "effort";
-        const supported = catalogEntry(entry.modelId)?.supportedReasoningEfforts ?? [entry.reasoningEffort];
-        const efforts = supported.filter((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra" || value === entry.reasoningEffort);
+        effort.id = `model-preset-effort-${index}`;
+        const authoritativeModel = catalogEntry(entry.modelId);
+        const supported = authoritativeModel?.supportedReasoningEfforts ?? [];
+        const efforts = supported
+          .filter((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra" || value === entry.reasoningEffort);
+        if (!efforts.includes(entry.reasoningEffort)) efforts.unshift(entry.reasoningEffort);
+        if (efforts.length === 0) efforts.push(entry.reasoningEffort);
         for (const value of efforts) {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value.toUpperCase() + (!element("include-ultra").checked && value.toLowerCase() === "ultra" ? " (disabled)" : "");
+          const availability = modelCatalog == null
+            ? " (availability unknown offline)"
+            : !authoritativeModel || !supported.includes(value)
+              ? " (unavailable)"
+              : !element("include-ultra").checked && value.toLowerCase() === "ultra"
+                ? " (disabled)"
+                : "";
+          option.textContent = value.toUpperCase() + availability;
           effort.appendChild(option);
         }
         effort.value = entry.reasoningEffort;
+        effort.disabled = modelCatalog == null;
+        const modelLabel = document.createElement("label");
+        modelLabel.className = "model-preset-field";
+        modelLabel.htmlFor = model.id;
+        const modelLabelText = document.createElement("span");
+        modelLabelText.textContent = `Model ${index + 1}`;
+        modelLabel.append(modelLabelText, model);
+        const effortLabel = document.createElement("label");
+        effortLabel.className = "model-preset-field";
+        effortLabel.htmlFor = effort.id;
+        const effortLabelText = document.createElement("span");
+        effortLabelText.textContent = `Reasoning ${index + 1}`;
+        effortLabel.append(effortLabelText, effort);
         model.addEventListener("change", () => {
           const target = catalogEntry(model.value);
           const candidate = target?.supportedReasoningEfforts.find((value) =>
@@ -669,7 +710,7 @@
           event.preventDefault(); modelPresetRows.splice(index, 1); renderModelPresetItems(); persistAndQueue(true);
         });
         buttons.appendChild(remove);
-        row.append(model, effort, buttons);
+        row.append(handle, modelLabel, effortLabel, buttons);
         container.appendChild(row);
       });
       element("add-model-preset").disabled = modelPresetRows.length >= 12 || nextUnusedPair() == null;
@@ -890,6 +931,14 @@
           { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
         ];
         modelPresetRows = preferred.filter((entry) => catalogEntry(entry.modelId)?.supportedReasoningEfforts.includes(entry.reasoningEffort));
+        if (modelPresetRows.length === 0) {
+          const activeModel = catalogEntry(payload.activeModelId);
+          const activeAllowed = activeModel?.supportedReasoningEfforts.includes(payload.reasoningEffort) &&
+            (element("include-ultra").checked || payload.reasoningEffort.toLowerCase() !== "ultra");
+          if (activeAllowed) {
+            modelPresetRows = [{ modelId: payload.activeModelId, reasoningEffort: payload.reasoningEffort }];
+          }
+        }
         seededModelPresets = true;
         if (modelPresetRows.length > 0) persistAndQueue(false);
       }
