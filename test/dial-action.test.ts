@@ -1170,13 +1170,18 @@ test("build script wiring declares every Encoder asset without running the build
 });
 
 test("Stream Deck Plus guide documents the supported dial contract without overstating coverage", async () => {
-  const [readme, guide, macos, windows] = await Promise.all([
-    text("README.md"), text("docs/STREAM_DECK_PLUS.md"), text("docs/MACOS.md"), text("docs/WINDOWS.md")
+  const [readme, guide, macos, windows, changelog] = await Promise.all([
+    text("README.md"), text("docs/STREAM_DECK_PLUS.md"), text("docs/MACOS.md"), text("docs/WINDOWS.md"),
+    text("CHANGELOG.md")
   ]);
 
   assert.match(readme, /\[Stream Deck \+ guide\]\(docs\/STREAM_DECK_PLUS\.md\)/);
   assert.match(macos, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
   assert.match(windows, /\[Stream Deck \+ guide\]\(STREAM_DECK_PLUS\.md\)/);
+  assert.match(macos, /recommended Model Presets, Agents, Actions, and Usage presets/i);
+  assert.match(changelog, /`SWITCHING…`[^.\n]*pre-confirmation/i);
+  assert.match(changelog, /active-position[^.\n]*`UNLISTED`[^.\n]*confirmed/i);
+  assert.doesNotMatch(changelog, /confirmed-only `SWITCHING…`/i);
 
   for (const label of ["Model Presets", "Reasoning", "Agents", "Actions", "Usage"]) {
     assert.match(guide, new RegExp(`\\b${label}\\b`));

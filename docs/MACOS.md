@@ -41,7 +41,7 @@ Tailscale remote access remains a separate optional profile; see
 
 ### Stream Deck + knobs
 
-On a Stream Deck +, drag one **Codex Dial** action onto each knob you want to use. The recommended Reasoning, Agents, Actions, and Usage presets, independent rotate/press/touch settings, and the macOS physical verification checklist are in the [Stream Deck + guide](STREAM_DECK_PLUS.md). The guide's checklist is the verification boundary; this setup page does not by itself claim that a specific build completed hardware QA.
+On a Stream Deck +, drag one **Codex Dial** action onto each knob you want to use. The recommended Model Presets, Agents, Actions, and Usage presets, independent rotate/press/touch settings, and the macOS physical verification checklist are in the [Stream Deck + guide](STREAM_DECK_PLUS.md). The guide's checklist is the verification boundary; this setup page does not by itself claim that a specific build completed hardware QA.
 
 If an archive tool removed executable permissions, restore only the two launcher files:
 

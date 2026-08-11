@@ -1,7 +1,7 @@
 # Model Presets Dial Design
 
-**Date:** 2026-08-11  
-**Status:** Approved interaction design; implementation pending  
+**Date:** 2026-08-11
+**Status:** Approved interaction design; implementation pending
 **Scope:** Add a first-class Stream Deck + dial that switches Codex model and reasoning pairs in one confirmed operation.
 
 ## Goal
