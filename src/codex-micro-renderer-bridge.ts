@@ -244,8 +244,8 @@ export function readActiveReasoningEffort(
   for (const element of elements) {
     if (!isVisible(element)) continue;
     if (element.getAttribute("data-composer-navigation-target") !== "reasoning") continue;
-    const value = element.getAttribute("data-selected-reasoning-effort")?.trim();
-    if (value && value.length <= 64) candidates.add(value);
+    const value = element.getAttribute("data-selected-reasoning-effort");
+    if (isSafeReasoningIdentifier(value)) candidates.add(value);
   }
   return candidates.size === 1 ? candidates.values().next().value : undefined;
 }
@@ -711,6 +711,7 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   const readUsageQueryData = (${readUsageQueryData.toString()});
   const normalizeRendererUsage = (${normalizeRendererUsage.toString()});
   const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
+  const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
   const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
   const hasFastModeIndicator = (${hasFastModeIndicator.toString()});
   const readActiveFastMode = (${readActiveFastMode.toString()});

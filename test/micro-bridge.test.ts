@@ -214,10 +214,70 @@ test("renderer snapshots require one unique visible semantic reasoning target", 
     { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "high" : "reasoning", visible: true }
   ];
   assert.equal(read(elements, (element) => element.visible), "high");
+  for (const reasoningEffort of ["high", "xhigh", "extra-high", "reasoning_v2", "level.2"]) {
+    assert.equal(read([{
+      getAttribute: (name: string) => name === "data-selected-reasoning-effort"
+        ? reasoningEffort : "reasoning",
+      visible: true
+    }], (element) => element.visible), reasoningEffort);
+  }
+  for (const reasoningEffort of [
+    "", " high ", "x high", "\n", "high\n", "\u0000", "!!!", "é", "推理", "x".repeat(65)
+  ]) {
+    assert.equal(read([{
+      getAttribute: (name: string) => name === "data-selected-reasoning-effort"
+        ? reasoningEffort : "reasoning",
+      visible: true
+    }], (element) => element.visible), undefined);
+  }
   assert.equal(read([
     ...elements,
     { getAttribute: (name: string) => name === "data-selected-reasoning-effort" ? "low" : "reasoning", visible: true }
   ], (element) => element.visible), undefined, "conflicting visible reasoning targets are unavailable");
+});
+
+test("serialized renderer snapshots preserve strict reasoning identifier validation", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  let expression = "";
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+    sessionOwnership: { annotate: (value: MicroSnapshot) => Promise<MicroSnapshot> };
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expression = source;
+    return snapshotFixture() as T;
+  };
+  testBridge.sessionOwnership = { annotate: async (value) => value };
+
+  await bridge.refresh();
+
+  const helperStart = expression.indexOf("  const isVisibleReasoningTrigger = ");
+  const helperEnd = expression.indexOf("  const hasFastModeIndicator = ", helperStart);
+  assert.notEqual(helperStart, -1);
+  assert.notEqual(helperEnd, -1);
+  const helperBlock = expression.slice(helperStart, helperEnd);
+  assert.match(helperBlock, /const isSafeReasoningIdentifier =/);
+  const read = new Function("getComputedStyle", `${helperBlock}\nreturn readActiveReasoningEffort;`)(
+    () => ({ display: "block", visibility: "visible" })
+  ) as (
+    elements: Array<{ getAttribute: (name: string) => string | null; visible: boolean }>,
+    isVisible: (element: { visible: boolean }) => boolean
+  ) => string | undefined;
+  const trigger = (reasoningEffort: string) => ({
+    getAttribute: (name: string) => name === "data-selected-reasoning-effort"
+      ? reasoningEffort : "reasoning",
+    visible: true
+  });
+  for (const reasoningEffort of ["high", "xhigh", "extra-high", "reasoning_v2", "level.2"]) {
+    assert.equal(read([trigger(reasoningEffort)], (element) => element.visible), reasoningEffort);
+  }
+  for (const reasoningEffort of [
+    "", " high ", "x high", "\n", "high\n", "\u0000", "!!!", "é", "推理", "x".repeat(65)
+  ]) {
+    assert.equal(read([trigger(reasoningEffort)], (element) => element.visible), undefined);
+  }
 });
 
 test("renderer snapshots expose Fast mode only from agreeing visible reasoning triggers", () => {
