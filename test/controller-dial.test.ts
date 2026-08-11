@@ -3404,3 +3404,73 @@ test("controller-wide model and reasoning backlog rejects mixed sources and reco
   assert.equal(reasoningCalls, 1, "capacity is released after the shared tail drains");
   assert.equal(state.modelReasoningMutationPending, 0);
 });
+
+test("delayed reasoning confirmation cannot overwrite a newer authoritative generation", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const heldReasoning = deferred<ReasoningAdjustmentExecution>();
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return heldReasoning.promise; }
+  };
+
+  const adjustment = state.adjustLocalReasoningFromRelay("increase", { includeUltra: true });
+  await settle();
+  const newerSnapshot = {
+    host: HOST,
+    observedAt: 2_000,
+    snapshot: modelSnapshot("gpt-5.6-terra", "medium")
+  };
+  state.localSnapshotGeneration += 1;
+  state.localSnapshot = newerSnapshot;
+  heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
+
+  assert.deepEqual(await adjustment, { outcome: "applied", reasoningEffort: "medium" });
+  assert.equal(state.localSnapshot, newerSnapshot);
+});
+
+test("delayed model preset confirmation cannot overwrite a newer authoritative generation", async () => {
+  const controller = new DeckController();
+  const dial = fakeDial("model-preset-newer-generation");
+  const state = probe(controller);
+  const heldPreset = deferred<ModelPresetExecution>();
+  const requests: ModelPresetRequest[] = [];
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      requests.push(structuredClone(request));
+      return heldPreset.promise;
+    }
+  };
+  controller.registerDial(dial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(dial, 1);
+  await settle();
+  assert.deepEqual(requests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+    ["gpt-5.6-sol", "medium"]
+  ]);
+  const newerSnapshot = {
+    host: HOST,
+    observedAt: 2_000,
+    snapshot: modelSnapshot("gpt-5.6-terra", "medium")
+  };
+  state.localSnapshotGeneration += 1;
+  state.localSnapshot = newerSnapshot;
+  heldPreset.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await idle(controller, dial.id);
+
+  assert.equal(state.localSnapshot, newerSnapshot);
+  assert.equal((dial.feedbackCalls.at(-1) as { value: string }).value, "5.6 TERRA");
+  controller.unregisterDial(dial);
+});

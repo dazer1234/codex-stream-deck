@@ -615,7 +615,7 @@ export class DeckController {
   ): Promise<ReasoningAdjustmentExecution> {
     const lifecycleGeneration = this.controllerLifecycleGeneration;
     const operationHost = this.localHost;
-    this.localSnapshotGeneration += 1;
+    const mutationGeneration = ++this.localSnapshotGeneration;
     const rawExecution = await this.microBridge.adjustReasoning(direction, policy);
     this.assertControllerLifecycle(lifecycleGeneration);
     let execution = parseReasoningExecution(rawExecution);
@@ -627,8 +627,16 @@ export class DeckController {
     } else if (execution.outcome === "applied" && execution.reasoningEffort === undefined) {
       execution = await this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
     }
+    if (execution.outcome === "applied" && this.localSnapshotGeneration !== mutationGeneration) {
+      const authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
+      if (authoritativeEffort !== undefined) {
+        return { outcome: "applied", reasoningEffort: authoritativeEffort };
+      }
+      return this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
+    }
     const current = this.localSnapshot;
     if (execution.reasoningEffort !== undefined && operationHost != null &&
+        this.localSnapshotGeneration === mutationGeneration &&
         this.localHost?.hostId === operationHost.hostId &&
         this.localHost.platform === operationHost.platform && current != null &&
         current.host.hostId === operationHost.hostId && current.host.platform === operationHost.platform &&
@@ -639,6 +647,20 @@ export class DeckController {
       };
     }
     return execution;
+  }
+
+  private authoritativeLocalReasoningEffort(operationHost?: CodexHost): string | undefined {
+    const current = this.localSnapshot;
+    const effort = current?.snapshot.reasoningEffort;
+    if (this.localHealth.state !== "ready" || operationHost == null || current == null ||
+        this.localHost?.hostId !== operationHost.hostId ||
+        this.localHost.platform !== operationHost.platform ||
+        current.host.hostId !== operationHost.hostId ||
+        current.host.platform !== operationHost.platform ||
+        !isSafeReasoningIdentifier(effort)) {
+      return undefined;
+    }
+    return effort;
   }
 
   private async reconcileUnconfirmedLocalReasoning(
@@ -1845,13 +1867,18 @@ export class DeckController {
       throw new Error("The captured Codex host is not ready.");
     }
 
-    this.localSnapshotGeneration += 1;
+    const mutationGeneration = ++this.localSnapshotGeneration;
     try {
       const parsed = parseModelPresetExecution(await this.microBridge.applyModelPreset(request));
       this.assertControllerLifecycle(lifecycleGeneration);
       if (!parsed || parsed.modelId !== request.modelId ||
           parsed.reasoningEffort !== request.reasoningEffort) {
         throw new Error("Codex returned an invalid or unconfirmed model preset result.");
+      }
+      if (this.localSnapshotGeneration !== mutationGeneration) {
+        const authoritative = this.authoritativeLocalModelPreset(localHost);
+        if (authoritative) return authoritative;
+        return await this.reconcileSupersededLocalModelPreset(lifecycleGeneration, localHost);
       }
       const current = this.localSnapshot;
       if (!localHost || this.localHost?.hostId !== localHost.hostId ||
@@ -1887,6 +1914,40 @@ export class DeckController {
       }
       throw error;
     }
+  }
+
+  private authoritativeLocalModelPreset(localHost?: CodexHost): ModelPresetExecution | undefined {
+    const current = this.localSnapshot;
+    const modelId = current?.snapshot.activeModelId;
+    const reasoningEffort = current?.snapshot.reasoningEffort;
+    if (this.localHealth.state !== "ready" || localHost == null || current == null ||
+        this.localHost?.hostId !== localHost.hostId || this.localHost.platform !== localHost.platform ||
+        current.host.hostId !== localHost.hostId || current.host.platform !== localHost.platform ||
+        typeof modelId !== "string" || !isSafeReasoningIdentifier(reasoningEffort)) {
+      return undefined;
+    }
+    const catalogEntry = current.snapshot.modelCatalog?.find((entry) =>
+      entry.modelId === modelId && entry.supportedReasoningEfforts.includes(reasoningEffort));
+    if (!catalogEntry) return undefined;
+    return { modelId, reasoningEffort };
+  }
+
+  private async reconcileSupersededLocalModelPreset(
+    lifecycleGeneration: number,
+    localHost?: CodexHost
+  ): Promise<ModelPresetExecution> {
+    if (this.refreshInFlight) {
+      try { await this.refreshInFlight; }
+      catch { /* A fresh refresh is still attempted below. */ }
+    }
+    this.assertControllerLifecycle(lifecycleGeneration);
+    await this.refresh();
+    this.assertControllerLifecycle(lifecycleGeneration);
+    const authoritative = this.authoritativeLocalModelPreset(localHost);
+    if (!authoritative) {
+      throw new Error("Authoritative model preset state is unavailable after confirmation.");
+    }
+    return authoritative;
   }
 
   private async refreshDialUsage(route: DialHostRoute): Promise<void> {
