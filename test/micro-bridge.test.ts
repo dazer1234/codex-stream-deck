@@ -83,7 +83,7 @@ function createGuardedRendererHarness(options: {
   ].join("");
   const modelId = options.modelId ?? "gpt-5.6-sol";
   const queryClient = new ReasoningQueryClientFixture([[
-    ["models", "list", "local", "chatgpt", 100],
+    ["models", "list"],
     { data: [{
           displayName: modelId === "gpt-5.6-sol" ? "GPT-5.6-Sol" : modelId,
           model: modelId,
@@ -329,7 +329,7 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
   ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
   const efforts = ["medium", "low", "high", "xhigh", "max", "ultra"];
   const modelsQuery = {
-    queryKey: ["models", "list", "local", "chatgpt", 100],
+    queryKey: ["models", "list"],
     state: { data: { data: [
       {
         displayName: "GPT-5.3-Codex-Spark",
@@ -407,7 +407,7 @@ test("reasoning metadata resolves the live display-contents model leaf and ignor
     isVisible: (element: Record<string, any>) => boolean,
     isExplicitlyHidden: (element: Record<string, any>) => boolean
   ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
-  const queryClient = new ReasoningQueryClientFixture([[['models', 'list', 'local', 'chatgpt', 100], {
+  const queryClient = new ReasoningQueryClientFixture([[['models', 'list'], {
     data: [{
       displayName: "GPT-5.6-Terra",
       model: "gpt-5.6-terra",
@@ -628,7 +628,7 @@ function reasoningTrustFixture(rootFiber: unknown) {
 
 function reasoningTrustQuery() {
   return {
-    queryKey: ["models", "list", "local", "chatgpt", 100],
+    queryKey: ["models", "list"],
     state: { data: { data: [{
       displayName: "GPT-5.6-Sol",
       model: "gpt-5.6-sol",
@@ -703,7 +703,7 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   ) => ({ displayName, model, supportedReasoningEfforts: efforts });
   const root = (records: unknown[], extraEntries: unknown[] = []) => {
     const queryClient = new ReasoningQueryClientFixture([[
-      ["models", "list", "local", "chatgpt", 100],
+      ["models", "list"],
       { data: records }
     ], ...extraEntries]);
     return { memoizedProps: { value: queryClient }, child: null, sibling: null };
@@ -810,9 +810,12 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([
     record("GPT-5.6-Sol"), record("5.6 Sol", "gpt-5.6-sol-copy")
   ]), visible), undefined, "multiple normalized catalog matches are unavailable");
-  const duplicateEntry = [["models", "list", "remote", "chatgpt", 100], { data: [record()] }];
-  assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateEntry]), visible), undefined,
-    "matching records across queries remain ambiguous");
+  const duplicateEntry = [["models", "list"], { data: [record()] }];
+  assert.deepEqual(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateEntry]), visible), {
+    currentEffort: "high",
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high", "ultra"]
+  }, "identical validated records across query entries count as one catalog match");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record(undefined, undefined, ["low", "high"])]), visible),
     undefined, "raw string effort arrays are unavailable");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([{ model: "gpt-5.6-sol",
@@ -920,6 +923,66 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   }
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], exhaustedRoot, visible), undefined,
     "fiber traversal exhaustion is unavailable");
+});
+
+test("reasoning catalog authorizes only exact two-segment query keys", () => {
+  const read = Reflect.get(microBridgeModule, "readReasoningModelCatalogMatch") as (
+    queryClients: Iterable<unknown>, visibleLabels: unknown
+  ) => { modelId: string; supportedEfforts: string[] } | undefined;
+  const record = {
+    displayName: "GPT-5.6-Sol",
+    model: "gpt-5.6-sol",
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }]
+  };
+
+  assert.deepEqual(read([
+    new ReasoningQueryClientFixture([[["models", "list"], { data: [record] }]])
+  ], ["5.6 Sol"]), {
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high"]
+  });
+  assert.equal(read([
+    new ReasoningQueryClientFixture([[["models", "list", "extra"], { data: [record] }]])
+  ], ["5.6 Sol"]), undefined, "a nested query key cannot authorize the catalog");
+});
+
+test("reasoning catalog deduplicates only identical fully validated matches", () => {
+  const read = Reflect.get(microBridgeModule, "readReasoningModelCatalogMatch") as (
+    queryClients: Iterable<unknown>, visibleLabels: unknown
+  ) => { modelId: string; supportedEfforts: string[] } | undefined;
+  const record = (
+    displayName = "GPT-5.6-Sol",
+    model = "gpt-5.6-sol",
+    efforts = ["low", "high"]
+  ) => ({
+    displayName,
+    model,
+    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
+  });
+  const entry = (value: ReturnType<typeof record>) => [["models", "list"], { data: [value] }];
+
+  assert.deepEqual(read([
+    new ReasoningQueryClientFixture([entry(record()), entry(record("5.6 Sol"))]),
+    new ReasoningQueryClientFixture([entry(record("GPT 5.6 Sol"))])
+  ], ["5.6 Sol"]), {
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high"]
+  }, "same id, normalized display name, and ordered efforts count as one match");
+
+  for (const conflictingRecord of [
+    record("GPT-5.6-Sol", "gpt-5.6-sol-copy"),
+    record("GPT-5.6-Sol", "gpt-5.6-sol", ["high", "low"])
+  ]) {
+    assert.equal(read([
+      new ReasoningQueryClientFixture([entry(record()), entry(conflictingRecord)])
+    ], ["5.6 Sol"]), undefined, "conflicting ids or effort order remain ambiguous");
+  }
+  assert.equal(read([
+    new ReasoningQueryClientFixture([
+      entry(record()), entry(record("GPT-5.6-Terra", "gpt-5.6-sol"))
+    ])
+  ], ["5.6 Sol", "5.6 Terra"]), undefined,
+  "conflicting normalized display names remain ambiguous");
 });
 
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {

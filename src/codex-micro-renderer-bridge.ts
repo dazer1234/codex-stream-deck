@@ -590,7 +590,7 @@ export function readReasoningModelCatalogMatch(
     if (!normalizedLabel) return undefined;
     normalizedLabels.add(normalizedLabel);
   }
-  const matches: Array<{ modelId: string; supportedEfforts: string[] }> = [];
+  const matches = new Map<string, { modelId: string; supportedEfforts: string[] }>();
   let visitedClients = 0;
   try {
     for (const candidate of queryClients) {
@@ -608,7 +608,7 @@ export function readReasoningModelCatalogMatch(
         if (!entryItems || entryItems.length !== 2) return undefined;
         const queryKey = readBoundedOwnDataArray(entryItems[0], 64);
         if (!queryKey || !isStructuredCloneSafePlainData(entryItems[0], 128, 8, 64)) return undefined;
-        if (queryKey[0] !== "models" || queryKey[1] !== "list") continue;
+        if (queryKey.length !== 2 || queryKey[0] !== "models" || queryKey[1] !== "list") continue;
         const queryData = entryItems[1];
         if (queryData === undefined) continue;
         if (!queryData || typeof queryData !== "object") return undefined;
@@ -634,8 +634,8 @@ export function readReasoningModelCatalogMatch(
           if (!efforts) return undefined;
           if (!isStructuredCloneSafePlainData(record, 5000, 32, 1000)) return undefined;
           if (normalizedLabels.has(normalizedDisplayName)) {
-            matches.push({ modelId: modelProperty.value, supportedEfforts: efforts });
-            if (matches.length > 1) return undefined;
+            const match = { modelId: modelProperty.value, supportedEfforts: efforts };
+            matches.set(JSON.stringify([match.modelId, normalizedDisplayName, efforts]), match);
           }
         }
         if (!isStructuredCloneSafePlainData(recordsProperty.value, 70000, 32, 1000) ||
@@ -643,7 +643,7 @@ export function readReasoningModelCatalogMatch(
       }
     }
   } catch { return undefined; }
-  return matches.length === 1 ? matches[0] : undefined;
+  return matches.size === 1 ? matches.values().next().value : undefined;
 }
 
 export function readActiveReasoningMetadata(
