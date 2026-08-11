@@ -841,11 +841,13 @@ export function readModelPresetSelector(
     const seen = new Set<object>();
     for (let depth = 0; fiber && typeof fiber === "object" && depth < 50; depth++) {
       if (seen.has(fiber as object)) return undefined;
+      if (Object.getOwnPropertySymbols(fiber).length > 0) return undefined;
       seen.add(fiber as object);
       const propsProperty = readOwnDataProperty(fiber, "memoizedProps");
       if (!propsProperty) return undefined;
       const props = propsProperty.value;
       if (propsProperty.exists && props && typeof props === "object" && !Array.isArray(props)) {
+        if (Object.getOwnPropertySymbols(props).length > 0) return undefined;
         const model = readOwnDataProperty(props, "model");
         const effort = readOwnDataProperty(props, "reasoningEffort");
         const models = readOwnDataProperty(props, "models");
@@ -875,7 +877,7 @@ export function readModelPresetSelector(
           const active = componentCatalog?.find((entry) => entry.modelId === currentModel);
           if (!componentCatalog || !areModelCatalogsEqual(componentCatalog, authoritative) || !active ||
               !active.supportedReasoningEfforts.includes(currentEffort) || !modelMatch || !effortMatch ||
-              modelMatch[3] !== effortMatch[2]) return undefined;
+              modelMatch[3] !== effortMatch[2] || effortMatch[3] === effortMatch[1]) return undefined;
           candidates.push({
             modelId: currentModel,
             reasoningEffort: currentEffort,

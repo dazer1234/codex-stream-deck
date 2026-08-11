@@ -168,6 +168,9 @@ function createModelPresetHarness(options: {
   visibleTriggerCount?: number;
   duplicateAncestor?: boolean;
   partialAncestor?: boolean;
+  symbolProps?: boolean;
+  symbolFiber?: boolean;
+  getterCounter?: { count: number };
   ancestorTailDepth?: number;
   hiddenTrigger?: boolean;
   modelSource?: string;
@@ -177,6 +180,7 @@ function createModelPresetHarness(options: {
   selectorCalls: Array<[string, string]>;
 } {
   let modelId = options.modelId ?? "gpt-5.6-sol";
+  let _ = modelId;
   let reasoningEffort = options.reasoningEffort ?? "high";
   const selectorCalls: Array<[string, string]> = [];
   const records = [
@@ -199,6 +203,7 @@ function createModelPresetHarness(options: {
     selectorCalls.push([nextModel, nextEffort]);
     const commit = () => {
       modelId = nextModel;
+      _ = nextModel;
       if (options.confirmation !== "model-only") reasoningEffort = nextEffort;
       if (options.confirmation === "missing-seam") delete trigger["__reactFiber$modelPreset"];
       componentFiber.memoizedProps = makeProps();
@@ -208,14 +213,29 @@ function createModelPresetHarness(options: {
     else queueMicrotask(commit);
   };
   const makeCallback = (source: string) => eval(`(${source})`) as (...args: string[]) => void;
-  const makeProps = () => ({
-    model: modelId,
-    reasoningEffort,
-    models: records,
-    onSelectModel: makeCallback(options.modelSource ?? "(e,t)=>{ye(e,t)}"),
-    onSelectReasoningEffort: makeCallback(options.reasoningSource ?? "e=>{ye(modelId,e)}")
-  });
+  const makeProps = () => {
+    const props = {
+      model: modelId,
+      reasoningEffort,
+      models: records,
+      onSelectModel: makeCallback(options.modelSource ?? "(e,t)=>{ye(e,t)}"),
+      onSelectReasoningEffort: makeCallback(options.reasoningSource ?? "e=>{ye(_,e)}")
+    };
+    if (options.symbolProps) {
+      Object.defineProperty(props, Symbol("hostile"), { value: true });
+      Object.defineProperty(props, "hostileAccessor", {
+        get() { if (options.getterCounter) options.getterCounter.count++; return true; }
+      });
+    }
+    return props;
+  };
   componentFiber = { memoizedProps: makeProps(), return: null };
+  if (options.symbolFiber) {
+    Object.defineProperty(componentFiber, Symbol("hostile"), { value: true });
+    Object.defineProperty(componentFiber, "hostileAccessor", {
+      get() { if (options.getterCounter) options.getterCounter.count++; return true; }
+    });
+  }
   if (options.duplicateAncestor) componentFiber.return = { memoizedProps: makeProps(), return: null };
   if (options.partialAncestor) componentFiber.return = { memoizedProps: { model: modelId }, return: null };
   if (options.ancestorTailDepth) {
@@ -2048,7 +2068,7 @@ test("concurrent serialized guarded increases recheck live effort immediately be
 });
 
 test("paired model preset selector invokes the exact native pair once and confirms a microtask re-render", async () => {
-  const harness = createModelPresetHarness();
+  const harness = createModelPresetHarness({ reasoningSource: "e=>{ye(_,e)}" });
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
@@ -2078,6 +2098,7 @@ test("paired model preset selector validates direct shared-callee forwarders bef
     { modelSource: "e=>{ye(e,modelId)}" },
     { modelSource: "(e,t)=>{other(e,t)}" },
     { reasoningSource: "e=>{other(modelId,e)}" },
+    { reasoningSource: "e=>{ye(e,e)}" },
     { reasoningSource: "e=>{return ye(modelId,e)}" }
   ];
   for (const hostile of hostileSources) {
@@ -2111,7 +2132,8 @@ test("paired model preset operation is a zero-call no-op for the confirmed curre
 
 test("paired model preset operation refuses Ultra, duplicate seams, and ambiguous triggers without invocation", async () => {
   for (const options of [
-    { duplicateAncestor: true }, { partialAncestor: true }, { visibleTriggerCount: 2 }, { hiddenTrigger: true }
+    { duplicateAncestor: true }, { partialAncestor: true },
+    { visibleTriggerCount: 2 }, { hiddenTrigger: true }
   ]) {
     const harness = createModelPresetHarness(options);
     const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
@@ -2135,6 +2157,22 @@ test("paired model preset operation refuses Ultra, duplicate seams, and ambiguou
     modelId: "gpt-5.6-luna", reasoningEffort: "medium", includeUltra: true
   }), /metadata/i);
   assert.equal(ultraHarness.selectorCalls.length, 0);
+});
+
+test("paired model preset selector rejects symbol-bearing seam records without invoking accessors", async () => {
+  for (const symbolOption of [{ symbolProps: true }, { symbolFiber: true }]) {
+    const getterCounter = { count: 0 };
+    const harness = createModelPresetHarness({ ...symbolOption, getterCounter });
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const testBridge = bridge as unknown as { ensureConnected: () => Promise<void>; evaluate: typeof harness.evaluate };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+    await assert.rejects(bridge.applyModelPreset({
+      modelId: "gpt-5.6-terra", reasoningEffort: "medium", includeUltra: false
+    }), /metadata|selector/i);
+    assert.equal(getterCounter.count, 0);
+    assert.equal(harness.selectorCalls.length, 0);
+  }
 });
 
 test("paired model preset operation reserves uncertain partial and timed-out transitions", async () => {
