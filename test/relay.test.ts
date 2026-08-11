@@ -40,6 +40,28 @@ const snapshot: MicroSnapshot = {
   theme: "dark"
 };
 
+function relayModelSnapshot(
+  modelId = "gpt-5.6-sol", reasoningEffort = "high"
+): MicroSnapshot {
+  const displayName = modelId === "gpt-5.6-terra" ? "5.6 Terra" : "5.6 Sol";
+  return {
+    ...structuredClone(snapshot),
+    activeModelId: modelId,
+    activeModelDisplayName: displayName,
+    reasoningEffort,
+    modelCatalog: [
+      {
+        modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+        supportedReasoningEfforts: ["medium", "high"]
+      },
+      {
+        modelId: "gpt-5.6-terra", displayName: "5.6 Terra",
+        supportedReasoningEfforts: ["medium"]
+      }
+    ]
+  };
+}
+
 test("relay refuses wildcard exposure and short authentication tokens", () => {
   assert.throws(() => validateRelayServerConfig({ enabled: true, listenHost: "0.0.0.0", port: 47_651, token: "x".repeat(32) }), /loopback or a specific Tailscale address/);
   assert.throws(() => validateRelayServerConfig({ enabled: true, listenHost: "203.0.113.10", port: 47_651, token: "x".repeat(32) }), /loopback or a specific Tailscale/);
@@ -2662,3 +2684,304 @@ function messageQueue(socket: WebSocket): { next: () => Promise<Record<string, u
     }
   };
 }
+
+test("model preset relay protocol accepts only the exact bounded additive shape", () => {
+  const valid = {
+    kind: "model-preset",
+    modelId: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    includeUltra: false,
+    includeModelPresetFeedback: true
+  };
+  assert.deepEqual(parseRelayCommand(valid), valid);
+  for (const invalid of [
+    { ...valid, extra: true },
+    { ...valid, modelId: " gpt-5.6-sol" },
+    { ...valid, modelId: "x".repeat(129) },
+    { ...valid, reasoningEffort: "high\n" },
+    { ...valid, reasoningEffort: "x".repeat(65) },
+    { ...valid, includeUltra: 0 },
+    { ...valid, includeModelPresetFeedback: false },
+    { ...valid, [Symbol("extra")]: true }
+  ]) assert.equal(parseRelayCommand(invalid), null);
+
+  let getterReads = 0;
+  const accessor = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(valid)) {
+    Object.defineProperty(accessor, key, key === "modelId"
+      ? { enumerable: true, get() { getterReads += 1; return value; } }
+      : { enumerable: true, value });
+  }
+  assert.equal(parseRelayCommand(accessor), null);
+  assert.equal(getterReads, 0);
+
+  const result = {
+    type: "result", protocol: 1, requestId: "preset-1", ok: true,
+    modelId: "gpt-5.6-sol", reasoningEffort: "high"
+  };
+  assert.deepEqual(parseRelayServerMessage(result), result);
+  assert.equal(parseRelayServerMessage({ ...result, outcome: "applied" }), null);
+  assert.equal(parseRelayServerMessage({ ...result, modelId: "x".repeat(129) }), null);
+  assert.equal(parseRelayServerMessage({ ...result, extra: true }), null);
+  assert.equal(parseRelayServerMessage({
+    type: "result", protocol: 1, requestId: "preset-1", ok: true,
+    modelId: "gpt-5.6-sol"
+  }), null);
+  assert.equal(parseRelayServerMessage({ ...result, [Symbol("extra")]: true }), null);
+  let resultGetterReads = 0;
+  const accessorResult = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(result)) {
+    Object.defineProperty(accessorResult, key, key === "modelId"
+      ? { enumerable: true, get() { resultGetterReads += 1; return value; } }
+      : { enumerable: true, value });
+  }
+  assert.equal(parseRelayServerMessage(accessorResult), null);
+  assert.equal(resultGetterReads, 0);
+});
+
+test("model preset relay refuses an old peer before sending any command frame", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let commandFrames = 0;
+  relay.on("connection", (socket) => socket.on("message", (raw) => {
+    const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+    if (message.type === "auth") {
+      socket.send(JSON.stringify({
+        type: "ready", protocol: 1, host,
+        capabilities: ["reasoning", "reasoning-policy", "reasoning-feedback"],
+        bridge: "native-codex-micro"
+      }));
+      socket.send(JSON.stringify({
+        type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+        snapshot: { ...structuredClone(snapshot), reasoningEffort: "high" }
+      }));
+    } else if (message.type === "command") commandFrames += 1;
+  }));
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  await assert.rejects(client.send({
+    kind: "model-preset", modelId: "gpt-5.6-sol", reasoningEffort: "high",
+    includeUltra: false, includeModelPresetFeedback: true
+  } as never), /model preset/i);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(commandFrames, 0);
+});
+
+test("model preset relay drains old refresh and publishes fresh snapshot before confirmed result", async (t) => {
+  const port = await freePort();
+  let refreshCalls = 0;
+  let presetCalls = 0;
+  let releaseOld!: (value: MicroSnapshot) => void;
+  const oldRefresh = new Promise<MicroSnapshot>((resolve) => { releaseOld = resolve; });
+  const confirmed = {
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium"
+  };
+  const catalog = [{
+    modelId: confirmed.modelId, displayName: "5.6 Terra",
+    supportedReasoningEfforts: [confirmed.reasoningEffort]
+  }];
+  const modelSnapshot = (reasoningEffort: string): MicroSnapshot => ({
+    ...structuredClone(snapshot), activeModelId: confirmed.modelId,
+    activeModelDisplayName: "5.6 Terra", reasoningEffort, modelCatalog: catalog
+  });
+  const control = {
+    refresh: async () => {
+      refreshCalls += 1;
+      if (refreshCalls === 1) return oldRefresh;
+      return modelSnapshot(confirmed.reasoningEffort);
+    },
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    applyModelPreset: async () => { presetCalls += 1; return confirmed; },
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control as never, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => { socket.close(); await server.close(); });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  const ready = await messages.next();
+  assert.ok((ready.capabilities as string[]).includes("model-presets"));
+  await waitUntil(() => refreshCalls === 1);
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "preset-fifo",
+    command: {
+      kind: "model-preset", ...confirmed, includeUltra: false,
+      includeModelPresetFeedback: true
+    }
+  }));
+  await waitUntil(() => presetCalls === 1);
+  releaseOld(modelSnapshot("high"));
+  const old = await messages.next();
+  const fresh = await messages.next();
+  const result = await messages.next();
+  assert.equal((old.snapshot as MicroSnapshot).reasoningEffort, "high");
+  assert.equal((fresh.snapshot as MicroSnapshot).reasoningEffort, "medium");
+  assert.deepEqual(result, {
+    type: "result", protocol: 1, requestId: "preset-fifo", ok: true, ...confirmed
+  });
+  assert.equal(refreshCalls, 2);
+});
+
+test("model preset relay server rejects malformed or mismatched bridge confirmations", async (t) => {
+  const port = await freePort();
+  let execution: unknown;
+  let getterReads = 0;
+  const accessor = Object.create(null) as Record<string, unknown>;
+  Object.defineProperties(accessor, {
+    modelId: { enumerable: true, get() { getterReads += 1; return "gpt-5.6-sol"; } },
+    reasoningEffort: { enumerable: true, value: "high" }
+  });
+  const control = {
+    refresh: async () => relayModelSnapshot(),
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    applyModelPreset: async () => execution,
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control as never, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => { socket.close(); await server.close(); });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await messages.next()).type, "ready");
+  assert.equal((await messages.next()).type, "snapshot");
+
+  const invalid = [
+    undefined,
+    { modelId: "gpt-5.6-terra", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high", extra: true },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high", [Symbol("extra")]: true },
+    accessor
+  ];
+  for (let index = 0; index < invalid.length; index += 1) {
+    execution = invalid[index];
+    socket.send(JSON.stringify({
+      type: "command", protocol: 1, requestId: `invalid-preset-${index}`,
+      command: {
+        kind: "model-preset", modelId: "gpt-5.6-sol", reasoningEffort: "high",
+        includeUltra: false, includeModelPresetFeedback: true
+      }
+    }));
+    const result = await messages.next();
+    assert.equal(result.ok, false, `invalid case ${index}`);
+  }
+  assert.equal(getterReads, 0);
+});
+
+test("model preset client patches an exact confirmed pair immutably after the snapshot barrier", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let serverSocket: WebSocket | undefined;
+  let requestId = "";
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["model-presets"], bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: relayModelSnapshot()
+        }));
+      } else if (message.type === "command") requestId = String(message.requestId);
+    });
+  });
+  const delivered: HostSnapshot[] = [];
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) },
+    (value) => delivered.push(value), () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => delivered.length === 1);
+  const retained = client.currentSnapshot()!;
+  const send = client.send({
+    kind: "model-preset", modelId: "gpt-5.6-terra", reasoningEffort: "medium",
+    includeUltra: false, includeModelPresetFeedback: true
+  });
+  await waitUntil(() => requestId !== "");
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+    snapshot: relayModelSnapshot("gpt-5.6-terra", "medium")
+  }));
+  await waitUntil(() => delivered.length === 2);
+  const beforePatch = client.currentSnapshot()!;
+  serverSocket!.send(JSON.stringify({
+    type: "result", protocol: 1, requestId, ok: true,
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium"
+  }));
+
+  assert.deepEqual(await send, {
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium"
+  });
+  assert.equal(retained.snapshot.activeModelId, "gpt-5.6-sol");
+  assert.notEqual(client.currentSnapshot(), beforePatch);
+  assert.notEqual(client.currentSnapshot()!.snapshot, beforePatch.snapshot);
+  assert.equal(client.currentSnapshot()!.snapshot.activeModelId, "gpt-5.6-terra");
+  assert.equal(client.currentSnapshot()!.snapshot.activeModelDisplayName, "5.6 Terra");
+  assert.equal(delivered.at(-1), client.currentSnapshot());
+});
+
+test("model preset client rejects a result without a newer authoritative snapshot", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  relay.on("connection", (socket) => socket.on("message", (raw) => {
+    const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+    if (message.type === "auth") {
+      socket.send(JSON.stringify({
+        type: "ready", protocol: 1, host,
+        capabilities: ["model-presets"], bridge: "native-codex-micro"
+      }));
+      socket.send(JSON.stringify({
+        type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+        snapshot: relayModelSnapshot()
+      }));
+    } else if (message.type === "command") {
+      socket.send(JSON.stringify({
+        type: "result", protocol: 1, requestId: message.requestId, ok: true,
+        modelId: "gpt-5.6-terra", reasoningEffort: "medium"
+      }));
+    }
+  }));
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) }, () => {}, () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => client.currentHealth().state === "ready");
+  const retained = client.currentSnapshot();
+  await assert.rejects(client.send({
+    kind: "model-preset", modelId: "gpt-5.6-terra", reasoningEffort: "medium",
+    includeUltra: false, includeModelPresetFeedback: true
+  }), /stale model preset feedback/i);
+  assert.equal(client.currentSnapshot(), retained);
+});

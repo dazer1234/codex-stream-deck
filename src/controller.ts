@@ -37,7 +37,7 @@ import type {
   ModelPresetDirection
 } from "./dial-types.js";
 import {
-  HostActivityIndex, RELAY_REASONING_POLICY_CAPABILITY,
+  HostActivityIndex, RELAY_MODEL_PRESETS_CAPABILITY, RELAY_REASONING_POLICY_CAPABILITY,
   type HostSnapshot, type RelayCommand
 } from "./relay-protocol.js";
 import {
@@ -262,6 +262,8 @@ export class DeckController {
           sendEncoder: (act: 0 | 1) => runAndInvalidate(() => this.microBridge.sendEncoder(act)),
           adjustReasoning: (direction: ReasoningAdjustment, policy?: ReasoningAdjustmentPolicy) => runAndInvalidate(
             () => this.adjustLocalReasoningFromRelay(direction, policy)),
+          applyModelPreset: (request: ModelPresetRequest) => runAndInvalidate(
+            () => this.applyLocalModelPresetFromRelay(request)),
           runKeycap: (keycapId: OfficialKeycapId) => runAndInvalidate(
             () => this.microBridge.runKeycap(keycapId)),
           refreshUsage: async () => {
@@ -632,6 +634,16 @@ export class DeckController {
   ): Promise<ReasoningAdjustmentExecution> {
     return this.serializeModelReasoningMutation(
       () => this.adjustLocalReasoning(direction, policy));
+  }
+
+  private applyLocalModelPresetFromRelay(
+    request: ModelPresetRequest
+  ): Promise<ModelPresetExecution> {
+    const localHost = this.localHost;
+    if (!localHost) return Promise.reject(new Error("The local Codex host is unavailable."));
+    return this.serializeModelReasoningMutation(() => this.sendModelPresetToHost({
+      kind: "host", hostId: localHost.hostId, platform: localHost.platform
+    }, request));
   }
 
   private async adjustLocalReasoning(
@@ -1930,7 +1942,31 @@ export class DeckController {
       ? route.hostId === localHost?.hostId
       : route.platform === localHost?.platform;
     if (!localRequested) {
-      throw new Error("Remote Codex host does not support model preset controls yet.");
+      const remote = this.relayClient?.currentHost();
+      if (!remote || (route.hostId != null
+        ? remote.hostId !== route.hostId
+        : remote.platform !== route.platform)) {
+        throw new Error("The captured Codex host is no longer connected.");
+      }
+      if (this.relayClient?.currentHealth().state !== "ready" ||
+          !this.relayClient.supportsCapabilityForSnapshot(
+            RELAY_MODEL_PRESETS_CAPABILITY, remote.hostId, remote.platform
+          )) {
+        throw new Error("Remote Codex host does not support model preset controls.");
+      }
+      const result = await this.sendRemote({
+        kind: "model-preset",
+        modelId: request.modelId,
+        reasoningEffort: request.reasoningEffort,
+        includeUltra: request.includeUltra,
+        includeModelPresetFeedback: true
+      });
+      const parsed = parseModelPresetExecution(result);
+      if (!parsed || parsed.modelId !== request.modelId ||
+          parsed.reasoningEffort !== request.reasoningEffort) {
+        throw new Error("Remote Codex returned an invalid or unconfirmed model preset result.");
+      }
+      return parsed;
     }
     if (this.localHealth.state !== "ready") {
       throw new Error("The captured Codex host is not ready.");
@@ -2246,7 +2282,7 @@ export class DeckController {
 
   private async sendRemote(
     command: RelayCommand
-  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | ModelPresetExecution | undefined> {
     if (!this.relayClient) throw new Error("Remote Codex relay is not configured.");
     return this.relayClient.send(command);
   }

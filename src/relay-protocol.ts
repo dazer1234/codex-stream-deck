@@ -18,6 +18,13 @@ export type RelayCommand =
       includeUltra: boolean;
       includeReasoningFeedback?: true;
     }
+  | {
+      kind: "model-preset";
+      modelId: string;
+      reasoningEffort: string;
+      includeUltra: boolean;
+      includeModelPresetFeedback: true;
+    }
   | { kind: "usage-refresh" }
   | { kind: "rate-limit-reset" }
   | { kind: "keycap"; keycapId: OfficialKeycapId };
@@ -25,9 +32,10 @@ export type RelayCommand =
 export type RelayAuthMessage = { type: "auth"; protocol: 1; token: string };
 export const RELAY_REASONING_POLICY_CAPABILITY = "reasoning-policy";
 export const RELAY_REASONING_FEEDBACK_CAPABILITY = "reasoning-feedback";
+export const RELAY_MODEL_PRESETS_CAPABILITY = "model-presets";
 export const RELAY_CAPABILITIES = [
   "agent", "action", "joystick", "encoder", "reasoning", RELAY_REASONING_POLICY_CAPABILITY,
-  RELAY_REASONING_FEEDBACK_CAPABILITY,
+  RELAY_REASONING_FEEDBACK_CAPABILITY, RELAY_MODEL_PRESETS_CAPABILITY,
   "keycap", "usage", "usage-refresh", "rate-limit-reset"
 ] as const;
 export type RelayReadyMessage = {
@@ -61,6 +69,14 @@ export type RelayResultMessage =
       ok: true;
       outcome?: ReasoningAdjustmentResult;
       reasoningEffort?: string;
+    }
+  | {
+      type: "result";
+      protocol: 1;
+      requestId: string;
+      ok: true;
+      modelId: string;
+      reasoningEffort: string;
     }
   | { type: "result"; protocol: 1; requestId: string; ok: false; error?: string };
 export type RelayServerMessage = RelayReadyMessage | RelaySnapshotMessage | RelayHealthMessage | RelayResultMessage;
@@ -274,7 +290,17 @@ export function parseRelayServerMessage(value: unknown): RelayServerMessage | nu
   if (message.type === "result" && boundedNonblankString(message.requestId, 128)) {
     const hasOutcome = message.outcome !== undefined;
     const hasReasoningEffort = message.reasoningEffort !== undefined;
+    const hasModelId = message.modelId !== undefined;
+    if (message.ok === true && hasModelId && hasReasoningEffort && !hasOutcome &&
+        isSafeReasoningIdentifier(message.modelId, 128) &&
+        isSafeReasoningIdentifier(message.reasoningEffort) &&
+        exactOwnDataKeys(message, [
+          "type", "protocol", "requestId", "ok", "modelId", "reasoningEffort"
+        ])) {
+      return message as RelayResultMessage;
+    }
     if (message.ok === true &&
+        !hasModelId &&
         (!hasOutcome || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
         (!hasReasoningEffort || (hasOutcome && isSafeReasoningIdentifier(message.reasoningEffort))) &&
         exactOwnDataKeys(message, [
@@ -309,6 +335,16 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
       (command.includeReasoningFeedback === undefined || command.includeReasoningFeedback === true) &&
       exactOwnDataKeys(command, ["kind", "direction", "includeUltra",
         ...(command.includeReasoningFeedback === true ? ["includeReasoningFeedback"] : [])])) {
+    return command as RelayCommand;
+  }
+  if (command.kind === "model-preset" &&
+      isSafeReasoningIdentifier(command.modelId, 128) &&
+      isSafeReasoningIdentifier(command.reasoningEffort) &&
+      typeof command.includeUltra === "boolean" &&
+      command.includeModelPresetFeedback === true &&
+      exactOwnDataKeys(command, [
+        "kind", "modelId", "reasoningEffort", "includeUltra", "includeModelPresetFeedback"
+      ])) {
     return command as RelayCommand;
   }
   if (command.kind === "usage-refresh" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;

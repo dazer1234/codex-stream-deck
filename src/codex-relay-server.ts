@@ -11,7 +11,10 @@ import {
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
-import { isSafeReasoningIdentifier, type CodexHost, type ReasoningAdjustmentExecution } from "./types.js";
+import {
+  isSafeReasoningIdentifier,
+  type CodexHost, type ModelPresetExecution, type ReasoningAdjustmentExecution
+} from "./types.js";
 
 export type RelayServerConfig = {
   enabled: boolean;
@@ -47,7 +50,7 @@ export function encodeRelaySnapshotMessage(message: RelaySnapshotMessage): strin
 
 type RelayControl = Pick<CodexMicroRendererBridge,
   "refresh" | "sendAgent" | "sendAction" | "sendJoystick" | "sendEncoder" | "adjustReasoning" | "runKeycap" |
-  "refreshUsage" | "consumeRateLimitReset">;
+  "refreshUsage" | "consumeRateLimitReset"> & Pick<Partial<CodexMicroRendererBridge>, "applyModelPreset">;
 
 export class CodexRelayServer {
   private server?: WebSocketServer;
@@ -196,7 +199,10 @@ export class CodexRelayServer {
       this.authenticated.add(socket);
       socket.send(JSON.stringify({
         type: "ready", protocol: RELAY_PROTOCOL_VERSION, host: this.host,
-        capabilities: RELAY_CAPABILITIES, bridge: "native-codex-micro"
+        capabilities: this.control.applyModelPreset
+          ? RELAY_CAPABILITIES
+          : RELAY_CAPABILITIES.filter((capability) => capability !== "model-presets"),
+        bridge: "native-codex-micro"
       }));
       socket.on("message", (message) => {
         void this.handleMessage(socket, message.toString()).catch((error) => this.reportSnapshotError(error));
@@ -227,10 +233,12 @@ export class CodexRelayServer {
       if (command.kind === "reasoning" && command.includeReasoningFeedback === true) {
         await this.publishSnapshot(undefined, true);
       }
+      if (command.kind === "model-preset") await this.publishSnapshot(undefined, true);
       this.sendResult(socket, message.requestId, true, undefined, execution);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
       if (command.kind !== "usage-refresh" &&
-          !(command.kind === "reasoning" && command.includeReasoningFeedback === true)) {
+          !(command.kind === "reasoning" && command.includeReasoningFeedback === true) &&
+          command.kind !== "model-preset") {
         await this.publishSnapshot();
       }
     } catch (error) {
@@ -245,16 +253,17 @@ export class CodexRelayServer {
     requestId: string,
     ok: boolean,
     error?: string,
-    execution?: ReasoningAdjustmentExecution
+    execution?: ReasoningAdjustmentExecution | ModelPresetExecution
   ): void {
     if (socket.readyState !== WebSocket.OPEN) return;
     const result: RelayResultMessage = ok
       ? {
           type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: true,
-          ...(execution === undefined ? {} : { outcome: execution.outcome }),
-          ...(execution?.reasoningEffort === undefined ? {} : {
+          ...(!execution || !("outcome" in execution) ? {} : { outcome: execution.outcome }),
+          ...(!execution || !("reasoningEffort" in execution) ? {} : {
             reasoningEffort: execution.reasoningEffort
-          })
+          }),
+          ...(!execution || !("modelId" in execution) ? {} : { modelId: execution.modelId })
         }
       : {
           type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: false,
@@ -420,6 +429,14 @@ async function executeRelayCommand(
   if (command.kind === "reasoning") {
     return control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
   }
+  if (command.kind === "model-preset") {
+    if (!control.applyModelPreset) throw new Error("Model preset controls are unavailable.");
+    return control.applyModelPreset({
+      modelId: command.modelId,
+      reasoningEffort: command.reasoningEffort,
+      includeUltra: command.includeUltra
+    });
+  }
   if (command.kind === "usage-refresh") {
     await control.refreshUsage();
     return undefined;
@@ -435,7 +452,7 @@ async function executeRelayCommand(
 function validatedRelayExecution(
   command: RelayCommand,
   value: unknown
-): ReasoningAdjustmentExecution | undefined {
+): ReasoningAdjustmentExecution | ModelPresetExecution | undefined {
   if (command.kind === "reasoning") {
     let outcome: unknown;
     let reasoningEffort: unknown;
@@ -480,8 +497,38 @@ function validatedRelayExecution(
       };
     }
   }
+  if (command.kind === "model-preset") {
+    const record = exactExecutionRecord(value, ["modelId", "reasoningEffort"]);
+    if (record && isSafeReasoningIdentifier(record.modelId, 128) &&
+        isSafeReasoningIdentifier(record.reasoningEffort) &&
+        record.modelId === command.modelId &&
+        record.reasoningEffort === command.reasoningEffort) {
+      return { modelId: record.modelId, reasoningEffort: record.reasoningEffort };
+    }
+    throw new Error("Invalid model preset result.");
+  }
   if (command.kind !== "reasoning" && value === undefined) return undefined;
   throw new Error("Invalid reasoning adjustment result.");
+}
+
+function exactExecutionRecord(
+  value: unknown,
+  expectedKeys: readonly string[]
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length !== expectedKeys.length || keys.some((key) =>
+    typeof key !== "string" || !expectedKeys.includes(key))) return undefined;
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of expectedKeys) {
+    const descriptor = descriptors[key];
+    if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return undefined;
+    result[key] = descriptor.value;
+  }
+  return result;
 }
 
 function secureEqual(left: unknown, right: string): boolean {

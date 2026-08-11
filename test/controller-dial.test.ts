@@ -39,7 +39,8 @@ type ControllerProbe = {
     currentHealth(): HostHealth;
     currentSnapshot(): { host: CodexHost; observedAt: number; snapshot: MicroSnapshot } | undefined;
     supportsCurrentReadyCapability?(capability: string): boolean;
-    send(command: unknown): Promise<void | ReasoningAdjustmentResult | ReasoningAdjustmentExecution>;
+    supportsCapabilityForSnapshot?(capability: string, hostId: string, platform: CodexHost["platform"]): boolean;
+    send(command: unknown): Promise<void | ReasoningAdjustmentResult | ReasoningAdjustmentExecution | ModelPresetExecution>;
   };
   microBridge: {
     sendAgent(slot: number, act: 0 | 1, threadKey?: string): Promise<void>;
@@ -3621,6 +3622,47 @@ test("model preset requires a post-result refresh when a newer refresh committed
     ["gpt-5.6-sol", "high"]
   ]);
   controller.unregisterDial(presetDial);
+});
+
+test("remote model preset requires capability and redraws the current registration after exact confirmation", async () => {
+  const controller = new DeckController();
+  const dial = fakeDial("remote-model-preset");
+  const state = probe(controller);
+  const remoteSnapshot = {
+    host: REMOTE_HOST, observedAt: 1_000, snapshot: modelSnapshot()
+  };
+  const sent: unknown[] = [];
+  state.localHost = HOST;
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => remoteSnapshot,
+    supportsCurrentReadyCapability: () => true,
+    supportsCapabilityForSnapshot: (capability, hostId, platform) =>
+      capability === "model-presets" && hostId === REMOTE_HOST.hostId && platform === REMOTE_HOST.platform,
+    async send(command) {
+      sent.push(structuredClone(command));
+      remoteSnapshot.snapshot = modelSnapshot("gpt-5.6-sol", "medium");
+      return { modelId: "gpt-5.6-sol", reasoningEffort: "medium" };
+    }
+  };
+  controller.registerDial(dial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(dial, 1);
+  await idle(controller, dial.id);
+
+  assert.deepEqual(sent, [{
+    kind: "model-preset", modelId: "gpt-5.6-sol", reasoningEffort: "medium",
+    includeUltra: false, includeModelPresetFeedback: true
+  }]);
+  assert.equal((dial.feedbackCalls.at(-1) as { title: string }).title, "MODEL PRESET 2/3");
+  assert.equal((dial.feedbackCalls.at(-1) as { value: string }).value, "5.6 SOL");
+  controller.unregisterDial(dial);
 });
 
 test("failed newer refresh degrades and blocks reasoning plus its dependent preset", async () => {

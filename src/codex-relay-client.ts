@@ -5,13 +5,13 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { isAllowedRelayHost } from "./relay-network.js";
 import {
-  RELAY_PROTOCOL_VERSION, RELAY_REASONING_FEEDBACK_CAPABILITY,
+  RELAY_MODEL_PRESETS_CAPABILITY, RELAY_PROTOCOL_VERSION, RELAY_REASONING_FEEDBACK_CAPABILITY,
   RELAY_REASONING_POLICY_CAPABILITY,
   normalizeHostSnapshotAtReceipt, parseRelayServerMessage,
   type HostSnapshot, type RelayCommand, type RelayResultMessage
 } from "./relay-protocol.js";
 import type {
-  CodexHost, HostHealth, ReasoningAdjustmentExecution, ReasoningAdjustmentResult
+  CodexHost, HostHealth, ModelPresetExecution, ReasoningAdjustmentExecution, ReasoningAdjustmentResult
 } from "./types.js";
 
 export type RelayClientConfig = { enabled: boolean; url: string; token: string };
@@ -42,15 +42,18 @@ export class CodexRelayClient {
   private readyPlatform?: CodexHost["platform"];
   private identityViolationGeneration = 0;
   private snapshotGeneration = 0;
+  private snapshotRevision = 0;
   private health: HostHealth = { state: "connecting", reason: "awaiting-snapshot", changedAt: Date.now() };
   private readonly pending = new Map<string, {
     commandKind: RelayCommand["kind"];
     legacyUnrestrictedReasoning: boolean;
     reasoningFeedbackOptIn: boolean;
+    requestedModelPreset?: ModelPresetExecution;
+    snapshotRevision: number;
     connectionGeneration: number;
     readyHostId: string;
     readyPlatform: CodexHost["platform"];
-    resolve: (outcome: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined) => void;
+    resolve: (outcome: ReasoningAdjustmentResult | ReasoningAdjustmentExecution | ModelPresetExecution | undefined) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }>();
@@ -73,6 +76,7 @@ export class CodexRelayClient {
     this.readyGeneration = 0;
     this.readyHostId = undefined;
     this.readyPlatform = undefined;
+    this.snapshotRevision = 0;
     this.identityViolationGeneration = 0;
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
@@ -117,7 +121,7 @@ export class CodexRelayClient {
 
   async send(
     command: RelayCommand
-  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined> {
+  ): Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | ModelPresetExecution | undefined> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN ||
         this.identityViolationGeneration === this.connectionGeneration ||
@@ -127,6 +131,12 @@ export class CodexRelayClient {
       throw new Error("Remote Codex host is offline.");
     }
     const supportsReasoningPolicy = this.capabilities.has(RELAY_REASONING_POLICY_CAPABILITY);
+    if (command.kind === "model-preset" &&
+        !this.supportsCapabilityForSnapshot(
+          RELAY_MODEL_PRESETS_CAPABILITY, this.readyHostId, this.readyPlatform
+        )) {
+      throw new Error("Remote Codex host does not support model preset controls.");
+    }
     if (command.kind === "reasoning" && !command.includeUltra && !supportsReasoningPolicy) {
       throw new Error("Remote Codex host does not support reasoning policy controls.");
     }
@@ -142,13 +152,17 @@ export class CodexRelayClient {
         }
       : command;
     const requestId = randomUUID();
-    return new Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | undefined>((resolve, reject) => {
+    return new Promise<ReasoningAdjustmentResult | ReasoningAdjustmentExecution | ModelPresetExecution | undefined>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error("Remote Codex command timed out."));
       }, RELAY_COMMAND_TIMEOUT_MS);
       this.pending.set(requestId, {
         commandKind: command.kind, legacyUnrestrictedReasoning, reasoningFeedbackOptIn,
+        requestedModelPreset: command.kind === "model-preset"
+          ? { modelId: command.modelId, reasoningEffort: command.reasoningEffort }
+          : undefined,
+        snapshotRevision: this.snapshotRevision,
         connectionGeneration: this.connectionGeneration,
         readyHostId: this.readyHostId!,
         readyPlatform: this.readyPlatform!,
@@ -216,6 +230,7 @@ export class CodexRelayClient {
       );
       this.lastSnapshotReceivedAt = receivedAt;
       this.snapshotGeneration = generation;
+      this.snapshotRevision += 1;
       this.health = { state: "ready", changedAt: receivedAt };
       this.onSnapshot(this.snapshot);
     } else if (message.type === "health") {
@@ -237,6 +252,54 @@ export class CodexRelayClient {
     clearTimeout(pending.timer);
     if (!message.ok) {
       pending.reject(new Error(message.error || "Remote Codex command failed."));
+      return;
+    }
+    if ("modelId" in message) {
+      const requested = pending.requestedModelPreset;
+      if (pending.commandKind !== "model-preset" || !requested ||
+          message.modelId !== requested.modelId ||
+          message.reasoningEffort !== requested.reasoningEffort) {
+        pending.reject(new Error("Remote Codex returned unexpected model preset feedback."));
+        return;
+      }
+      if (pending.connectionGeneration !== this.connectionGeneration ||
+          pending.connectionGeneration !== this.readyGeneration ||
+          pending.readyHostId !== this.readyHostId ||
+          pending.readyPlatform !== this.readyPlatform ||
+          pending.readyHostId !== this.host?.hostId ||
+          pending.readyPlatform !== this.host?.platform ||
+          this.currentHealth().state !== "ready" ||
+          !this.capabilities.has(RELAY_MODEL_PRESETS_CAPABILITY) ||
+          this.snapshotGeneration !== this.connectionGeneration ||
+          this.snapshotRevision <= pending.snapshotRevision ||
+          this.snapshot?.host.hostId !== pending.readyHostId ||
+          this.snapshot.host.platform !== pending.readyPlatform) {
+        pending.reject(new Error("Remote Codex returned stale model preset feedback."));
+        return;
+      }
+      const current = this.snapshot;
+      const catalogEntry = current.snapshot.modelCatalog?.find((entry) =>
+        entry.modelId === message.modelId &&
+        entry.supportedReasoningEfforts.includes(message.reasoningEffort));
+      if (!catalogEntry) {
+        pending.reject(new Error("Remote Codex model preset is absent from the authoritative catalog."));
+        return;
+      }
+      this.snapshot = {
+        ...current,
+        snapshot: {
+          ...current.snapshot,
+          activeModelId: message.modelId,
+          activeModelDisplayName: catalogEntry.displayName,
+          reasoningEffort: message.reasoningEffort
+        }
+      };
+      this.onSnapshot(this.snapshot);
+      pending.resolve({ modelId: message.modelId, reasoningEffort: message.reasoningEffort });
+      return;
+    }
+    if (pending.commandKind === "model-preset") {
+      pending.reject(new Error("Remote Codex omitted requested model preset feedback."));
       return;
     }
     if (message.reasoningEffort !== undefined) {
@@ -301,6 +364,7 @@ export class CodexRelayClient {
     this.readyGeneration = 0;
     this.readyHostId = undefined;
     this.readyPlatform = undefined;
+    this.snapshotRevision = 0;
     this.identityViolationGeneration = 0;
     this.health = { state: "offline", reason: "relay-disconnected", changedAt: Date.now() };
     this.rejectPending("Remote Codex relay disconnected.");
