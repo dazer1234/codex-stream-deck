@@ -305,6 +305,10 @@ export class CodexRelayServer {
 
   private async publishSnapshot(only?: WebSocket, forceFresh = false): Promise<void> {
     const message = await this.currentSnapshotMessage(forceFresh);
+    const encoded = encodeRelaySnapshotMessage(message);
+    for (const socket of only ? [only] : this.authenticated) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
+    }
     if (this.consecutiveSnapshotFailures > 0) {
       this.log(`Relay snapshot recovered after ${this.consecutiveSnapshotFailures} transient failure${this.consecutiveSnapshotFailures === 1 ? "" : "s"}.`);
     }
@@ -313,10 +317,6 @@ export class CodexRelayServer {
     this.degraded = false;
     this.lastSnapshotError = "";
     this.lastSnapshotErrorAt = 0;
-    const encoded = encodeRelaySnapshotMessage(message);
-    for (const socket of only ? [only] : this.authenticated) {
-      if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
-    }
   }
 
   private async currentSnapshotMessage(forceFresh = false): Promise<RelaySnapshotMessage> {

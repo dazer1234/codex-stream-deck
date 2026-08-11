@@ -2127,6 +2127,64 @@ test("authenticated relay survives an unavailable Codex snapshot", async () => {
   await server.close();
 });
 
+test("an unencodable first snapshot degrades immediately and a later valid snapshot recovers", async () => {
+  const port = await freePort();
+  const logs: string[] = [];
+  let refreshes = 0;
+  const oversizedSnapshot: MicroSnapshot = {
+    ...structuredClone(snapshot),
+    layout: {
+      ...structuredClone(snapshot.layout),
+      analogStick: { ...structuredClone(snapshot.layout.analogStick), up: "x".repeat(70 * 1024) }
+    }
+  };
+  assert.notEqual(parseRelayServerMessage({
+    type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: oversizedSnapshot
+  }), null, "the oversized fixture remains a valid relay snapshot without a model catalog");
+  const control = {
+    refresh: async (): Promise<MicroSnapshot> => {
+      refreshes += 1;
+      return refreshes === 1 ? oversizedSnapshot : snapshot;
+    },
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control,
+    (message) => logs.push(message)
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  const messages = messageQueue(socket);
+  try {
+    await onceOpen(socket);
+    socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+    assert.equal((await messages.next()).type, "ready");
+    const health = await messages.next();
+    assert.equal(health.type, "health");
+    assert.equal(health.state, "degraded");
+    assert.equal(health.reason, "native-signals-unavailable");
+
+    socket.send(JSON.stringify({
+      type: "command", protocol: 1, requestId: "recover-snapshot",
+      command: { kind: "usage-refresh" }
+    }));
+    const recovered = await messages.next();
+    assert.equal(recovered.type, "snapshot");
+    assert.deepEqual(recovered.snapshot, snapshot);
+    const result = await messages.next();
+    assert.equal(result.type, "result");
+    assert.equal(result.requestId, "recover-snapshot");
+    assert.equal(result.ok, true);
+    assert.equal(refreshes, 2);
+    assert.equal(logs.filter((message) => message.includes("Relay snapshot recovered after 1 transient failure")).length, 1);
+  } finally {
+    socket.close();
+    await server.close();
+  }
+});
+
 test("relay client preserves last-known tasks but marks their host offline after disconnect", async () => {
   const port = await freePort();
   const control = {
