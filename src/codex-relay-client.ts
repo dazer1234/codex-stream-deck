@@ -278,6 +278,13 @@ export class CodexRelayClient {
         return;
       }
       const current = this.snapshot;
+      if (current.snapshot.activeModelId !== message.modelId ||
+          current.snapshot.reasoningEffort !== message.reasoningEffort) {
+        pending.reject(new Error(
+          "Remote Codex model preset result disagrees with the authoritative post-command snapshot."
+        ));
+        return;
+      }
       const catalogEntry = current.snapshot.modelCatalog?.find((entry) =>
         entry.modelId === message.modelId &&
         entry.supportedReasoningEfforts.includes(message.reasoningEffort));

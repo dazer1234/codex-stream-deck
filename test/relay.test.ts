@@ -2985,3 +2985,60 @@ test("model preset client rejects a result without a newer authoritative snapsho
   }), /stale model preset feedback/i);
   assert.equal(client.currentSnapshot(), retained);
 });
+
+test("model preset client rejects a confirmed result that disagrees with the forced snapshot active pair", async (t) => {
+  const port = await freePort();
+  const relay = new WebSocketServer({ host: "127.0.0.1", port });
+  let serverSocket: WebSocket | undefined;
+  let requestId = "";
+  relay.on("connection", (socket) => {
+    serverSocket = socket;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({
+          type: "ready", protocol: 1, host,
+          capabilities: ["model-presets"], bridge: "native-codex-micro"
+        }));
+        socket.send(JSON.stringify({
+          type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+          snapshot: relayModelSnapshot()
+        }));
+      } else if (message.type === "command") requestId = String(message.requestId);
+    });
+  });
+  const delivered: HostSnapshot[] = [];
+  const client = new CodexRelayClient(
+    { enabled: true, url: `ws://127.0.0.1:${port}`, token: "t".repeat(32) },
+    (value) => delivered.push(value), () => {}
+  );
+  t.after(async () => {
+    client.close();
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>((resolve) => relay.close(() => resolve()));
+  });
+  client.start();
+  await waitUntil(() => delivered.length === 1);
+  const send = client.send({
+    kind: "model-preset", modelId: "gpt-5.6-terra", reasoningEffort: "medium",
+    includeUltra: false, includeModelPresetFeedback: true
+  });
+  await waitUntil(() => requestId !== "");
+  serverSocket!.send(JSON.stringify({
+    type: "snapshot", protocol: 1, host, observedAt: Date.now(),
+    snapshot: relayModelSnapshot("gpt-5.6-sol", "high")
+  }));
+  await waitUntil(() => delivered.length === 2);
+  const authoritative = client.currentSnapshot()!;
+  serverSocket!.send(JSON.stringify({
+    type: "result", protocol: 1, requestId, ok: true,
+    modelId: "gpt-5.6-terra", reasoningEffort: "medium"
+  }));
+
+  await assert.rejects(send, /disagrees with.*authoritative.*snapshot/i);
+  assert.equal(client.currentSnapshot(), authoritative);
+  assert.equal(delivered.length, 2, "a mismatched result never redraws or patches");
+  assert.equal(authoritative.snapshot.activeModelId, "gpt-5.6-sol");
+  assert.equal(authoritative.snapshot.activeModelDisplayName, "5.6 Sol");
+  assert.equal(authoritative.snapshot.reasoningEffort, "high");
+});
