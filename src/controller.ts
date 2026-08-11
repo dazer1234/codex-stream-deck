@@ -1,4 +1,5 @@
 import streamDeck, { type DialAction, type KeyAction } from "@elgato/streamdeck";
+import type { JsonValue } from "@elgato/utils";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
@@ -44,7 +45,7 @@ import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
 import { isSafeReasoningIdentifier } from "./types.js";
 import type {
-  CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
+  CodexHost, CodexModelCatalogEntry, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
   ReasoningAdjustmentExecution, ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot,
   UsageLimitMode, UsageWindowKind
 } from "./types.js";
@@ -60,7 +61,9 @@ type MicroActionRegistration = { action: KeyAction; slot: MicroActionSlot };
 type UsageLimitRegistration = { action: KeyAction; mode: UsageLimitMode };
 type ActionIdentity = { id: string };
 type ContextRingSettings = { showContextRings?: boolean };
-type CodexDialAction = DialAction<CodexDialSettings>;
+type CodexDialAction = DialAction<CodexDialSettings> & {
+  sendToPropertyInspector?(payload: JsonValue): Promise<void>;
+};
 type DialHostRoute = { kind: "host"; hostId?: string; platform: ControlTarget };
 type DialAgentRoute = {
   kind: "agent";
@@ -98,6 +101,24 @@ type DialRegistration = {
   noticeActive?: boolean;
   noticeTimer?: NodeJS.Timeout;
   noticeRevision: number;
+};
+type DialInspectorRegistration = {
+  action: CodexDialAction;
+  generation: number;
+  lastSignature?: string;
+};
+type ModelCatalogResponse = {
+  kind: "model-catalog";
+  requestGeneration: number;
+  catalogRevision: number;
+  available: boolean;
+  hostId?: string;
+  platform?: ControlTarget;
+  snapshotGeneration?: number;
+  activeModelId?: string;
+  activeModelDisplayName?: string;
+  reasoningEffort?: string;
+  modelCatalog?: CodexModelCatalogEntry[];
 };
 type DialNotice = {
   title: string;
@@ -137,6 +158,7 @@ export class DeckController {
   private readonly usageOverviewActions = new Map<string, KeyAction>();
   private readonly rateLimitResetActions = new Map<string, KeyAction>();
   private readonly dials = new Map<string, DialRegistration>();
+  private readonly dialInspectors = new Map<string, DialInspectorRegistration>();
   private readonly resetHolds = new Map<string, ResetHold>();
   private readonly dialDescriptionErrors = new Set<string>();
   private readonly dialRenderErrors = new Set<string>();
@@ -168,6 +190,8 @@ export class DeckController {
   private lastHostHealthSignature = "";
   private showContextRings = true;
   private nextDialGeneration = 0;
+  private nextDialInspectorGeneration = 0;
+  private catalogRevision = 0;
 
   async start(): Promise<void> {
     this.stopped = false;
@@ -358,6 +382,109 @@ export class DeckController {
     const registration = this.dials.get(action.id);
     if (!registration) return;
     this.disposeDialRegistration(registration);
+  }
+
+  registerDialPropertyInspector(action: CodexDialAction): void {
+    const registration: DialInspectorRegistration = {
+      action,
+      generation: ++this.nextDialInspectorGeneration
+    };
+    this.dialInspectors.set(action.id, registration);
+    void this.sendModelCatalogToInspector(registration, 0, true);
+  }
+
+  unregisterDialPropertyInspector(action: ActionIdentity): void {
+    const registration = this.dialInspectors.get(action.id);
+    if (!registration) return;
+    registration.generation = -Math.abs(registration.generation);
+    this.dialInspectors.delete(action.id);
+  }
+
+  handleDialPropertyInspectorMessage(action: CodexDialAction, input: unknown): void {
+    const requestGeneration = this.readModelCatalogRequest(input);
+    if (requestGeneration == null) return;
+    const registration = this.dialInspectors.get(action.id);
+    if (!registration || registration.action !== action || registration.generation <= 0) return;
+    void this.sendModelCatalogToInspector(registration, requestGeneration, true);
+  }
+
+  private readModelCatalogRequest(input: unknown): number | undefined {
+    try {
+      if (typeof input !== "object" || input === null || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype) {
+        return undefined;
+      }
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      if (Object.getOwnPropertySymbols(input).length !== 0 || Object.keys(descriptors).sort().join(",") !== "kind,requestGeneration") {
+        return undefined;
+      }
+      const kind = descriptors.kind;
+      const generation = descriptors.requestGeneration;
+      if (!kind || !generation || !("value" in kind) || !("value" in generation) || kind.value !== "request-model-catalog" ||
+          !Number.isSafeInteger(generation.value) || generation.value < 0) return undefined;
+      return generation.value as number;
+    } catch { return undefined; }
+  }
+
+  private currentModelCatalogResponse(requestGeneration: number): Omit<ModelCatalogResponse, "catalogRevision"> {
+    const target = this.targetSnapshot();
+    const isLocal = this.localHost != null && this.targetPlatform === this.localHost.platform;
+    const health = isLocal ? this.localHealth : this.relayClient?.currentHealth();
+    const hostSnapshot = isLocal ? this.localSnapshot : this.relayClient?.currentSnapshot();
+    const host = hostSnapshot?.host;
+    if (health?.state !== "ready" || !target || !host || host.hostId !== this.targetHostId ||
+        target.activeModelId == null || target.activeModelDisplayName == null ||
+        target.reasoningEffort == null || target.modelCatalog == null) {
+      return { kind: "model-catalog", requestGeneration, available: false };
+    }
+    return {
+      kind: "model-catalog",
+      requestGeneration,
+      available: true,
+      hostId: host.hostId,
+      platform: host.platform,
+      snapshotGeneration: isLocal ? this.localSnapshotGeneration : hostSnapshot.observedAt,
+      activeModelId: target.activeModelId,
+      activeModelDisplayName: target.activeModelDisplayName,
+      reasoningEffort: target.reasoningEffort,
+      modelCatalog: target.modelCatalog.map((entry) => ({
+        modelId: entry.modelId,
+        displayName: entry.displayName,
+        supportedReasoningEfforts: [...entry.supportedReasoningEfforts]
+      }))
+    };
+  }
+
+  private async sendModelCatalogToInspector(
+    registration: DialInspectorRegistration,
+    requestGeneration: number,
+    force: boolean
+  ): Promise<void> {
+    if (this.dialInspectors.get(registration.action.id) !== registration || registration.generation <= 0) return;
+    const base = this.currentModelCatalogResponse(requestGeneration);
+    const signature = JSON.stringify({ ...base, requestGeneration: 0 });
+    if (!force && signature === registration.lastSignature) return;
+    registration.lastSignature = signature;
+    const payload: ModelCatalogResponse = { ...base, catalogRevision: ++this.catalogRevision };
+    try {
+      if (registration.action.sendToPropertyInspector) {
+        await registration.action.sendToPropertyInspector(payload as unknown as JsonValue);
+      } else {
+        const visible = streamDeck.ui.action;
+        if (visible !== registration.action) return;
+        await streamDeck.ui.sendToPropertyInspector(payload as unknown as JsonValue);
+      }
+    }
+    catch (error) {
+      if (this.dialInspectors.get(registration.action.id) === registration && registration.lastSignature === signature) {
+        registration.lastSignature = undefined;
+      }
+      streamDeck.logger.warn(`Codex Dial property inspector update failed: ${String(error)}`);
+    }
+  }
+
+  private async pushModelCatalogs(): Promise<void> {
+    await Promise.all([...this.dialInspectors.values()].map((registration) =>
+      this.sendModelCatalogToInspector(registration, 0, false)));
   }
 
   private disposeDialRegistration(registration: DialRegistration): void {
@@ -799,6 +926,7 @@ export class DeckController {
 
   private async renderAll(): Promise<void> {
     await Promise.all([
+      this.pushModelCatalogs(),
       ...[...this.agents.values()].map((registration) => this.renderAgent(registration)),
       ...[...this.microActions.values()].map((registration) => this.renderMicroAction(registration)),
       ...[...this.fixedActions.values()].map((registration) => this.renderFixedAction(registration)),

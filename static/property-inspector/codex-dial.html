@@ -87,6 +87,19 @@
       border-bottom: 1px solid #34373d;
     }
     .action-row:last-child { border-bottom: 0; }
+    .model-preset-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) auto;
+      gap: 5px;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #34373d;
+    }
+    .model-preset-row:last-child { border-bottom: 0; }
+    button {
+      min-height: 28px; color: var(--text); background: var(--field);
+      border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
+    }
     .action-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .move-buttons { display: flex; gap: 3px; }
     .move-buttons button {
@@ -121,6 +134,7 @@
         <span>Starting point</span>
         <select id="preset">
           <option value="reasoning">Reasoning</option>
+          <option value="model-presets">Model Presets</option>
           <option value="agents">Agents</option>
           <option value="actions">Actions</option>
           <option value="navigation">Navigation</option>
@@ -128,6 +142,14 @@
           <option value="custom">Custom</option>
         </select>
       </label>
+    </section>
+
+    <section id="model-presets-panel" class="panel" hidden>
+      <h2 class="panel-title">Model Presets</h2>
+      <p id="model-catalog-status" class="hint" role="status" aria-live="polite">Live model catalog unavailable.</p>
+      <p class="hint">Each detent immediately applies the next model and reasoning pair. Drag rows or use the accessible arrows to reorder.</p>
+      <div id="model-preset-items"></div>
+      <button id="add-model-preset" type="button">Add preset</button>
     </section>
 
     <section class="panel">
@@ -223,7 +245,7 @@
 
     const PRESETS = {
       reasoning: {
-        version: 1,
+        version: 2,
         preset: "reasoning",
         customized: false,
         includeUltraReasoning: false,
@@ -233,7 +255,7 @@
         feedback: "reasoning"
       },
       agents: {
-        version: 1,
+        version: 2,
         preset: "agents",
         customized: false,
         includeUltraReasoning: false,
@@ -243,7 +265,7 @@
         feedback: "agent"
       },
       actions: {
-        version: 1,
+        version: 2,
         preset: "actions",
         customized: false,
         includeUltraReasoning: false,
@@ -258,7 +280,7 @@
         feedback: "action"
       },
       navigation: {
-        version: 1,
+        version: 2,
         preset: "navigation",
         customized: false,
         includeUltraReasoning: false,
@@ -268,7 +290,7 @@
         feedback: "navigation"
       },
       usage: {
-        version: 1,
+        version: 2,
         preset: "usage",
         customized: false,
         includeUltraReasoning: false,
@@ -278,7 +300,7 @@
         feedback: "usage"
       },
       custom: {
-        version: 1,
+        version: 2,
         preset: "custom",
         customized: false,
         includeUltraReasoning: false,
@@ -286,6 +308,17 @@
         press: "none",
         touchTap: "none",
         feedback: "static"
+      },
+      "model-presets": {
+        version: 2,
+        preset: "model-presets",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "model-presets" },
+        press: "none",
+        touchTap: "keycap.FAST",
+        feedback: "model-presets",
+        modelPresets: []
       }
     };
 
@@ -342,6 +375,12 @@
     let actionOrder = [...ACTION_BINDINGS];
     let selectedActionItems = new Set();
     let hasPendingSettings = false;
+    let modelCatalog;
+    let catalogRevision = -1;
+    let catalogRequestGeneration = 0;
+    let modelPresetRows = [];
+    let seededModelPresets = false;
+    let draggedModelPreset = -1;
 
     const element = (id) => document.getElementById(id);
 
@@ -387,17 +426,53 @@
       return Object.hasOwn(value, key);
     }
 
+    function safeIdentifier(value, maxLength = 64) {
+      return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+    }
+
+    function normalizeModelPresetRows(value) {
+      if (!Array.isArray(value) || value.length > 12) return [];
+      const rows = [];
+      const seen = new Set();
+      for (const entry of value) {
+        if (!record(entry) || !hasOwn(entry, "modelId") || !hasOwn(entry, "reasoningEffort") ||
+            !safeIdentifier(entry.modelId, 128) || !safeIdentifier(entry.reasoningEffort)) return [];
+        const key = `${entry.modelId}\n${entry.reasoningEffort}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        rows.push({ modelId: entry.modelId, reasoningEffort: entry.reasoningEffort });
+      }
+      return rows;
+    }
+
     function normalizedSettings(input) {
-      if (!record(input) || !hasOwn(input, "version") || input.version !== 1 ||
+      if (!record(input) || !hasOwn(input, "version") || ![1, 2].includes(input.version) ||
           !hasOwn(input, "preset") || !PRESET_IDS.includes(input.preset)) {
         return clone(PRESETS.reasoning);
       }
       const fallback = clone(PRESETS[input.preset]);
+      if (input.preset === "model-presets") {
+        if (input.version !== 2 || !hasOwn(input, "modelPresets") || !Array.isArray(input.modelPresets)) {
+          return fallback;
+        }
+        return {
+          version: 2,
+          preset: "model-presets",
+          customized: hasOwn(input, "customized") && input.customized === true,
+          includeUltraReasoning: hasOwn(input, "includeUltraReasoning") && input.includeUltraReasoning === true,
+          rotation: { kind: "model-presets" },
+          press: "none",
+          touchTap: "keycap.FAST",
+          feedback: "model-presets",
+          modelPresets: normalizeModelPresetRows(input.modelPresets)
+        };
+      }
       const staticLabel = hasOwn(input, "staticLabel") && typeof input.staticLabel === "string"
         ? input.staticLabel.trim().slice(0, 40)
         : "";
       return {
-        version: 1,
+        version: 2,
         preset: input.preset,
         customized: hasOwn(input, "customized") && input.customized === true,
         includeUltraReasoning: hasOwn(input, "includeUltraReasoning") &&
@@ -443,6 +518,8 @@
 
     function applySettings(input) {
       settings = normalizedSettings(input);
+      modelPresetRows = settings.preset === "model-presets" ? clone(settings.modelPresets) : [];
+      seededModelPresets = modelPresetRows.length > 0 || settings.customized === true;
       const configuredItems = settings.rotation.kind === "selector" && settings.rotation.source === "actions"
         ? settings.rotation.items
         : [];
@@ -450,12 +527,12 @@
       actionOrder = [...configuredItems, ...ACTION_BINDINGS.filter((value) => !selectedActionItems.has(value))];
 
       element("preset").value = settings.preset;
-      element("rotation-kind").value = settings.rotation.kind;
+      element("rotation-kind").value = settings.rotation.kind === "model-presets" ? "paired" : settings.rotation.kind;
       element("include-ultra").checked = settings.includeUltraReasoning;
       if (settings.rotation.kind === "paired") {
         element("counter-clockwise").value = settings.rotation.counterClockwise;
         element("clockwise").value = settings.rotation.clockwise;
-      } else {
+      } else if (settings.rotation.kind === "selector") {
         element("selector-source").value = settings.rotation.source;
         element("wrap").checked = settings.rotation.wrap;
       }
@@ -466,17 +543,123 @@
       element("static-label").value = settings.staticLabel ?? "";
       updateConditionalViews();
       renderActionItems();
+      renderModelPresetItems();
     }
 
     function updateConditionalViews() {
+      const modelPresets = element("preset").value === "model-presets";
       const selector = element("rotation-kind").value === "selector";
-      element("paired-controls").hidden = selector;
-      element("selector-controls").hidden = !selector;
+      element("model-presets-panel").hidden = !modelPresets;
+      element("paired-controls").hidden = selector || modelPresets;
+      element("selector-controls").hidden = !selector || modelPresets;
       element("selector-items-row").hidden = !selector || element("selector-source").value !== "actions";
-      element("include-ultra-row").hidden = selector ||
+      element("include-ultra-row").hidden = modelPresets ? false : selector ||
         (element("counter-clockwise").value !== "reasoning.increase" &&
           element("clockwise").value !== "reasoning.increase");
       element("static-label-row").hidden = element("feedback").value !== "static";
+    }
+
+    function catalogEntry(modelId) {
+      return modelCatalog?.find((entry) => entry.modelId === modelId);
+    }
+
+    function availablePairs() {
+      if (!modelCatalog) return [];
+      const includeUltra = element("include-ultra").checked;
+      return modelCatalog.flatMap((model) => model.supportedReasoningEfforts
+        .filter((effort) => includeUltra || effort.toLowerCase() !== "ultra")
+        .map((reasoningEffort) => ({ modelId: model.modelId, reasoningEffort })));
+    }
+
+    function nextUnusedPair() {
+      const used = new Set(modelPresetRows.map((entry) => `${entry.modelId}\n${entry.reasoningEffort}`));
+      return availablePairs().find((entry) => !used.has(`${entry.modelId}\n${entry.reasoningEffort}`));
+    }
+
+    function renderModelPresetItems() {
+      const container = element("model-preset-items");
+      container.replaceChildren();
+      modelPresetRows.forEach((entry, index) => {
+        const row = document.createElement("div");
+        row.className = "model-preset-row";
+        row.draggable = true;
+        row.dataset.index = String(index);
+        row.addEventListener("dragstart", () => { draggedModelPreset = index; });
+        row.addEventListener("dragover", (event) => event.preventDefault());
+        row.addEventListener("drop", (event) => {
+          event.preventDefault();
+          if (draggedModelPreset < 0 || draggedModelPreset === index) return;
+          const [moved] = modelPresetRows.splice(draggedModelPreset, 1);
+          if (moved) modelPresetRows.splice(index, 0, moved);
+          draggedModelPreset = -1;
+          renderModelPresetItems();
+          persistAndQueue(true);
+        });
+        const model = document.createElement("select");
+        model.dataset.field = "model";
+        const models = modelCatalog ? [...modelCatalog] : [];
+        if (!models.some((item) => item.modelId === entry.modelId)) {
+          models.unshift({ modelId: entry.modelId, displayName: `${entry.modelId} (unavailable)`, supportedReasoningEfforts: [entry.reasoningEffort] });
+        }
+        for (const item of models) {
+          const option = document.createElement("option");
+          option.value = item.modelId;
+          option.textContent = item.displayName;
+          model.appendChild(option);
+        }
+        model.value = entry.modelId;
+        const effort = document.createElement("select");
+        effort.dataset.field = "effort";
+        const supported = catalogEntry(entry.modelId)?.supportedReasoningEfforts ?? [entry.reasoningEffort];
+        const efforts = supported.filter((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra" || value === entry.reasoningEffort);
+        for (const value of efforts) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value.toUpperCase() + (!element("include-ultra").checked && value.toLowerCase() === "ultra" ? " (disabled)" : "");
+          effort.appendChild(option);
+        }
+        effort.value = entry.reasoningEffort;
+        model.addEventListener("change", () => {
+          const target = catalogEntry(model.value);
+          const candidate = target?.supportedReasoningEfforts.find((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra");
+          if (!candidate) return;
+          modelPresetRows[index] = { modelId: model.value, reasoningEffort: candidate };
+          renderModelPresetItems(); persistAndQueue(true);
+        });
+        effort.addEventListener("change", () => {
+          const candidate = { modelId: entry.modelId, reasoningEffort: effort.value };
+          if (modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
+              rowEntry.modelId === candidate.modelId && rowEntry.reasoningEffort === candidate.reasoningEffort)) {
+            renderModelPresetItems(); return;
+          }
+          modelPresetRows[index] = candidate;
+          persistAndQueue(true);
+        });
+        const buttons = document.createElement("span");
+        buttons.className = "move-buttons";
+        for (const [direction, label, disabled] of [["up", "↑", index === 0], ["down", "↓", index === modelPresetRows.length - 1]]) {
+          const button = document.createElement("button");
+          button.type = "button"; button.dataset.direction = direction; button.textContent = label; button.disabled = disabled;
+          button.setAttribute("aria-label", `Move ${entry.modelId} ${entry.reasoningEffort} ${direction}`);
+          button.addEventListener("click", (event) => {
+            event.preventDefault(); if (button.disabled) return;
+            const next = direction === "up" ? index - 1 : index + 1;
+            [modelPresetRows[index], modelPresetRows[next]] = [modelPresetRows[next], modelPresetRows[index]];
+            renderModelPresetItems(); persistAndQueue(true);
+          });
+          buttons.appendChild(button);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.dataset.action = "remove"; remove.textContent = "×";
+        remove.setAttribute("aria-label", `Remove ${entry.modelId} ${entry.reasoningEffort}`);
+        remove.addEventListener("click", (event) => {
+          event.preventDefault(); modelPresetRows.splice(index, 1); renderModelPresetItems(); persistAndQueue(true);
+        });
+        buttons.appendChild(remove);
+        row.append(model, effort, buttons);
+        container.appendChild(row);
+      });
+      element("add-model-preset").disabled = modelPresetRows.length >= 12 || nextUnusedPair() == null;
     }
 
     function renderActionItems() {
@@ -541,6 +724,19 @@
     }
 
     function readForm() {
+      if (element("preset").value === "model-presets") {
+        return {
+          version: 2,
+          preset: "model-presets",
+          customized: true,
+          includeUltraReasoning: element("include-ultra").checked,
+          rotation: { kind: "model-presets" },
+          press: "none",
+          touchTap: "keycap.FAST",
+          feedback: "model-presets",
+          modelPresets: clone(modelPresetRows).slice(0, 12)
+        };
+      }
       const rotation = element("rotation-kind").value === "selector"
         ? {
             kind: "selector",
@@ -558,7 +754,7 @@
       const staticLabel = element("static-label").value.trim().slice(0, 40);
       element("static-label").value = staticLabel;
       return {
-        version: 1,
+        version: 2,
         preset: element("preset").value,
         customized: true,
         includeUltraReasoning: element("include-ultra").checked,
@@ -572,7 +768,7 @@
 
     function persist(customized = true) {
       const payload = readForm();
-      payload.version = 1;
+      payload.version = 2;
       payload.customized = customized;
       settings = payload;
       if (websocket?.readyState === WebSocket.OPEN) {
@@ -589,6 +785,7 @@
     function bindControls() {
       element("preset").addEventListener("change", () => {
         applySettings(PRESETS[element("preset").value] ?? PRESETS.reasoning);
+        if (element("preset").value === "model-presets") requestModelCatalog();
         persistAndQueue(false);
       });
       element("rotation-kind").addEventListener("change", () => {
@@ -612,10 +809,78 @@
           persistAndQueue(true);
         });
       }
-      for (const id of ["include-ultra", "press", "touch-tap", "wrap"]) {
+      for (const id of ["press", "touch-tap", "wrap"]) {
         element(id).addEventListener("change", () => persistAndQueue(true));
       }
+      element("include-ultra").addEventListener("change", () => {
+        renderModelPresetItems(); persistAndQueue(true);
+      });
+      element("add-model-preset").addEventListener("click", (event) => {
+        event.preventDefault();
+        const entry = nextUnusedPair();
+        if (!entry || modelPresetRows.length >= 12) return;
+        modelPresetRows.push(entry); renderModelPresetItems(); persistAndQueue(true);
+      });
       element("static-label").addEventListener("input", () => persistAndQueue(true));
+    }
+
+    function requestModelCatalog() {
+      if (websocket?.readyState !== WebSocket.OPEN) return;
+      catalogRequestGeneration += 1;
+      websocket.send(JSON.stringify({
+        event: "sendToPlugin",
+        context,
+        payload: { kind: "request-model-catalog", requestGeneration: catalogRequestGeneration }
+      }));
+    }
+
+    function validCatalogMessage(payload) {
+      if (!record(payload) || payload.kind !== "model-catalog" || !Number.isSafeInteger(payload.catalogRevision) ||
+          payload.catalogRevision < 0 || typeof payload.available !== "boolean") return false;
+      const keys = Object.keys(payload).sort().join(",");
+      if (!payload.available) {
+        return keys === "available,catalogRevision,kind,requestGeneration" &&
+          Number.isSafeInteger(payload.requestGeneration) && payload.requestGeneration >= 0;
+      }
+      if (keys !== "activeModelDisplayName,activeModelId,available,catalogRevision,hostId,kind,modelCatalog,platform,reasoningEffort,requestGeneration,snapshotGeneration" ||
+          !Number.isSafeInteger(payload.requestGeneration) || payload.requestGeneration < 0) return false;
+      const modelIds = new Set();
+      return typeof payload.hostId === "string" && ["darwin", "win32"].includes(payload.platform) &&
+        Number.isSafeInteger(payload.snapshotGeneration) && safeIdentifier(payload.activeModelId, 128) &&
+        typeof payload.activeModelDisplayName === "string" && safeIdentifier(payload.reasoningEffort) &&
+        Array.isArray(payload.modelCatalog) && payload.modelCatalog.length <= 32 && payload.modelCatalog.every((entry) => {
+          if (!record(entry) || Object.keys(entry).sort().join(",") !== "displayName,modelId,supportedReasoningEfforts" ||
+              !safeIdentifier(entry.modelId, 128) || modelIds.has(entry.modelId) ||
+              typeof entry.displayName !== "string" || entry.displayName.length === 0 || entry.displayName.length > 80 ||
+              !Array.isArray(entry.supportedReasoningEfforts) || entry.supportedReasoningEfforts.length > 16) return false;
+          modelIds.add(entry.modelId);
+          return new Set(entry.supportedReasoningEfforts).size === entry.supportedReasoningEfforts.length &&
+            entry.supportedReasoningEfforts.every((effort) => safeIdentifier(effort));
+        }) && modelIds.has(payload.activeModelId);
+    }
+
+    function acceptModelCatalog(payload) {
+      if (!validCatalogMessage(payload) || payload.catalogRevision <= catalogRevision) return;
+      catalogRevision = payload.catalogRevision;
+      if (!payload.available) {
+        modelCatalog = undefined;
+        element("model-catalog-status").textContent = "Live model catalog unavailable; saved presets are preserved offline.";
+        renderModelPresetItems();
+        return;
+      }
+      modelCatalog = clone(payload.modelCatalog);
+      element("model-catalog-status").textContent = `Connected to ${payload.hostId} (${payload.platform})`;
+      if (!seededModelPresets && modelPresetRows.length === 0) {
+        const preferred = [
+          { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+          { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+          { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+        ];
+        modelPresetRows = preferred.filter((entry) => catalogEntry(entry.modelId)?.supportedReasoningEfforts.includes(entry.reasoningEffort));
+        seededModelPresets = true;
+        if (modelPresetRows.length > 0) persistAndQueue(false);
+      }
+      renderModelPresetItems();
     }
 
     window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
@@ -624,6 +889,9 @@
         try { replacedSocket.close(); } catch {}
       }
       const generation = ++connectionGeneration;
+      catalogRevision = -1;
+      modelCatalog = undefined;
+      element("model-catalog-status").textContent = "Live model catalog unavailable; waiting for Codex.";
       let action = {};
       try {
         const parsed = JSON.parse(actionInfo || "{}");
@@ -639,6 +907,7 @@
       socket.addEventListener("open", () => {
         if (generation !== connectionGeneration) return;
         socket.send(JSON.stringify({ event: registerEvent, uuid }));
+        requestModelCatalog();
         if (hasPendingSettings) {
           socket.send(JSON.stringify({ event: "setSettings", context, payload: settings }));
           hasPendingSettings = false;
@@ -651,6 +920,8 @@
         if (record(event) && event.event === "didReceiveSettings" && hasOwn(event, "payload") &&
             record(event.payload) && hasOwn(event.payload, "settings")) {
           applySettings(event.payload.settings);
+        } else if (record(event) && event.event === "sendToPropertyInspector" && hasOwn(event, "payload")) {
+          acceptModelCatalog(event.payload);
         }
       });
     };

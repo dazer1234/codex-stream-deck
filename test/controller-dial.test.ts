@@ -71,6 +71,7 @@ type ControllerProbe = {
     action: KeyAction;
     source: { kind: "local"; keycapId: string };
   }): Promise<void>;
+  catalogRevision: number;
 };
 
 const HOST: CodexHost = {
@@ -1560,7 +1561,7 @@ test("rate-limit reset remains press-only and uses Encoder feedback for complete
   const settings = {
     ...expandDialPreset("custom"),
     press: "usage.rate-limit-reset",
-    touchTap: "usage.rate-limit-reset"
+    touchTap: "none"
   };
   let begins = 0;
   const finishes = [false, true];
@@ -2428,4 +2429,169 @@ test("rotation detents use the host captured before their queue backlog", async 
 
   assert.deepEqual(localEvents, [["ACT06", 1], ["ACT06", 0]]);
   assert.deepEqual(remoteEvents, []);
+});
+
+test("property inspector catalog requests require exact plain data and return target authority", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const sent: unknown[] = [];
+  const action = fakeDial("catalog-pi") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  action.sendToPropertyInspector = async (payload) => { sent.push(structuredClone(payload)); };
+  state.localHost = HOST;
+  state.targetPlatform = HOST.platform;
+  state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshotGeneration = 9;
+  state.localSnapshot = {
+    host: HOST,
+    observedAt: 1_000,
+    snapshot: {
+      ...structuredClone(SNAPSHOT),
+      activeModelId: "gpt-5.6-sol",
+      activeModelDisplayName: "5.6 Sol",
+      reasoningEffort: "high",
+      modelCatalog: [{
+        modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+        supportedReasoningEfforts: ["medium", "high", "ultra"]
+      }]
+    }
+  };
+
+  controller.registerDialPropertyInspector(action);
+  await settle();
+  assert.equal(sent.length, 1, "appear pushes current authority");
+  assert.deepEqual(sent[0], {
+    kind: "model-catalog",
+    requestGeneration: 0,
+    catalogRevision: 1,
+    available: true,
+    hostId: HOST.hostId,
+    platform: HOST.platform,
+    snapshotGeneration: 9,
+    activeModelId: "gpt-5.6-sol",
+    activeModelDisplayName: "5.6 Sol",
+    reasoningEffort: "high",
+    modelCatalog: [{
+      modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["medium", "high", "ultra"]
+    }]
+  });
+
+  controller.handleDialPropertyInspectorMessage(action, { kind: "request-model-catalog", requestGeneration: 7 });
+  await settle();
+  assert.equal((sent.at(-1) as { requestGeneration: number }).requestGeneration, 7);
+  assert.equal((sent.at(-1) as { catalogRevision: number }).catalogRevision, 2);
+
+  for (const invalid of [
+    { kind: "request-model-catalog", requestGeneration: 7, extra: true },
+    { kind: "request-model-catalog", requestGeneration: -1 },
+    Object.assign(Object.create({ kind: "request-model-catalog" }), { requestGeneration: 1 }),
+    Object.defineProperty({}, "kind", { get() { throw new Error("getter"); } })
+  ]) controller.handleDialPropertyInspectorMessage(action, invalid);
+  await settle();
+  assert.equal(sent.length, 2, "invalid requests are ignored without accessors");
+});
+
+test("property inspector catalog pushes are deduped, monotonic, fenced, and failure-safe", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const firstSent: unknown[] = [];
+  const secondSent: unknown[] = [];
+  const first = fakeDial("catalog-life") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  first.sendToPropertyInspector = async (payload) => { firstSent.push(structuredClone(payload)); };
+  state.localHost = HOST;
+  state.targetPlatform = HOST.platform;
+  state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshotGeneration = 1;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: {
+      ...structuredClone(SNAPSHOT), activeModelId: "gpt-5.6-sol", activeModelDisplayName: "5.6 Sol",
+      reasoningEffort: "high", modelCatalog: [{
+        modelId: "gpt-5.6-sol", displayName: "5.6 Sol", supportedReasoningEfforts: ["high"]
+      }]
+    }
+  };
+  controller.registerDialPropertyInspector(first);
+  await settle();
+  await state.renderAll();
+  assert.equal(firstSent.length, 1, "unchanged authority is deduped");
+
+  state.localSnapshotGeneration = 2;
+  state.localSnapshot.snapshot.reasoningEffort = "medium";
+  state.localSnapshot.snapshot.modelCatalog![0]!.supportedReasoningEfforts = ["medium", "high"];
+  await state.renderAll();
+  assert.equal(firstSent.length, 2);
+  assert.equal((firstSent[1] as { catalogRevision: number }).catalogRevision, 2);
+
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 2_000 }),
+    currentSnapshot: () => ({
+      host: REMOTE_HOST, observedAt: 22,
+      snapshot: {
+        ...structuredClone(SNAPSHOT), activeModelId: "gpt-5.6-terra", activeModelDisplayName: "5.6 Terra",
+        reasoningEffort: "medium", modelCatalog: [{
+          modelId: "gpt-5.6-terra", displayName: "5.6 Terra", supportedReasoningEfforts: ["medium"]
+        }]
+      }
+    }),
+    async send() {}
+  };
+  state.targetPlatform = REMOTE_HOST.platform;
+  state.targetHostId = REMOTE_HOST.hostId;
+  await state.renderAll();
+  assert.equal((firstSent[2] as { hostId: string }).hostId, REMOTE_HOST.hostId, "host switch pushes without reopen");
+  assert.equal((firstSent[2] as { catalogRevision: number }).catalogRevision, 3);
+
+  controller.unregisterDialPropertyInspector(first);
+  const second = fakeDial("catalog-life") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  second.sendToPropertyInspector = async (payload) => { secondSent.push(structuredClone(payload)); };
+  controller.registerDialPropertyInspector(second);
+  await settle();
+  assert.equal((secondSent[0] as { catalogRevision: number }).catalogRevision, 4);
+
+  controller.handleDialPropertyInspectorMessage(first, { kind: "request-model-catalog", requestGeneration: 9 });
+  await settle();
+  assert.equal(firstSent.length, 3, "stale action cannot receive replies");
+  assert.equal(secondSent.length, 1);
+
+  second.sendToPropertyInspector = async () => { throw new Error("closed inspector"); };
+  state.targetPlatform = HOST.platform;
+  state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: 2_000 };
+  await assert.doesNotReject(state.renderAll());
+  controller.unregisterDialPropertyInspector(second);
+});
+
+test("late catalog send from a disappeared inspector carries an older fenced revision", async () => {
+  const controller = new DeckController();
+  const state = probe(controller);
+  const late = deferred<void>();
+  const delivered: Array<{ owner: string; payload: unknown }> = [];
+  const oldAction = fakeDial("catalog-late") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  oldAction.sendToPropertyInspector = async (payload) => {
+    await late.promise;
+    delivered.push({ owner: "old", payload: structuredClone(payload) });
+  };
+  const replacement = fakeDial("catalog-late") as FakeDial & { sendToPropertyInspector(payload: unknown): Promise<void> };
+  replacement.sendToPropertyInspector = async (payload) => {
+    delivered.push({ owner: "new", payload: structuredClone(payload) });
+  };
+  state.localHost = HOST;
+  state.targetPlatform = HOST.platform;
+  state.targetHostId = HOST.hostId;
+  state.localHealth = { state: "degraded", reason: "local-bridge-unavailable", changedAt: 1_000 };
+
+  controller.registerDialPropertyInspector(oldAction);
+  controller.unregisterDialPropertyInspector(oldAction);
+  controller.registerDialPropertyInspector(replacement);
+  await settle();
+  late.resolve();
+  await settle();
+
+  assert.deepEqual(delivered.map(({ owner }) => owner), ["new", "old"]);
+  assert.deepEqual(delivered.map(({ payload }) => (payload as { catalogRevision: number }).catalogRevision), [2, 1]);
+  controller.unregisterDialPropertyInspector(replacement);
 });

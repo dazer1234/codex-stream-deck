@@ -99,7 +99,7 @@ class FakeDocument {
   readonly elements = new Map<string, FakeElement>();
 
   constructor(source: string) {
-    const elementPattern = /<(select|input|div|section|label|p|textarea)[^>]*\bid=["']([^"']+)["'][^>]*>/gi;
+    const elementPattern = /<(select|input|button|div|section|label|p|textarea)[^>]*\bid=["']([^"']+)["'][^>]*>/gi;
     for (const match of source.matchAll(elementPattern)) {
       const tagName = match[1]?.toUpperCase();
       const id = match[2];
@@ -212,6 +212,20 @@ function actionCheckboxes(document: FakeDocument): FakeElement[] {
     .filter(({ tagName, type }) => tagName === "INPUT" && type === "checkbox");
 }
 
+function modelPresetRows(document: FakeDocument): FakeElement[] {
+  return field(document, "model-preset-items").children;
+}
+
+const MODEL_CATALOG = [{
+  modelId: "gpt-5.6-sol",
+  displayName: "5.6 Sol",
+  supportedReasoningEfforts: ["low", "medium", "high", "ultra"]
+}, {
+  modelId: "gpt-5.6-terra",
+  displayName: "5.6 Terra",
+  supportedReasoningEfforts: ["low", "medium", "high", "ultra"]
+}];
+
 function adapterHarness(): { adapter: CodexDialAction; calls: ControllerCall[] } {
   const calls: ControllerCall[] = [];
   const controller = {
@@ -221,7 +235,12 @@ function adapterHarness(): { adapter: CodexDialAction; calls: ControllerCall[] }
     rotateDial(action: unknown, ticks: number) { calls.push({ method: "rotate", action, payload: ticks }); },
     async beginDialPress(action: unknown) { calls.push({ method: "down", action }); },
     async finishDialPress(action: unknown) { calls.push({ method: "up", action }); },
-    async touchDial(action: unknown) { calls.push({ method: "touch", action }); }
+    async touchDial(action: unknown) { calls.push({ method: "touch", action }); },
+    registerDialPropertyInspector(action: unknown) { calls.push({ method: "pi-appear", action }); },
+    unregisterDialPropertyInspector(action: unknown) { calls.push({ method: "pi-disappear", action }); },
+    handleDialPropertyInspectorMessage(action: unknown, payload: unknown) {
+      calls.push({ method: "pi-message", action, payload });
+    }
   };
   return {
     adapter: new CodexDialAction(controller as unknown as DeckController),
@@ -272,6 +291,165 @@ test("Codex Dial adapter forwards all Encoder event families and ignores held to
   assert.equal(calls[0]?.action, dial);
   assert.equal(calls[0]?.payload, settings);
   assert.equal(calls[2]?.payload, -2);
+});
+
+test("Codex Dial adapter forwards property inspector lifecycle and messages only for dials", () => {
+  const { adapter, calls } = adapterHarness();
+  const dial = { id: "dial-pi", isDial: () => true };
+  const key = { id: "key-pi", isDial: () => false };
+  const request = { kind: "request-model-catalog", requestGeneration: 7 };
+
+  adapter.onPropertyInspectorDidAppear?.({ action: dial } as never);
+  adapter.onSendToPlugin?.({ action: dial, payload: request } as never);
+  adapter.onPropertyInspectorDidDisappear?.({ action: dial } as never);
+  adapter.onPropertyInspectorDidAppear?.({ action: key } as never);
+  adapter.onSendToPlugin?.({ action: key, payload: request } as never);
+  adapter.onPropertyInspectorDidDisappear?.({ action: key } as never);
+
+  assert.deepEqual(calls.map(({ method }) => method), ["pi-appear", "pi-message", "pi-disappear"]);
+  assert.equal(calls[1]?.action, dial);
+  assert.equal(calls[1]?.payload, request);
+});
+
+test("property inspector exposes the Model Presets editor and requests live authority", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  assert.match(await text("static/property-inspector/codex-dial.html"), /<option value="model-presets">Model Presets<\/option>/);
+  for (const id of ["model-presets-panel", "model-preset-items", "add-model-preset", "model-catalog-status"]) field(document, id);
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-models", payload: { settings: expandDialPreset("model-presets") } })
+  );
+  sockets[0]?.open();
+  assert.equal(field(document, "preset").value, "model-presets");
+  assert.deepEqual(decodedMessages(sockets[0]!)[1], {
+    event: "sendToPlugin",
+    context: "dial-models",
+    payload: { kind: "request-model-catalog", requestGeneration: 1 }
+  });
+  assert.equal(field(document, "model-presets-panel").hidden, false);
+  assert.match(field(document, "model-catalog-status").textContent, /unavailable|waiting|offline/i);
+});
+
+test("authoritative catalog seeds preferred pairs and editor persists complete unique v2 rows", async () => {
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-seed", payload: { settings: expandDialPreset("model-presets") } })
+  );
+  sockets[0]?.open();
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 4,
+      activeModelId: "gpt-5.6-sol", activeModelDisplayName: "5.6 Sol", reasoningEffort: "high",
+      modelCatalog: MODEL_CATALOG
+    }
+  });
+  assert.equal(modelPresetRows(document).length, 3);
+  const seeded = decodedMessages(sockets[0]!).at(-1)?.payload as { version: number; modelPresets: unknown[] };
+  assert.equal(seeded.version, 2);
+  assert.deepEqual(seeded.modelPresets, [
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]);
+
+  field(document, "add-model-preset").dispatch("click");
+  assert.equal(modelPresetRows(document).length, 4);
+  const last = decodedMessages(sockets[0]!).at(-1)?.payload as Record<string, unknown>;
+  assert.equal(last.version, 2);
+  assert.equal(last.preset, "model-presets");
+  assert.deepEqual(last.rotation, { kind: "model-presets" });
+  assert.equal(last.feedback, "model-presets");
+  assert.equal(last.press, "none");
+  assert.equal(last.touchTap, "keycap.FAST");
+
+  const rows = modelPresetRows(document);
+  const down = rows[0]?.descendants().find(({ tagName, dataset }) => tagName === "BUTTON" && dataset.direction === "down");
+  assert.ok(down);
+  down.dispatch("click");
+  assert.match(down.getAttribute("aria-label") ?? "", /^Move .+ down$/);
+  const remove = modelPresetRows(document)[0]?.descendants().find(({ tagName, dataset }) => tagName === "BUTTON" && dataset.action === "remove");
+  assert.ok(remove);
+  remove.dispatch("click");
+  assert.equal(modelPresetRows(document).length, 3);
+});
+
+test("model preset catalog ordering is monotonic and saved unknown or Ultra rows survive offline filtering", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"),
+    modelPresets: [
+      { modelId: "gpt-unknown", reasoningEffort: "medium" },
+      { modelId: "gpt-5.6-sol", reasoningEffort: "ultra" }
+    ]
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-stale", payload: { settings } })
+  );
+  sockets[0]?.open();
+  assert.equal(modelPresetRows(document).length, 2, "saved rows render before catalog authority");
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 5, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 8,
+      activeModelId: "gpt-5.6-sol", activeModelDisplayName: "5.6 Sol", reasoningEffort: "high",
+      modelCatalog: MODEL_CATALOG
+    }
+  });
+  const firstStatus = field(document, "model-catalog-status").textContent;
+  assert.match(firstStatus, /host-a|connected/i);
+  assert.equal(modelPresetRows(document).length, 2);
+  const ultraEffort = modelPresetRows(document)[1]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.equal(ultraEffort?.value, "ultra", "disabled Ultra is preserved in an existing row");
+
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: { kind: "model-catalog", requestGeneration: 1, catalogRevision: 4, available: false }
+  });
+  assert.equal(field(document, "model-catalog-status").textContent, firstStatus, "stale revision is ignored");
+  assert.equal(modelPresetRows(document).length, 2);
+});
+
+test("model preset editor caps twelve rows and rejects duplicate pairs", async () => {
+  const settings = {
+    ...expandDialPreset("model-presets"), customized: true,
+    modelPresets: [{ modelId: "gpt-model", reasoningEffort: "high" }]
+  };
+  const { document, sockets, connect } = await inspectorHarness();
+  connect(
+    "24680", "plugin-uuid", "registerPropertyInspector", "{}",
+    JSON.stringify({ context: "dial-cap-models", payload: { settings } })
+  );
+  sockets[0]?.open();
+  const efforts = ["high", ...Array.from({ length: 14 }, (_, index) => `effort-${index}`)];
+  sockets[0]?.message({
+    event: "sendToPropertyInspector",
+    payload: {
+      kind: "model-catalog", requestGeneration: 1, catalogRevision: 1, available: true,
+      hostId: "host-a", platform: "darwin", snapshotGeneration: 1,
+      activeModelId: "gpt-model", activeModelDisplayName: "Model", reasoningEffort: "high",
+      modelCatalog: [{ modelId: "gpt-model", displayName: "Model", supportedReasoningEfforts: efforts }]
+    }
+  });
+  for (let index = 0; index < 20; index += 1) field(document, "add-model-preset").dispatch("click");
+  assert.equal(modelPresetRows(document).length, 12);
+  assert.equal(field(document, "add-model-preset").disabled, true);
+  const persisted = decodedMessages(sockets[0]!).at(-1)?.payload as { modelPresets: Array<{ modelId: string; reasoningEffort: string }> };
+  assert.equal(new Set(persisted.modelPresets.map(({ modelId, reasoningEffort }) => `${modelId}:${reasoningEffort}`)).size, 12);
+
+  const secondEffort = modelPresetRows(document)[1]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.ok(secondEffort);
+  secondEffort.value = "high";
+  secondEffort.dispatch("change");
+  const rerenderedSecond = modelPresetRows(document)[1]?.descendants().find(({ tagName, dataset }) =>
+    tagName === "SELECT" && dataset.field === "effort");
+  assert.notEqual(rerenderedSecond?.value, "high", "a duplicate edit is reverted without persistence");
 });
 
 test("Codex Dial registration paths reject non-dial actions", () => {
@@ -340,7 +518,7 @@ test("property inspector exposes presets and independent gesture controls", asyn
   assert.match(source, />Include Ultra</);
   assert.match(source, /When off, clockwise reasoning stops below Ultra\. Manual Codex selection is unchanged\./);
   assert.match(source, /setSettings/);
-  assert.match(source, /version:\s*1/);
+  assert.match(source, /version:\s*2/);
   assert.match(source, /customized:\s*true/);
   assert.match(source, /usage\.rate-limit-reset/);
 });
@@ -354,7 +532,11 @@ test("property inspector registers, initializes, reconnects, and accepts incomin
   assert.equal(sockets[0]?.url, "ws://127.0.0.1:24680");
   sockets[0]?.open();
   assert.deepEqual(decodedMessages(sockets[0]!), [
-    { event: "registerPropertyInspector", uuid: "plugin-uuid" }
+    { event: "registerPropertyInspector", uuid: "plugin-uuid" },
+    {
+      event: "sendToPlugin", context: "dial-1",
+      payload: { kind: "request-model-catalog", requestGeneration: 1 }
+    }
   ]);
   assert.equal(field(document, "preset").value, "agents");
   assert.equal(field(document, "paired-controls").hidden, true);
@@ -687,6 +869,10 @@ test("pre-open edits flush only the latest complete settings after registration"
   assert.deepEqual(decodedMessages(sockets[0]!), [
     { event: "registerPropertyInspector", uuid: "plugin-uuid" },
     {
+      event: "sendToPlugin", context: "dial-pending",
+      payload: { kind: "request-model-catalog", requestGeneration: 1 }
+    },
+    {
       event: "setSettings",
       context: "dial-pending",
       payload: { ...expandDialPreset("actions"), feedback: "static", customized: true }
@@ -759,7 +945,7 @@ test("custom edits serialize ordering, visibility, limits, and only setSettings 
   }
   last = decodedMessages(sockets[0]!).at(-1);
   assert.equal((last?.payload as { rotation: { items: string[] } }).rotation.items.length, 30);
-  assert.equal(decodedMessages(sockets[0]!).slice(1).every(({ event }) => event === "setSettings"), true);
+  assert.equal(decodedMessages(sockets[0]!).slice(2).every(({ event }) => event === "setSettings"), true);
 });
 
 test("build script wiring declares every Encoder asset without running the build", async () => {

@@ -4,11 +4,15 @@ import {
   type DialRotateEvent,
   type DialUpEvent,
   type DidReceiveSettingsEvent,
+  type PropertyInspectorDidAppearEvent,
+  type PropertyInspectorDidDisappearEvent,
+  type SendToPluginEvent,
   SingletonAction,
   type TouchTapEvent,
   type WillAppearEvent,
   type WillDisappearEvent
 } from "@elgato/streamdeck";
+import type { JsonValue } from "@elgato/utils";
 import type { DeckController } from "./controller.js";
 import type { CodexDialSettings } from "./dial-types.js";
 
@@ -26,6 +30,18 @@ export class CodexDialAction extends SingletonAction<CodexDialSettings> {
 
   override onWillDisappear(ev: WillDisappearEvent<CodexDialSettings>): void {
     this.controller.unregisterDial(ev.action);
+  }
+
+  override onPropertyInspectorDidAppear(ev: PropertyInspectorDidAppearEvent<CodexDialSettings>): void {
+    if (ev.action.isDial()) this.controller.registerDialPropertyInspector(ev.action);
+  }
+
+  override onPropertyInspectorDidDisappear(ev: PropertyInspectorDidDisappearEvent<CodexDialSettings>): void {
+    if (ev.action.isDial()) this.controller.unregisterDialPropertyInspector(ev.action);
+  }
+
+  override onSendToPlugin(ev: SendToPluginEvent<JsonValue, CodexDialSettings>): void {
+    if (ev.action.isDial()) this.controller.handleDialPropertyInspectorMessage(ev.action, ev.payload);
   }
 
   override onDialRotate(ev: DialRotateEvent<CodexDialSettings>): void {
