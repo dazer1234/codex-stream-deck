@@ -311,6 +311,10 @@ test("renderer snapshot expression reads only authoritative reasoning triggers",
   const escapedTriggerSelector = triggerSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(source, new RegExp(`readActiveReasoningEffort\\(document\\.querySelectorAll\\(\\s*'${escapedTriggerSelector}'`));
   assert.match(source, new RegExp(`readActiveFastMode\\(document\\.querySelectorAll\\(\\s*'${escapedTriggerSelector}'`));
+  assert.match(source, new RegExp(`readActiveReasoningMetadata\\(document\\.querySelectorAll\\(\\s*'${escapedTriggerSelector}'`));
+  assert.match(source, /activeModelId:\s*reasoningMetadata\.modelId/);
+  assert.match(source, /activeModelDisplayName:\s*reasoningMetadata\.modelDisplayName/);
+  assert.match(source, /modelCatalog:\s*reasoningMetadata\.modelCatalog/);
   assert.match(source, /svg\[class\*="ModelPickerTriggerInlineFastIcon"\]/);
 });
 
@@ -387,7 +391,8 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
     elements: Iterable<Record<string, unknown>>,
     reactRootFiber: unknown,
     isVisible: (element: Record<string, unknown>) => boolean
-  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  ) => { currentEffort: string; modelId: string; modelDisplayName: string;
+    supportedEfforts: string[]; modelCatalog: unknown[] } | undefined;
   const efforts = ["medium", "low", "high", "xhigh", "max", "ultra"];
   const modelsQuery = {
     queryKey: ["models", "list"],
@@ -450,7 +455,15 @@ test("active reasoning metadata resolves the unique visible reasoning model labe
   assert.deepEqual(read([trigger], reactRootFiber, (element) => element.visible === true), {
     currentEffort: "high",
     modelId: "gpt-5.6-sol",
-    supportedEfforts: efforts
+    modelDisplayName: "5.6 Sol",
+    supportedEfforts: efforts,
+    modelCatalog: [
+      {
+        modelId: "gpt-5.3-codex-spark", displayName: "5.3 Codex Spark",
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+      },
+      { modelId: "gpt-5.6-sol", displayName: "5.6 Sol", supportedReasoningEfforts: efforts }
+    ]
   });
   assert.equal(read([
     trigger,
@@ -467,7 +480,8 @@ test("reasoning metadata resolves the live display-contents model leaf and ignor
     reactRootFiber: unknown,
     isVisible: (element: Record<string, any>) => boolean,
     isExplicitlyHidden: (element: Record<string, any>) => boolean
-  ) => { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined;
+  ) => { currentEffort: string; modelId: string; modelDisplayName: string;
+    supportedEfforts: string[]; modelCatalog: unknown[] } | undefined;
   const queryClient = new ReasoningQueryClientFixture([[['models', 'list'], {
     data: [{
       displayName: "GPT-5.6-Terra",
@@ -537,7 +551,12 @@ test("reasoning metadata resolves the live display-contents model leaf and ignor
   }, hasGeometry, isExplicitlyHidden), {
     currentEffort: "medium",
     modelId: "gpt-5.6-terra",
-    supportedEfforts: ["low", "medium", "high"]
+    modelDisplayName: "5.6 Terra",
+    supportedEfforts: ["low", "medium", "high"],
+    modelCatalog: [{
+      modelId: "gpt-5.6-terra", displayName: "5.6 Terra",
+      supportedReasoningEfforts: ["low", "medium", "high"]
+    }]
   });
 });
 
@@ -834,7 +853,12 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.deepEqual(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], goodRoot(), visible), {
     currentEffort: "high",
     modelId: "gpt-5.6-sol",
-    supportedEfforts: ["low", "high", "ultra"]
+    modelDisplayName: "5.6 Sol",
+    supportedEfforts: ["low", "high", "ultra"],
+    modelCatalog: [{
+      modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "high", "ultra"]
+    }]
   }, "unmatched visible text does not make one catalog match ambiguous");
   assert.equal(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], root([
     record(), record("GPT-5.6-Pro", "gpt-5.6-pro")
@@ -860,7 +884,12 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.deepEqual(read([trigger([{ text: " 5.6-sol " }])], goodRoot(), visible), {
     currentEffort: "high",
     modelId: "gpt-5.6-sol",
-    supportedEfforts: ["low", "high", "ultra"]
+    modelDisplayName: "5.6 Sol",
+    supportedEfforts: ["low", "high", "ultra"],
+    modelCatalog: [{
+      modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "high", "ultra"]
+    }]
   }, "normalization permits case and space-hyphen equivalence");
   assert.equal(read([trigger([{ text: "GPT-5.6-Sol" }])], goodRoot(), visible), undefined,
     "the optional GPT brand token applies only to catalog display names");
@@ -875,7 +904,12 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   assert.deepEqual(read([trigger([{ text: "5.6 Sol" }])], root([record()], [duplicateEntry]), visible), {
     currentEffort: "high",
     modelId: "gpt-5.6-sol",
-    supportedEfforts: ["low", "high", "ultra"]
+    modelDisplayName: "5.6 Sol",
+    supportedEfforts: ["low", "high", "ultra"],
+    modelCatalog: [{
+      modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "high", "ultra"]
+    }]
   }, "identical validated records across query entries count as one catalog match");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record(undefined, undefined, ["low", "high"])]), visible),
     undefined, "raw string effort arrays are unavailable");
@@ -1102,6 +1136,108 @@ test("reasoning catalog deduplicates only identical fully validated matches", ()
     ])
   ], ["5.6 Sol", "5.6 Terra"]), undefined,
   "conflicting normalized display names remain ambiguous");
+});
+
+test("model catalog exposes the complete bounded authoritative catalog and active model", () => {
+  const readCatalog = Reflect.get(microBridgeModule, "readReasoningModelCatalog") as (
+    queryClients: Iterable<unknown>
+  ) => Array<{
+    modelId: string;
+    displayName: string;
+    supportedReasoningEfforts: string[];
+  }> | undefined;
+  const matchActive = Reflect.get(microBridgeModule, "matchActiveReasoningModel") as (
+    visibleLabels: unknown,
+    catalog: unknown
+  ) => { modelId: string; displayName: string; supportedReasoningEfforts: string[] } | undefined;
+  assert.equal(typeof readCatalog, "function");
+  assert.equal(typeof matchActive, "function");
+
+  const records = [
+    {
+      displayName: "GPT-5.6-Sol",
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+        .map((reasoningEffort) => ({ reasoningEffort }))
+    },
+    {
+      displayName: "GPT-5.6-Terra",
+      model: "gpt-5.6-terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+        .map((reasoningEffort) => ({ reasoningEffort }))
+    }
+  ];
+  const catalog = readCatalog([
+    new ReasoningQueryClientFixture([[['models', 'list', 'local', 'chatgpt', 100], { data: records }]])
+  ]);
+  assert.deepEqual(catalog, [
+    {
+      modelId: "gpt-5.6-sol",
+      displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+    },
+    {
+      modelId: "gpt-5.6-terra",
+      displayName: "5.6 Terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+    }
+  ]);
+  assert.deepEqual(matchActive(["5.6 Sol"], catalog), catalog?.[0]);
+
+  const readMetadata = Reflect.get(microBridgeModule, "readActiveReasoningMetadata") as (
+    elements: Iterable<unknown>, reactRootFiber: unknown,
+    isVisible: (element: any) => boolean,
+    isExplicitlyHidden: (element: any) => boolean
+  ) => unknown;
+  const visible = (element: { visible?: boolean }) => element.visible !== false;
+  const trigger: Record<string, any> = {
+    visible: true,
+    getAttribute: (name: string) => ({
+      "data-codex-intelligence-trigger": "true",
+      "data-composer-navigation-target": "reasoning",
+      "data-selected-reasoning-effort": "high"
+    } as Record<string, string>)[name] ?? null
+  };
+  const leaf = {
+    visible: true, children: [], textContent: "5.6 Sol", parentElement: trigger,
+    getAttribute: () => null
+  };
+  trigger.querySelectorAll = (selector: string) => selector === "*" ? [leaf] : [];
+  const queryClient = new ReasoningQueryClientFixture([[['models', 'list'], { data: records }]]);
+  assert.deepEqual(readMetadata(
+    [trigger], { memoizedProps: { value: queryClient }, dependencies: null, child: null, sibling: null },
+    visible, () => false
+  ), {
+    currentEffort: "high",
+    modelId: "gpt-5.6-sol",
+    modelDisplayName: "5.6 Sol",
+    supportedEfforts: ["low", "medium", "high", "xhigh", "ultra"],
+    modelCatalog: catalog
+  });
+});
+
+test("model catalog rejects authority beyond public bounds or with conflicting complete records", () => {
+  const readCatalog = Reflect.get(microBridgeModule, "readReasoningModelCatalog") as (
+    queryClients: Iterable<unknown>
+  ) => unknown;
+  const record = (index: number, efforts = 1) => ({
+    displayName: `GPT-Model-${index}`,
+    model: `model-${index}`,
+    supportedReasoningEfforts: Array.from({ length: efforts }, (_, effort) => ({
+      reasoningEffort: `effort-${effort}`
+    }))
+  });
+  const client = (records: unknown[]) => new ReasoningQueryClientFixture([
+    [["models", "list"], { data: records }]
+  ]);
+  const maximumCatalog = readCatalog([client(Array.from({ length: 32 }, (_, index) =>
+    record(index, index === 0 ? 16 : 1)))]) as unknown[];
+  assert.equal(maximumCatalog.length, 32);
+  assert.equal((maximumCatalog[0] as { supportedReasoningEfforts: unknown[] })
+    .supportedReasoningEfforts.length, 16);
+  assert.equal(readCatalog([client(Array.from({ length: 33 }, (_, index) => record(index)))]), undefined);
+  assert.equal(readCatalog([client([record(0, 17)])]), undefined);
+  assert.equal(readCatalog([client([record(0), { ...record(0), displayName: "GPT-Other" }])]), undefined);
 });
 
 test("rate-limit reset applicability requires an explicit positive safe integer", async () => {

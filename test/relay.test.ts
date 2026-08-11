@@ -421,6 +421,78 @@ test("relay parser rejects malformed snapshot fields before activity merge", () 
   assert.deepEqual(new HostActivityIndex().merge(accepted, 2_000, host.hostId), []);
 });
 
+test("relay snapshot parser strictly validates a complete active model catalog", () => {
+  const packet = {
+    type: "snapshot", protocol: 1, host: structuredClone(host), observedAt: 2_000,
+    snapshot: {
+      ...structuredClone(snapshot),
+      reasoningEffort: "high",
+      activeModelId: "gpt-5.6-sol",
+      activeModelDisplayName: "5.6 Sol",
+      modelCatalog: [
+        {
+          modelId: "gpt-5.6-sol",
+          displayName: "5.6 Sol",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+        },
+        {
+          modelId: "gpt-5.6-terra",
+          displayName: "5.6 Terra",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+        }
+      ]
+    }
+  };
+  assert.deepEqual(parseRelayServerMessage(packet), packet);
+  assert.ok(Buffer.byteLength(JSON.stringify(packet), "utf8") < 64 * 1024);
+  const maximumPacket = structuredClone(packet);
+  maximumPacket.snapshot.modelCatalog = Array.from({ length: 32 }, (_, index) => ({
+    modelId: `model-${index}`,
+    displayName: `Model ${index}`,
+    supportedReasoningEfforts: Array.from({ length: index === 0 ? 16 : 1 },
+      (_, effort) => `effort-${effort}`)
+  }));
+  maximumPacket.snapshot.activeModelId = "model-0";
+  maximumPacket.snapshot.activeModelDisplayName = "Model 0";
+  assert.deepEqual(parseRelayServerMessage(maximumPacket), maximumPacket);
+  assert.ok(Buffer.byteLength(JSON.stringify(maximumPacket), "utf8") < 64 * 1024);
+
+  const invalid: unknown[] = [];
+  const add = (mutate: (candidate: any) => void): void => {
+    const candidate = structuredClone(packet);
+    mutate(candidate);
+    invalid.push(candidate);
+  };
+  add((candidate) => { delete candidate.snapshot.activeModelId; });
+  add((candidate) => { delete candidate.snapshot.activeModelDisplayName; });
+  add((candidate) => { delete candidate.snapshot.modelCatalog; });
+  add((candidate) => { candidate.snapshot.activeModelId = "missing-model"; });
+  add((candidate) => { candidate.snapshot.activeModelDisplayName = "Wrong Name"; });
+  add((candidate) => { candidate.snapshot.activeModelId = " bad-model"; });
+  add((candidate) => { candidate.snapshot.activeModelId = "x".repeat(129); });
+  add((candidate) => { candidate.snapshot.activeModelDisplayName = "x".repeat(81); });
+  add((candidate) => { candidate.snapshot.modelCatalog = Array.from({ length: 33 }, (_, index) => ({
+    modelId: `model-${index}`, displayName: `Model ${index}`, supportedReasoningEfforts: ["high"]
+  })); });
+  add((candidate) => { candidate.snapshot.modelCatalog[0].supportedReasoningEfforts =
+    Array.from({ length: 17 }, (_, index) => `effort-${index}`); });
+  add((candidate) => { candidate.snapshot.modelCatalog[0].supportedReasoningEfforts = ["high", "high"]; });
+  add((candidate) => { candidate.snapshot.modelCatalog.push(structuredClone(candidate.snapshot.modelCatalog[0])); });
+  add((candidate) => { candidate.snapshot.modelCatalog[0].extra = true; });
+  add((candidate) => { candidate.snapshot.modelCatalog[0].supportedReasoningEfforts[0] = " high"; });
+  add((candidate) => { candidate.snapshot.modelCatalog[0].supportedReasoningEfforts[0] = "x".repeat(65); });
+  for (const candidate of invalid) assert.equal(parseRelayServerMessage(candidate), null);
+
+  let accessorReads = 0;
+  const accessorPacket = structuredClone(packet);
+  Object.defineProperty(accessorPacket.snapshot.modelCatalog[0], "modelId", {
+    enumerable: true,
+    get() { accessorReads++; return "gpt-5.6-sol"; }
+  });
+  assert.doesNotThrow(() => assert.equal(parseRelayServerMessage(accessorPacket), null));
+  assert.equal(accessorReads, 0, "catalog accessors are never invoked at the relay boundary");
+});
+
 test("relay parser bounds host identity and ready capabilities", () => {
   const ready = {
     type: "ready", protocol: 1, host: structuredClone(host),

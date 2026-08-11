@@ -70,10 +70,22 @@ export type UsageSnapshot = {
   resetCreditsApplicable: number | null;
 };
 
+export type CodexModelCatalogEntry = {
+  modelId: string;
+  displayName: string;
+  supportedReasoningEfforts: string[];
+};
+
 export type MicroSnapshot = {
   slots: MicroAgentSlot[];
   /** Current reasoning effort selected in the active renderer composer. */
   reasoningEffort?: string;
+  /** Authoritative active model identity from the visible composer model picker. */
+  activeModelId?: string;
+  /** User-facing name for the authoritative active model. */
+  activeModelDisplayName?: string;
+  /** Complete bounded model catalog associated with the active model authority. */
+  modelCatalog?: CodexModelCatalogEntry[];
   /** Whether the active visible Codex reasoning trigger authoritatively reports Fast mode. */
   fastModeEnabled?: boolean;
   /** Task currently open in the Codex renderer, even when it is outside the six native Micro slots. */

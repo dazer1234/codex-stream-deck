@@ -318,28 +318,63 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
 }
 
 function isSnapshot(value: unknown): value is MicroSnapshot {
-  if (!isRecord(value) || !Array.isArray(value.slots) || value.slots.length !== 6 || !isLayout(value.layout)) return false;
-  if (!value.slots.every((slot, index) => isRecord(slot) && slot.id === index &&
+  const snapshot = snapshotOwnDataRecord(value);
+  if (!snapshot || !Array.isArray(snapshot.slots) || snapshot.slots.length !== 6 || !isLayout(snapshot.layout)) return false;
+  if (!snapshot.slots.every((slot, index) => isRecord(slot) && slot.id === index &&
     (slot.threadKey === null || isThreadKey(slot.threadKey)) &&
     (slot.title === null || (typeof slot.title === "string" && slot.title.length <= 240)) &&
     boundedNonblankString(slot.status, 64) && typeof slot.selected === "boolean" &&
     (slot.activityAt === undefined || validProtocolTimestamp(slot.activityAt) != null) &&
     (slot.ownedByHost === undefined || typeof slot.ownedByHost === "boolean") &&
     (slot.contextUsedPercent === undefined || finitePercent(slot.contextUsedPercent)))) return false;
-  if (!(["pinned", "recent", "priority", "custom"] as const).includes(value.agentSource as never)) return false;
-  if (!boundedNonblankString(value.lightingAutoOff, 64) || !(["light", "dark"] as const).includes(value.theme as never)) return false;
-  if (value.activeThreadKey !== undefined && !isThreadKey(value.activeThreadKey)) return false;
-  if (value.activeThreadTitle !== undefined && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
-  if (value.reasoningEffort !== undefined && !isSafeReasoningIdentifier(value.reasoningEffort)) return false;
-  if (value.fastModeEnabled !== undefined && typeof value.fastModeEnabled !== "boolean") return false;
-  if (value.usage !== undefined && !isUsageSnapshot(value.usage)) return false;
-  if (value.hostSessions === undefined) return true;
-  return Array.isArray(value.hostSessions) && value.hostSessions.length <= 128 && value.hostSessions.every((session) =>
+  if (!(["pinned", "recent", "priority", "custom"] as const).includes(snapshot.agentSource as never)) return false;
+  if (!boundedNonblankString(snapshot.lightingAutoOff, 64) || !(["light", "dark"] as const).includes(snapshot.theme as never)) return false;
+  if (snapshot.activeThreadKey !== undefined && !isThreadKey(snapshot.activeThreadKey)) return false;
+  if (snapshot.activeThreadTitle !== undefined && (typeof snapshot.activeThreadTitle !== "string" || snapshot.activeThreadTitle.length > 240)) return false;
+  if (snapshot.reasoningEffort !== undefined && !isSafeReasoningIdentifier(snapshot.reasoningEffort)) return false;
+  if (snapshot.fastModeEnabled !== undefined && typeof snapshot.fastModeEnabled !== "boolean") return false;
+  const hasActiveModelId = Object.prototype.hasOwnProperty.call(snapshot, "activeModelId");
+  const hasActiveModelDisplayName = Object.prototype.hasOwnProperty.call(snapshot, "activeModelDisplayName");
+  const hasModelCatalog = Object.prototype.hasOwnProperty.call(snapshot, "modelCatalog");
+  if (!(hasActiveModelId === hasActiveModelDisplayName && hasActiveModelId === hasModelCatalog)) return false;
+  if (hasModelCatalog && !isActiveModelCatalog(
+    snapshot.activeModelId, snapshot.activeModelDisplayName, snapshot.modelCatalog
+  )) return false;
+  if (snapshot.usage !== undefined && !isUsageSnapshot(snapshot.usage)) return false;
+  if (snapshot.hostSessions === undefined) return true;
+  return Array.isArray(snapshot.hostSessions) && snapshot.hostSessions.length <= 128 && snapshot.hostSessions.every((session) =>
     isRecord(session) && isThreadKey(session.threadId) && validProtocolTimestamp(session.activityAt) != null &&
     typeof session.status === "string" && ["idle", "working", "complete"].includes(session.status) &&
     (session.completionRevision === undefined || integerIn(session.completionRevision, 0, Number.MAX_SAFE_INTEGER)) &&
     (session.contextUsedPercent === undefined || finitePercent(session.contextUsedPercent))
   );
+}
+
+function isActiveModelCatalog(activeModelId: unknown, activeDisplayName: unknown, value: unknown): boolean {
+  if (!isSafeReasoningIdentifier(activeModelId, 128) || !boundedNonblankString(activeDisplayName, 80)) return false;
+  const catalog = snapshotOwnDataArray(value, 32);
+  if (!catalog || catalog.length === 0) return false;
+  const seenModels = new Set<string>();
+  let activeMatch = false;
+  for (const rawEntry of catalog) {
+    const entry = snapshotOwnDataRecord(rawEntry);
+    if (!entry || !exactOwnDataKeys(entry, ["modelId", "displayName", "supportedReasoningEfforts"]) ||
+        !isSafeReasoningIdentifier(entry.modelId, 128) || !boundedNonblankString(entry.displayName, 80) ||
+        seenModels.has(entry.modelId)) return false;
+    const efforts = snapshotOwnDataArray(entry.supportedReasoningEfforts, 16);
+    if (!efforts || efforts.length === 0) return false;
+    const seenEfforts = new Set<string>();
+    for (const effort of efforts) {
+      if (!isSafeReasoningIdentifier(effort) || seenEfforts.has(effort)) return false;
+      seenEfforts.add(effort);
+    }
+    seenModels.add(entry.modelId);
+    if (entry.modelId === activeModelId) {
+      if (entry.displayName !== activeDisplayName) return false;
+      activeMatch = true;
+    }
+  }
+  return activeMatch;
 }
 
 function isLayout(value: unknown): value is MicroSnapshot["layout"] {
@@ -397,6 +432,30 @@ function snapshotOwnDataRecord(value: unknown): Record<string, unknown> | null {
       });
     }
     return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotOwnDataArray(value: unknown, maximum: number): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  try {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
+    const lengthDescriptor = descriptors.length;
+    const arrayLength: unknown = lengthDescriptor?.value;
+    if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, "value") ||
+        !Number.isSafeInteger(arrayLength) || Number(arrayLength) < 0 || Number(arrayLength) > maximum) return null;
+    const result: unknown[] = [];
+    for (let index = 0; index < Number(arrayLength); index++) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || descriptor.enumerable !== true ||
+          !Object.prototype.hasOwnProperty.call(descriptor, "value")) return null;
+      result.push(descriptor.value);
+    }
+    const expectedKeys = new Set(["length", ...result.map((_, index) => String(index))]);
+    if (Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !expectedKeys.has(key))) return null;
+    return result;
   } catch {
     return null;
   }

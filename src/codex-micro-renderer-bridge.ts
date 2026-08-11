@@ -9,7 +9,7 @@ import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import { isSafeReasoningIdentifier } from "./types.js";
 import type {
-  MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
+  CodexModelCatalogEntry, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
   ReasoningAdjustmentExecution, ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
 } from "./types.js";
 
@@ -590,15 +590,18 @@ export function readReasoningModelCatalogMatch(
   queryClients: Iterable<unknown>,
   visibleLabels: unknown
 ): { modelId: string; supportedEfforts: string[] } | undefined {
-  const labelItems = readBoundedOwnDataArray(visibleLabels, 256);
-  if (!labelItems) return undefined;
-  const normalizedLabels = new Set<string>();
-  for (const label of labelItems) {
-    const normalizedLabel = normalizeReasoningModelLabel(label);
-    if (!normalizedLabel) return undefined;
-    normalizedLabels.add(normalizedLabel);
-  }
-  const matches = new Map<string, { modelId: string; supportedEfforts: string[] }>();
+  const catalog = readReasoningModelCatalog(queryClients);
+  const match = catalog && matchActiveReasoningModel(visibleLabels, catalog);
+  return match ? { modelId: match.modelId, supportedEfforts: match.supportedReasoningEfforts } : undefined;
+}
+
+export function readReasoningModelCatalog(
+  queryClients: Iterable<unknown>
+): CodexModelCatalogEntry[] | undefined {
+  const recordsByModel = new Map<string, {
+    entry: CodexModelCatalogEntry;
+    normalizedDisplayName: string;
+  }>();
   let visitedClients = 0;
   try {
     for (const candidate of queryClients) {
@@ -633,32 +636,81 @@ export function readReasoningModelCatalogMatch(
         if (!queryData || typeof queryData !== "object") return undefined;
         const recordsProperty = readOwnDataProperty(queryData, "data");
         if (!recordsProperty?.exists) return undefined;
-        const records = readBoundedOwnDataArray(recordsProperty.value, 1000);
+        const records = readBoundedOwnDataArray(recordsProperty.value, 32);
         if (!records || records.length === 0) return undefined;
         for (const record of records) {
           if (!record || typeof record !== "object" || Array.isArray(record)) return undefined;
           const displayNameProperty = readOwnDataProperty(record, "displayName");
           const modelProperty = readOwnDataProperty(record, "model");
           if (!displayNameProperty?.exists || !modelProperty?.exists ||
-              !isSafeReasoningIdentifier(modelProperty.value, 128)) return undefined;
+              !isSafeReasoningIdentifier(modelProperty.value, 128) ||
+              typeof displayNameProperty.value !== "string" || displayNameProperty.value.length > 80) return undefined;
           const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value, true);
           if (!normalizedDisplayName) return undefined;
+          const displayName = displayNameProperty.value.trim()
+            .replace(/^gpt(?:[ -]+)?/i, "")
+            .replace(/[ -]+/g, " ");
+          if (!displayName || displayName.length > 80) return undefined;
           const effortsProperty = readOwnDataProperty(record, "supportedReasoningEfforts");
           if (!effortsProperty?.exists) return undefined;
-          const effortItems = readBoundedOwnDataArray(effortsProperty.value, 64);
+          const effortItems = readBoundedOwnDataArray(effortsProperty.value, 16);
           if (!effortItems || effortItems.length === 0 || effortItems.some((effortRecord) =>
             !effortRecord || typeof effortRecord !== "object" || Array.isArray(effortRecord)
           )) return undefined;
           const efforts = normalizeReasoningEffortOrder(effortsProperty.value);
           if (!efforts) return undefined;
           if (!isStructuredCloneSafePlainData(record, 5000, 32, 1000)) return undefined;
-          if (normalizedLabels.has(normalizedDisplayName)) {
-            const match = { modelId: modelProperty.value, supportedEfforts: efforts };
-            matches.set(JSON.stringify([match.modelId, normalizedDisplayName, efforts]), match);
+          const modelId = modelProperty.value;
+          const existing = recordsByModel.get(modelId);
+          if (existing) {
+            if (existing.normalizedDisplayName !== normalizedDisplayName ||
+                JSON.stringify(existing.entry.supportedReasoningEfforts) !== JSON.stringify(efforts)) return undefined;
+          } else {
+            if (recordsByModel.size >= 32) return undefined;
+            recordsByModel.set(modelId, {
+              entry: { modelId, displayName, supportedReasoningEfforts: efforts },
+              normalizedDisplayName
+            });
           }
         }
         if (!isStructuredCloneSafePlainData(recordsProperty.value, 70000, 32, 1000) ||
             !isStructuredCloneSafePlainData(queryData, 70001, 32, 1000)) return undefined;
+      }
+    }
+  } catch { return undefined; }
+  return recordsByModel.size > 0 ? [...recordsByModel.values()].map(({ entry }) => entry) : undefined;
+}
+
+export function matchActiveReasoningModel(
+  visibleLabels: unknown,
+  catalog: unknown
+): CodexModelCatalogEntry | undefined {
+  const labelItems = readBoundedOwnDataArray(visibleLabels, 256);
+  if (!labelItems) return undefined;
+  const normalizedLabels = new Set<string>();
+  for (const label of labelItems) {
+    const normalizedLabel = normalizeReasoningModelLabel(label);
+    if (!normalizedLabel) return undefined;
+    normalizedLabels.add(normalizedLabel);
+  }
+  const catalogItems = readBoundedOwnDataArray(catalog, 32);
+  if (!catalogItems || catalogItems.length === 0) return undefined;
+  const matches = new Map<string, CodexModelCatalogEntry>();
+  try {
+    for (const entry of catalogItems) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+      const displayNameProperty = readOwnDataProperty(entry, "displayName");
+      const modelIdProperty = readOwnDataProperty(entry, "modelId");
+      const effortsProperty = readOwnDataProperty(entry, "supportedReasoningEfforts");
+      if (!displayNameProperty?.exists || !modelIdProperty?.exists || !effortsProperty?.exists ||
+          !isSafeReasoningIdentifier(modelIdProperty.value, 128)) return undefined;
+      const normalizedDisplayName = normalizeReasoningModelLabel(displayNameProperty.value);
+      if (!normalizedDisplayName) return undefined;
+      const efforts = normalizeReasoningEffortOrder(effortsProperty.value);
+      if (!efforts || efforts.length > 16) return undefined;
+      if (normalizedLabels.has(normalizedDisplayName)) {
+        const match = entry as CodexModelCatalogEntry;
+        matches.set(JSON.stringify([match.modelId, normalizedDisplayName, efforts]), match);
       }
     }
   } catch { return undefined; }
@@ -670,7 +722,8 @@ export function readActiveReasoningMetadata(
   reactRootFiber: unknown,
   isVisible = isVisibleReasoningTrigger,
   isExplicitlyHidden = isExplicitlyHiddenReasoningElement
-): { currentEffort: string; modelId: string; supportedEfforts: string[] } | undefined {
+): { currentEffort: string; modelId: string; modelDisplayName: string; supportedEfforts: string[];
+  modelCatalog: CodexModelCatalogEntry[] } | undefined {
   try {
     const visibleTriggers: ReasoningTriggerElement[] = [];
     for (const element of elements) {
@@ -685,8 +738,15 @@ export function readActiveReasoningMetadata(
     if (!isSafeReasoningIdentifier(currentEffort)) return undefined;
     const visibleLabels = readVisibleReasoningModelLabels(trigger, isVisible, isExplicitlyHidden);
     if (!visibleLabels) return undefined;
-    const match = readReasoningModelCatalogMatch(findRendererQueryClients(reactRootFiber), visibleLabels);
-    return match ? { currentEffort, modelId: match.modelId, supportedEfforts: match.supportedEfforts } : undefined;
+    const modelCatalog = readReasoningModelCatalog(findRendererQueryClients(reactRootFiber));
+    const match = modelCatalog && matchActiveReasoningModel(visibleLabels, modelCatalog);
+    return match ? {
+      currentEffort,
+      modelId: match.modelId,
+      modelDisplayName: match.displayName,
+      supportedEfforts: match.supportedReasoningEfforts,
+      modelCatalog
+    } : undefined;
   } catch { return undefined; }
 }
 
@@ -733,6 +793,20 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   const normalizeRendererUsage = (${normalizeRendererUsage.toString()});
   const isVisibleReasoningTrigger = (${isVisibleReasoningTrigger.toString()});
   const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
+  const readOwnDataProperty = (${readOwnDataProperty.toString()});
+  const readDataPropertyInPrototypeChain = (${readDataPropertyInPrototypeChain.toString()});
+  const isCloneableReasoningQueryClient = (${isCloneableReasoningQueryClient.toString()});
+  const readBoundedOwnDataArray = (${readBoundedOwnDataArray.toString()});
+  const readExactBoundedOwnDataArray = (${readExactBoundedOwnDataArray.toString()});
+  const isStructuredCloneSafePlainData = (${isStructuredCloneSafePlainData.toString()});
+  const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
+  const normalizeReasoningModelLabel = (${normalizeReasoningModelLabel.toString()});
+  const isExplicitlyHiddenReasoningElement = (${isExplicitlyHiddenReasoningElement.toString()});
+  const readVisibleReasoningModelLabels = (${readVisibleReasoningModelLabels.toString()});
+  const findRendererQueryClients = (${findRendererQueryClients.toString()});
+  const readReasoningModelCatalog = (${readReasoningModelCatalog.toString()});
+  const matchActiveReasoningModel = (${matchActiveReasoningModel.toString()});
+  const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
   const readActiveReasoningEffort = (${readActiveReasoningEffort.toString()});
   const hasFastModeIndicator = (${hasFastModeIndicator.toString()});
   const readActiveFastMode = (${readActiveFastMode.toString()});
@@ -938,10 +1012,21 @@ const SNAPSHOT_EXPRESSION = (forceUsageRefresh: boolean): string => `(async () =
   const fastModeEnabled = readActiveFastMode(document.querySelectorAll(
     '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
   ));
+  const reactRootProperty = readOwnDataProperty(root, reactKey);
+  const reasoningMetadata = reactRootProperty?.exists
+    ? readActiveReasoningMetadata(document.querySelectorAll(
+      '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
+    ), reactRootProperty.value)
+    : undefined;
 
   return {
     slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme,
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(reasoningMetadata ? {
+      activeModelId: reasoningMetadata.modelId,
+      activeModelDisplayName: reasoningMetadata.modelDisplayName,
+      modelCatalog: reasoningMetadata.modelCatalog
+    } : {}),
     ...(typeof fastModeEnabled === 'boolean' ? { fastModeEnabled } : {}),
     ...(usage ? { usage } : {})
   };
@@ -1098,6 +1183,8 @@ export class CodexMicroRendererBridge {
       const isExplicitlyHiddenReasoningElement = (${isExplicitlyHiddenReasoningElement.toString()});
       const readVisibleReasoningModelLabels = (${readVisibleReasoningModelLabels.toString()});
       const findRendererQueryClients = (${findRendererQueryClients.toString()});
+      const readReasoningModelCatalog = (${readReasoningModelCatalog.toString()});
+      const matchActiveReasoningModel = (${matchActiveReasoningModel.toString()});
       const readReasoningModelCatalogMatch = (${readReasoningModelCatalogMatch.toString()});
       const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
       const decideReasoningAdjustment = (${decideReasoningAdjustment.toString()});
