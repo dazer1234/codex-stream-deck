@@ -538,23 +538,58 @@ export class DeckController {
     direction: ReasoningAdjustment,
     policy?: ReasoningAdjustmentPolicy
   ): Promise<ReasoningAdjustmentExecution> {
-    const localHost = this.localHost;
+    const operationHost = this.localHost;
     this.localSnapshotGeneration += 1;
-    const execution = parseReasoningExecution(
-      await this.microBridge.adjustReasoning(direction, policy)
-    );
-    if (!execution) throw new Error("Codex returned an invalid reasoning adjustment result.");
+    const rawExecution = await this.microBridge.adjustReasoning(direction, policy);
+    let execution = parseReasoningExecution(rawExecution);
+    if (!execution) {
+      if (!isAppliedReasoningExecutionWithUnconfirmedEffort(rawExecution)) {
+        throw new Error("Codex returned an invalid reasoning adjustment result.");
+      }
+      execution = await this.reconcileUnconfirmedLocalReasoning();
+    } else if (execution.outcome === "applied" && execution.reasoningEffort === undefined) {
+      execution = await this.reconcileUnconfirmedLocalReasoning();
+    }
     const current = this.localSnapshot;
-    if (execution.reasoningEffort !== undefined && localHost != null &&
-        this.localHost?.hostId === localHost.hostId &&
-        this.localHost.platform === localHost.platform && current != null &&
-        current.host.hostId === localHost.hostId && current.host.platform === localHost.platform) {
+    if (execution.reasoningEffort !== undefined && operationHost != null &&
+        this.localHost?.hostId === operationHost.hostId &&
+        this.localHost.platform === operationHost.platform && current != null &&
+        current.host.hostId === operationHost.hostId && current.host.platform === operationHost.platform &&
+        current.snapshot.reasoningEffort !== execution.reasoningEffort) {
       this.localSnapshot = {
         ...current,
         snapshot: { ...current.snapshot, reasoningEffort: execution.reasoningEffort }
       };
     }
     return execution;
+  }
+
+  private async reconcileUnconfirmedLocalReasoning(): Promise<ReasoningAdjustmentExecution> {
+    if (this.refreshInFlight) {
+      try { await this.refreshInFlight; }
+      catch { /* A fresh refresh is still attempted below. */ }
+    }
+    const priorSnapshot = this.localSnapshot;
+    let refreshCompleted = false;
+    try {
+      await this.refresh();
+      refreshCompleted = true;
+    } catch { /* Authority is checked below so overridden/test refresh paths fail closed identically. */ }
+    const localHost = this.localHost;
+    const current = this.localSnapshot;
+    const reasoningEffort = current?.snapshot.reasoningEffort;
+    if (refreshCompleted && current !== priorSnapshot && this.localHealth.state === "ready" &&
+        localHost != null && current != null &&
+        current.host.hostId === localHost.hostId && current.host.platform === localHost.platform &&
+        isSafeReasoningIdentifier(reasoningEffort)) {
+      return { outcome: "applied", reasoningEffort };
+    }
+    this.localHealth = {
+      state: "degraded",
+      reason: "local-bridge-unavailable",
+      changedAt: Date.now()
+    };
+    throw new Error("Authoritative reasoning state is unavailable after the applied adjustment.");
   }
 
   rotateDial(action: CodexDialAction, ticks: number): void {
@@ -2065,6 +2100,28 @@ function parseReasoningExecution(value: unknown): ReasoningAdjustmentExecution |
       ...(reasoningEffort === undefined ? {} : { reasoningEffort })
     };
   } catch { return undefined; }
+}
+
+function isAppliedReasoningExecutionWithUnconfirmedEffort(value: unknown): boolean {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    const hasEffort = Object.prototype.hasOwnProperty.call(descriptors, "reasoningEffort");
+    const expected = ["outcome", ...(hasEffort ? ["reasoningEffort"] : [])];
+    if (keys.length !== expected.length || keys.some((key) =>
+      typeof key !== "string" || !expected.includes(key))) return false;
+    const outcomeProperty = descriptors.outcome;
+    const effortProperty = descriptors.reasoningEffort;
+    if (!outcomeProperty || outcomeProperty.enumerable !== true || !("value" in outcomeProperty) ||
+        (effortProperty && (effortProperty.enumerable !== true || !("value" in effortProperty)))) {
+      return false;
+    }
+    return outcomeProperty.value === "applied" &&
+      (!effortProperty || !isSafeReasoningIdentifier(effortProperty.value));
+  } catch { return false; }
 }
 
 function parseModelPresetExecution(value: unknown): ModelPresetExecution | undefined {

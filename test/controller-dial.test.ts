@@ -637,7 +637,7 @@ test("paired detents continue after a dispatch failure and alert only the failin
     async adjustReasoning() {
       attempts.push(`attempt-${attempts.length + 1}`);
       if (attempts.length === 1) throw new Error("first detent failed");
-      return { outcome: "applied" };
+      return { outcome: "applied", reasoningEffort: "high" };
     }
   };
 
@@ -661,7 +661,10 @@ test("reasoning dial maps each direction to one dedicated adjustment without enc
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning(direction) { adjustments.push(direction); return { outcome: "applied" }; },
+    async adjustReasoning(direction) {
+      adjustments.push(direction);
+      return { outcome: "applied", reasoningEffort: "high" };
+    },
     async sendEncoder(act) { encoderClicks.push(act); }
   };
 
@@ -688,7 +691,7 @@ test("local reasoning detents capture and pass each dial's explicit Ultra policy
     async sendAgent() {},
     async adjustReasoning(direction, policy) {
       policies.push([direction, policy]);
-      return { outcome: "applied" };
+      return { outcome: "applied", reasoningEffort: "high" };
     }
   };
 
@@ -1154,7 +1157,7 @@ test("public reasoning actions remain unrestricted locally and remotely", async 
     async sendAgent() {},
     async adjustReasoning(direction, policy) {
       localPolicies.push([direction, policy]);
-      return { outcome: "applied" };
+      return { outcome: "applied", reasoningEffort: "high" };
     }
   };
   state.relayClient = {
@@ -1782,7 +1785,10 @@ test("dial host commands require ready health for starts but execute when ready"
       state.localHealth = { state: health, changedAt: 1_000 };
       state.microBridge = {
         async sendAgent() {},
-        async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); return { outcome: "applied" }; },
+        async adjustReasoning(direction) {
+          sends.push(`reasoning:${direction}`);
+          return { outcome: "applied", reasoningEffort: "high" };
+        },
         async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
         async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
         async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }
@@ -1808,7 +1814,10 @@ test("dial host commands require ready health for starts but execute when ready"
     state.localHealth = { state: "ready", changedAt: 1_000 };
     state.microBridge = {
       async sendAgent() {},
-      async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); return { outcome: "applied" }; },
+      async adjustReasoning(direction) {
+        sends.push(`reasoning:${direction}`);
+        return { outcome: "applied", reasoningEffort: "high" };
+      },
       async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
       async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
       async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }
@@ -3188,4 +3197,88 @@ test("shared local reasoning validation is descriptor-safe and failures retain l
   assert.equal(state.localSnapshot, retained);
   assert.equal(state.localSnapshotGeneration, 2);
   assert.equal(state.localHealth.state, "ready");
+});
+
+test("applied reasoning without effort reconciles authoritatively before a waiting preset resolves", async () => {
+  for (const [name, execution] of [
+    ["missing", { outcome: "applied" }],
+    ["malformed", { outcome: "applied", reasoningEffort: " medium " }]
+  ] as const) {
+    const controller = new DeckController();
+    const presetDial = fakeDial(`model-preset-after-${name}-reasoning-effort`);
+    const state = probe(controller);
+    const reconciliation = deferred<void>();
+    const presetRequests: ModelPresetRequest[] = [];
+    let refreshes = 0;
+    state.localHost = HOST;
+    state.targetHostId = HOST.hostId;
+    state.targetPlatform = HOST.platform;
+    state.localHealth = { state: "ready", changedAt: 1_000 };
+    state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+    state.microBridge = {
+      async sendAgent() {},
+      async adjustReasoning() { return execution as ReasoningAdjustmentExecution; },
+      async applyModelPreset(request) {
+        presetRequests.push(structuredClone(request));
+        return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+      }
+    };
+    state.refresh = async () => {
+      refreshes += 1;
+      await reconciliation.promise;
+      state.localSnapshot = {
+        host: HOST, observedAt: 2_000, snapshot: modelSnapshot("gpt-5.6-sol", "medium")
+      };
+      state.localHealth = { state: "ready", changedAt: 2_000 };
+    };
+    controller.registerDial(presetDial, modelPresetSettings());
+    await settle();
+
+    const reasoning = controller.adjustReasoning("decrease");
+    controller.rotateDial(presetDial, 1);
+    await settle();
+    assert.equal(refreshes, 1, name);
+    assert.deepEqual(presetRequests, [], `${name} effort cannot release a stale preset target`);
+
+    reconciliation.resolve();
+    await reasoning;
+    await state.dials.get(presetDial.id)!.queue.idle();
+    assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
+      ["gpt-5.6-terra", "medium"]
+    ], name);
+    controller.unregisterDial(presetDial);
+  }
+});
+
+test("unconfirmed applied reasoning degrades and prevents a dependent preset when reconciliation fails", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("model-preset-after-unreconciled-reasoning");
+  const state = probe(controller);
+  let presetCalls = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() { return { outcome: "applied" }; },
+    async applyModelPreset(request) {
+      presetCalls += 1;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    }
+  };
+  state.refresh = async () => { throw new Error("authoritative refresh unavailable"); };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+
+  const reasoning = controller.adjustReasoning("decrease");
+  controller.rotateDial(presetDial, 1);
+  await assert.rejects(reasoning, /authoritative reasoning state is unavailable/i);
+  await state.dials.get(presetDial.id)!.queue.idle();
+
+  assert.equal(state.localHealth.state, "degraded");
+  assert.equal(state.localSnapshot.snapshot.reasoningEffort, "high", "last-known data is retained");
+  assert.equal(presetCalls, 0, "dependent model mutation is refused on degraded authority");
+  controller.unregisterDial(presetDial);
 });
