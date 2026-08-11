@@ -783,6 +783,11 @@ test("Stream Deck Plus guide documents the supported dial contract without overs
   for (const gesture of ["rotate", "press", "touch"]) assert.match(guide, new RegExp(`\\b${gesture}\\b`, "i"));
   for (const state of ["NO ITEMS", "OFFLINE", "DEGRADED", "CONNECTING"]) assert.match(guide, new RegExp(state));
   assert.match(guide, /Reasoning[^\n]*decrease[^\n]*increase/i);
+  assert.ok(guide.includes(
+    "The Reasoning knob redraws as soon as Codex confirms the resulting level after a short, bounded confirmation. " +
+    "The normal 1.2-second background poll remains a reconciliation path, not the primary feedback path. " +
+    "If the command fails or confirmation is missing, the dial retains the last authoritative level instead of predicting a new one."
+  ));
   assert.match(guide, /Include Ultra[^.\n]*per knob[^.\n]*defaults off/i);
   assert.match(guide, /When Include Ultra is off[^.\n]*stops before Ultra[^.\n]*`ULTRA OFF`/i);
   assert.match(guide, /When Include Ultra is on[^.\n]*Ultra[^.\n]*native Full-access confirmation/i);

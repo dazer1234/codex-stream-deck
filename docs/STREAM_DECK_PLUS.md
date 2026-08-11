@@ -23,9 +23,11 @@ The recommended layout uses four separate `Codex Dial` instances:
 
 The Fast key uses authoritative composer state: green means Fast Mode is enabled, red means it is disabled, and the normal neutral surface means the live state is unknown or unavailable.
 
-Reasoning changes apply once per detent through Codex's dedicated increase and decrease commands. Rotation does not move keyboard focus through composer controls and does not require a press or confirmation.
+Reasoning changes apply once per detent through Codex's dedicated increase and decrease commands. Rotation does not move keyboard focus through composer controls and does not require another press or a user confirmation.
 
-**Include Ultra** is configured per knob and defaults off. When Include Ultra is off, clockwise reasoning stops before Ultra and the dial briefly shows `ULTRA OFF`. When Include Ultra is on, the knob can enter Ultra and Codex may show its native Full-access confirmation. Manual Codex selection and the keypad Reasoning Up action stay unrestricted. The plugin never confirms or dismisses that native dialog.
+The Reasoning knob redraws as soon as Codex confirms the resulting level after a short, bounded confirmation. The normal 1.2-second background poll remains a reconciliation path, not the primary feedback path. If the command fails or confirmation is missing, the dial retains the last authoritative level instead of predicting a new one. A paired host gets this prompt redraw only when the connected peer supports and returns confirmed reasoning feedback.
+
+**Include Ultra** is configured per knob and defaults off. When Include Ultra is off, clockwise reasoning stops before Ultra and the dial briefly shows `ULTRA OFF` without sending a reasoning command. When Include Ultra is on, the knob can enter Ultra and Codex may show its native Full-access confirmation. Manual Codex selection and the keypad Reasoning Up action stay unrestricted. The plugin never confirms or dismisses that native dialog.
 
 The six action names are the default slot labels for the six configured Codex Micro action slots. Feedback labels follow the current Codex Micro assignments, so a customized slot is identified by its current assignment rather than a hardcoded default name.
 
@@ -38,6 +40,8 @@ In **Paired controls** mode, counter-clockwise and clockwise rotation have separ
 ### Rotate to select
 
 In **Rotate to select** mode, rotation only highlights an item; it does not run it. Press **Activate Selection** to run the highlighted agent or configured action. The selector can wrap at either end, and an Actions selector preserves the order chosen in the property inspector. The Usage selector cycles Auto, 5h, and Weekly.
+
+The Actions selector is local and immediate: each rotation redraws the highlighted action without waiting for Codex, while activation still waits for a press.
 
 An empty selector shows `NO ITEMS` and cannot be activated. Pressing it produces the standard Stream Deck alert without dispatching an action.
 
