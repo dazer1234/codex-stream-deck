@@ -9,7 +9,7 @@ import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import type {
   MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
-  ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
+  ReasoningAdjustmentExecution, ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
 } from "./types.js";
 
 type DebugTarget = {
@@ -60,7 +60,6 @@ export function resolveAgentDispatch(
 }
 
 type CommandRunner = (command: string, source: string) => unknown;
-type ReasoningCommand = "composer.increaseReasoningEffort" | "composer.decreaseReasoningEffort";
 
 const REASONING_COMMANDS = Object.freeze([
   "composer.increaseReasoningEffort",
@@ -246,6 +245,24 @@ export function readActiveReasoningEffort(
     if (value && value.length <= 64) candidates.add(value);
   }
   return candidates.size === 1 ? candidates.values().next().value : undefined;
+}
+
+export function readConfirmedReasoningEffort(
+  elements: Iterable<ReasoningTriggerElement>,
+  isVisible = isVisibleReasoningTrigger
+): string | undefined {
+  try {
+    let candidate: string | undefined;
+    for (const element of elements) {
+      if (!isVisible(element) ||
+          element.getAttribute("data-composer-navigation-target") !== "reasoning") continue;
+      if (candidate !== undefined) return undefined;
+      const value = element.getAttribute("data-selected-reasoning-effort")?.trim();
+      if (!isSafeReasoningIdentifier(value)) return undefined;
+      candidate = value;
+    }
+    return candidate;
+  } catch { return undefined; }
 }
 
 export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
@@ -1026,15 +1043,7 @@ export class CodexMicroRendererBridge {
   async adjustReasoning(
     direction: ReasoningAdjustment,
     policy: ReasoningAdjustmentPolicy = { includeUltra: true }
-  ): Promise<ReasoningAdjustmentResult> {
-    if (direction === "increase" && !policy.includeUltra) return this.runGuardedReasoningIncrease();
-    await this.runReasoningCommand(direction === "increase"
-      ? "composer.increaseReasoningEffort"
-      : "composer.decreaseReasoningEffort");
-    return "applied";
-  }
-
-  private async runGuardedReasoningIncrease(): Promise<ReasoningAdjustmentResult> {
+  ): Promise<ReasoningAdjustmentExecution> {
     await this.ensureConnected();
     const expression = `(async () => {
       const guardNamespace = ${JSON.stringify(this.evaluationNamespace)};
@@ -1049,7 +1058,11 @@ export class CodexMicroRendererBridge {
       guardState.tail = new Promise((resolve) => { releaseGuard = resolve; });
       await predecessor;
       try {
-      const command = 'composer.increaseReasoningEffort';
+      const direction = ${JSON.stringify(direction)};
+      const policy = ${JSON.stringify(policy)};
+      const command = direction === 'increase'
+        ? 'composer.increaseReasoningEffort'
+        : 'composer.decreaseReasoningEffort';
       const allowedCommands = new Set(${JSON.stringify(REASONING_COMMANDS)});
       if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
       const isSafeReasoningIdentifier = (${isSafeReasoningIdentifier.toString()});
@@ -1067,26 +1080,52 @@ export class CodexMicroRendererBridge {
       const readReasoningModelCatalogMatch = (${readReasoningModelCatalogMatch.toString()});
       const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
       const decideReasoningAdjustment = (${decideReasoningAdjustment.toString()});
+      const readConfirmedReasoningEffort = (${readConfirmedReasoningEffort.toString()});
+      const reasoningSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]';
       const readLiveMetadata = () => {
         const root = document.getElementById('root');
         const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactContainer$'));
         const reactRootProperty = root && reactKey ? readOwnDataProperty(root, reactKey) : undefined;
-        return reactRootProperty?.exists ? readActiveReasoningMetadata(document.querySelectorAll(
-          '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
-        ), reactRootProperty.value) : undefined;
+        return reactRootProperty?.exists
+          ? readActiveReasoningMetadata(document.querySelectorAll(reasoningSelector), reactRootProperty.value)
+          : undefined;
       };
-      const decideFromMetadata = (metadata) => decideReasoningAdjustment(
-        'increase', { includeUltra: false }, metadata?.currentEffort, metadata?.supportedEfforts
+      const readConfirmedEffort = () => readConfirmedReasoningEffort(
+        document.querySelectorAll(reasoningSelector)
       );
+      const planFromMetadata = (metadata) => {
+        const decision = decideReasoningAdjustment(
+          direction, policy, metadata?.currentEffort, metadata?.supportedEfforts
+        );
+        if (decision === 'unavailable' || !metadata) return { kind: 'unavailable' };
+        if (decision === 'blocked-ultra') {
+          return { kind: 'blocked-ultra', currentEffort: metadata.currentEffort };
+        }
+        const currentIndex = metadata.supportedEfforts.indexOf(metadata.currentEffort);
+        if (currentIndex < 0) return { kind: 'unavailable' };
+        const targetIndex = currentIndex + (direction === 'increase' ? 1 : -1);
+        if (targetIndex < 0 || targetIndex >= metadata.supportedEfforts.length) {
+          return { kind: 'boundary', currentEffort: metadata.currentEffort };
+        }
+        const expectedEffort = metadata.supportedEfforts[targetIndex];
+        return isSafeReasoningIdentifier(expectedEffort)
+          ? { kind: 'command', expectedEffort }
+          : { kind: 'unavailable' };
+      };
       let metadata = readLiveMetadata();
       if (guardState.uncertain) {
         if (!metadata || (metadata.modelId === guardState.uncertain.modelId &&
             metadata.currentEffort === guardState.uncertain.currentEffort)) return 'metadata-unavailable';
         guardState.uncertain = null;
       }
-      const decision = decideFromMetadata(metadata);
-      if (decision === 'unavailable') return 'metadata-unavailable';
-      if (decision === 'blocked-ultra') return 'blocked-ultra';
+      let plan = planFromMetadata(metadata);
+      if (plan.kind === 'unavailable') return 'metadata-unavailable';
+      if (plan.kind === 'blocked-ultra') {
+        return { outcome: 'blocked-ultra', reasoningEffort: plan.currentEffort };
+      }
+      if (plan.kind === 'boundary') {
+        return { outcome: 'applied', reasoningEffort: plan.currentEffort };
+      }
 
       const urls = [...new Set([
         ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
@@ -1099,73 +1138,43 @@ export class CodexMicroRendererBridge {
       const commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
       if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
       metadata = readLiveMetadata();
-      const finalDecision = decideFromMetadata(metadata);
-      if (finalDecision === 'unavailable') return 'metadata-unavailable';
-      if (finalDecision === 'blocked-ultra') return 'blocked-ultra';
-      const priorMetadata = { modelId: metadata.modelId, currentEffort: metadata.currentEffort };
-      const handled = commandRunner(command, 'codex_micro_hid');
-      if (!handled) throw new Error('This Codex command is not active in the current view.');
-      let confirmed = false;
-      try {
-        for (let attempt = 0; attempt < 8; attempt++) {
-          await Promise.resolve();
-          const currentMetadata = readLiveMetadata();
-          if (!currentMetadata) throw new Error('Codex reasoning metadata is unavailable.');
-          if (currentMetadata && (currentMetadata.modelId !== priorMetadata.modelId ||
-              currentMetadata.currentEffort !== priorMetadata.currentEffort)) {
-            confirmed = true;
-            break;
-          }
-          if (attempt < 7) await new Promise((resolve) => setTimeout(resolve, 8));
-        }
-      } catch (error) {
-        guardState.uncertain = priorMetadata;
-        throw error;
+      plan = planFromMetadata(metadata);
+      if (plan.kind === 'unavailable') return 'metadata-unavailable';
+      if (plan.kind === 'blocked-ultra') {
+        return { outcome: 'blocked-ultra', reasoningEffort: plan.currentEffort };
       }
-      guardState.uncertain = confirmed ? null : priorMetadata;
-      return 'applied';
+      if (plan.kind === 'boundary') {
+        return { outcome: 'applied', reasoningEffort: plan.currentEffort };
+      }
+      const priorMetadata = { modelId: metadata.modelId, currentEffort: metadata.currentEffort };
+      guardState.uncertain = priorMetadata;
+      const handled = commandRunner(command, 'codex_micro_hid');
+      if (!handled) {
+        guardState.uncertain = null;
+        throw new Error('This Codex command is not active in the current view.');
+      }
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await Promise.resolve();
+        const confirmedEffort = readConfirmedEffort();
+        if (confirmedEffort === plan.expectedEffort) {
+          guardState.uncertain = null;
+          return { outcome: 'applied', reasoningEffort: confirmedEffort };
+        }
+      }
+      return 'metadata-unavailable';
       } finally {
         releaseGuard();
       }
     })()`;
-    let result: ReasoningAdjustmentResult | "metadata-unavailable";
+    let result: ReasoningAdjustmentExecution | "metadata-unavailable";
     try {
-      result = await this.evaluate<ReasoningAdjustmentResult | "metadata-unavailable">(expression);
+      result = await this.evaluate<ReasoningAdjustmentExecution | "metadata-unavailable">(expression);
     } catch (error) {
       this.disconnect();
       throw error;
     }
     if (result === "metadata-unavailable") throw new Error("Codex reasoning metadata is unavailable.");
     return result;
-  }
-
-  private async runReasoningCommand(command: ReasoningCommand): Promise<void> {
-    if (!REASONING_COMMANDS.includes(command)) throw new Error("Unsupported reasoning command.");
-    await this.ensureConnected();
-    const expression = `(async () => {
-      const command = ${JSON.stringify(command)};
-      const allowedCommands = new Set(${JSON.stringify(REASONING_COMMANDS)});
-      if (!allowedCommands.has(command)) throw new Error('Unsupported reasoning command.');
-      const urls = [...new Set([
-        ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
-        ...performance.getEntriesByType('resource').map((entry) => entry.name)
-      ])];
-      const bridgeUrl = urls.find((value) => value.includes('/assets/codex-micro-bridge-'));
-      if (!bridgeUrl) throw new Error('Codex Micro bridge module is unavailable.');
-      const bridgeSource = await (await fetch(bridgeUrl)).text();
-      const resolveCommandRunner = (${resolveCommandRunner.toString()});
-      const commandRunner = await resolveCommandRunner(bridgeSource, bridgeUrl, (url) => import(url));
-      if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
-      const handled = commandRunner(command, 'codex_micro_hid');
-      if (!handled) throw new Error('This Codex command is not active in the current view.');
-      return true;
-    })()`;
-    try {
-      await this.evaluate(expression);
-    } catch (error) {
-      this.disconnect();
-      throw error;
-    }
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {

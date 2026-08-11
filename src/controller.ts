@@ -44,7 +44,8 @@ import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
-  ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot, UsageLimitMode, UsageWindowKind
+  ReasoningAdjustmentExecution, ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot,
+  UsageLimitMode, UsageWindowKind
 } from "./types.js";
 import { selectAccountUsageSource, selectUsageWindow, type AccountUsageSource } from "./usage.js";
 
@@ -1364,7 +1365,7 @@ export class DeckController {
   private async sendDialToHost(
     route: DialHostRoute,
     command: RelayCommand,
-    local: () => Promise<void | ReasoningAdjustmentResult>,
+    local: () => Promise<void | ReasoningAdjustmentExecution>,
     requireReady = true
   ): Promise<ReasoningAdjustmentResult | undefined> {
     const localHost = this.localHost;
@@ -1375,8 +1376,8 @@ export class DeckController {
       if (requireReady && this.localHealth.state !== "ready") {
         throw new Error("The captured Codex host is not ready.");
       }
-      const outcome = await local();
-      return outcome === "applied" || outcome === "blocked-ultra" ? outcome : undefined;
+      const execution = await local();
+      return execution?.outcome;
     }
     const remote = this.relayClient?.currentHost();
     if (!remote || (route.hostId != null

@@ -33,6 +33,8 @@ function createGuardedRendererHarness(options: {
   modelId?: string;
   supportedEfforts?: string[];
   advanceEffortOnCommand?: boolean;
+  confirmationEffortOnCommand?: string;
+  confirmationTriggerCount?: number;
   failConfirmationReadAfterCommand?: boolean;
 }): {
   evaluate: <T>(expression: string) => Promise<T>;
@@ -46,14 +48,19 @@ function createGuardedRendererHarness(options: {
   const supportedEfforts = options.supportedEfforts ?? ["low", "medium", "high", "xhigh", "max", "ultra"];
   let currentEffort = options.currentEffort;
   let metadataReadsFail = false;
+  let commandIssued = false;
   const runnerState = {
     run(command: string, source: string) {
       runnerCalls.push([command, source]);
+      commandIssued = true;
       if (options.failConfirmationReadAfterCommand) metadataReadsFail = true;
-      if (options.advanceEffortOnCommand) {
+      if (options.confirmationEffortOnCommand != null) {
+        queueMicrotask(() => { currentEffort = options.confirmationEffortOnCommand; });
+      } else if (options.advanceEffortOnCommand) {
         const index = currentEffort == null ? -1 : supportedEfforts.indexOf(currentEffort);
-        if (index >= 0 && index + 1 < supportedEfforts.length) {
-          queueMicrotask(() => { currentEffort = supportedEfforts[index + 1]; });
+        const delta = command === "composer.increaseReasoningEffort" ? 1 : -1;
+        if (index >= 0 && index + delta >= 0 && index + delta < supportedEfforts.length) {
+          queueMicrotask(() => { currentEffort = supportedEfforts[index + delta]; });
         }
       }
       return true;
@@ -109,13 +116,17 @@ function createGuardedRendererHarness(options: {
     result.querySelectorAll = (selector: string) => selector === "*" ? [label] : [];
     return result;
   };
-  const triggers = Array.from({ length: options.visibleTriggerCount ?? 1 }, trigger);
+  const triggers = Array.from({
+    length: Math.max(options.visibleTriggerCount ?? 1, options.confirmationTriggerCount ?? 1)
+  }, trigger);
   const document = {
     getElementById: (id: string) => id === "root" ? root : null,
     querySelectorAll: (selector: string) => selector === "link[href], script[src]"
       ? [{ href: bridgeUrl, src: "" }]
       : selector === '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]'
-        ? triggers
+        ? triggers.slice(0, commandIssued
+          ? options.confirmationTriggerCount ?? options.visibleTriggerCount ?? 1
+          : options.visibleTriggerCount ?? 1)
         : []
   };
   const performance = { getEntriesByType: () => [] };
@@ -1146,30 +1157,29 @@ test("agent routing follows the stable thread identity when a cross-host slot is
 });
 
 test("unrestricted increases and every decrease invoke one dedicated command", async () => {
-  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const reasoningCommands: string[] = [];
-  const genericKeycaps: string[] = [];
-  const dispatches: unknown[][] = [];
-  const testBridge = bridge as unknown as {
-    runReasoningCommand: (command: string) => Promise<void>;
-    runKeycap: (keycapId: "MIND+" | "MIND-") => Promise<void>;
-    dispatch: (...args: unknown[]) => Promise<void>;
-  };
-  testBridge.runReasoningCommand = async (command) => { reasoningCommands.push(command); };
-  testBridge.runKeycap = async (keycapId) => { genericKeycaps.push(keycapId); };
-  testBridge.dispatch = async (...args) => { dispatches.push(args); };
-
-  assert.equal(await bridge.adjustReasoning("increase"), "applied");
-  assert.equal(await bridge.adjustReasoning("decrease", { includeUltra: false }), "applied");
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: true }), "applied");
+  for (const testCase of [
+    { direction: "increase" as const, policy: undefined },
+    { direction: "decrease" as const, policy: { includeUltra: false } },
+    { direction: "increase" as const, policy: { includeUltra: true } }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const harness = createGuardedRendererHarness({ currentEffort: "medium", advanceEffortOnCommand: true });
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+    await bridge.adjustReasoning(testCase.direction, testCase.policy);
+    reasoningCommands.push(...harness.runnerCalls.map(([command]) => command));
+  }
 
   assert.deepEqual(reasoningCommands, [
     "composer.increaseReasoningEffort",
     "composer.decreaseReasoningEffort",
     "composer.increaseReasoningEffort"
   ]);
-  assert.deepEqual(genericKeycaps, []);
-  assert.deepEqual(dispatches, []);
   const source = await readFile(new URL("../src/codex-micro-renderer-bridge.ts", import.meta.url), "utf8");
   const adjustment = source.match(/async adjustReasoning\([\s\S]*?\n  }/)?.[0] ?? "";
   assert.doesNotMatch(adjustment, /ENC_CW|ENC_CC|this\.dispatch/);
@@ -1179,7 +1189,10 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const expressions: string[] = [];
   const directCommands: string[] = [];
-  const results = ["blocked-ultra", "applied"] as const;
+  const results = [
+    { outcome: "blocked-ultra", reasoningEffort: "max" },
+    { outcome: "applied", reasoningEffort: "xhigh" }
+  ] as const;
   let resultIndex = 0;
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
@@ -1193,10 +1206,10 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
   };
   testBridge.runReasoningCommand = async (command) => { directCommands.push(command); };
 
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "blocked-ultra");
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), results[0]);
   assert.deepEqual(directCommands, [], "blocked guarded increases do not enter the separate command path");
   assert.equal(expressions.length, 1, "guard state and command path share one Runtime.evaluate");
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), results[1]);
   assert.deepEqual(directCommands, [], "lower guarded increases run inside the atomic renderer evaluation");
   assert.equal(expressions.length, 2);
 
@@ -1215,11 +1228,11 @@ test("restricted increases use one atomic renderer evaluation and lazily skip th
     assert.match(expression, /queryKey\[1\][^;]*["']list["']/);
     assert.equal((expression.match(/commandRunner\(command, 'codex_micro_hid'\)/g) ?? []).length, 1,
       "the applicable renderer branch issues exactly one reasoning command");
-    const blockedReturn = expression.indexOf("if (decision === 'blocked-ultra') return 'blocked-ultra'");
+    const blockedReturn = expression.indexOf("if (plan.kind === 'blocked-ultra')");
     const runnerResolution = expression.indexOf("const commandRunner = await resolveCommandRunner");
     assert.ok(blockedReturn >= 0 && runnerResolution > blockedReturn,
       "the blocked result returns before resolving or importing a command runner");
-    const finalDecision = expression.indexOf("const finalDecision = decideFromMetadata(metadata)");
+    const finalDecision = expression.indexOf("plan = planFromMetadata(metadata)", runnerResolution);
     const commandInvocation = expression.indexOf("commandRunner(command, 'codex_micro_hid')");
     assert.ok(runnerResolution < finalDecision && finalDecision < commandInvocation,
       "the final live decision follows runner resolution and immediately precedes invocation");
@@ -1261,7 +1274,7 @@ test("restricted increases fail closed without renderer metadata and issue no se
   assert.deepEqual(directCommands, []);
 });
 
-test("serialized guarded reasoning blocks max to Ultra before executing the runner", async () => {
+test("serialized guarded reasoning returns the authoritative max when it blocks Ultra", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const harness = createGuardedRendererHarness({ currentEffort: "max" });
   const testBridge = bridge as unknown as {
@@ -1271,7 +1284,9 @@ test("serialized guarded reasoning blocks max to Ultra before executing the runn
   testBridge.ensureConnected = async () => {};
   testBridge.evaluate = harness.evaluate;
 
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "blocked-ultra");
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
+    outcome: "blocked-ultra", reasoningEffort: "max"
+  });
   assert.deepEqual(harness.runnerCalls, []);
 });
 
@@ -1324,9 +1339,12 @@ test("serialized metadata refusal preserves the established renderer transport",
   assert.deepEqual(harness.runnerCalls, []);
 });
 
-test("serialized guarded reasoning executes the lazy runner exactly once below Ultra", async () => {
+test("serialized guarded reasoning returns the effort only after the visible trigger confirms it", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
-  const harness = createGuardedRendererHarness({ currentEffort: "xhigh" });
+  const harness = createGuardedRendererHarness({
+    currentEffort: "high",
+    advanceEffortOnCommand: true
+  });
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
     evaluate: <T>(source: string) => Promise<T>;
@@ -1334,8 +1352,78 @@ test("serialized guarded reasoning executes the lazy runner exactly once below U
   testBridge.ensureConnected = async () => {};
   testBridge.evaluate = harness.evaluate;
 
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  assert.deepEqual(await bridge.adjustReasoning("increase", { includeUltra: false }), {
+    outcome: "applied", reasoningEffort: "xhigh"
+  });
   assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
+});
+
+test("serialized unrestricted and decrease commands return confirmed reasoning efforts", async () => {
+  for (const testCase of [
+    { direction: "increase" as const, currentEffort: "high", expectedEffort: "xhigh" },
+    { direction: "decrease" as const, currentEffort: "high", expectedEffort: "medium" }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const harness = createGuardedRendererHarness({
+      currentEffort: testCase.currentEffort,
+      advanceEffortOnCommand: true
+    });
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+
+    assert.deepEqual(await bridge.adjustReasoning(testCase.direction), {
+      outcome: "applied", reasoningEffort: testCase.expectedEffort
+    });
+    assert.equal(harness.runnerCalls.length, 1);
+  }
+});
+
+test("serialized interior commands fail without a unique safe visible-trigger confirmation", async () => {
+  for (const options of [
+    {},
+    { confirmationEffortOnCommand: "not safe" },
+    { advanceEffortOnCommand: true, confirmationTriggerCount: 2 }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const harness = createGuardedRendererHarness({ currentEffort: "high", ...options });
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+
+    await assert.rejects(
+      bridge.adjustReasoning("increase"),
+      /Codex reasoning metadata is unavailable\./
+    );
+    assert.equal(harness.runnerCalls.length, 1);
+  }
+});
+
+test("serialized proven boundary no-ops return the unchanged authoritative effort without a command", async () => {
+  for (const testCase of [
+    { direction: "decrease" as const, currentEffort: "low" },
+    { direction: "increase" as const, currentEffort: "ultra" }
+  ]) {
+    const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const harness = createGuardedRendererHarness({ currentEffort: testCase.currentEffort });
+    const testBridge = bridge as unknown as {
+      ensureConnected: () => Promise<void>;
+      evaluate: <T>(source: string) => Promise<T>;
+    };
+    testBridge.ensureConnected = async () => {};
+    testBridge.evaluate = harness.evaluate;
+
+    assert.deepEqual(await bridge.adjustReasoning(testCase.direction), {
+      outcome: "applied", reasoningEffort: testCase.currentEffort
+    });
+    assert.deepEqual(harness.runnerCalls, []);
+  }
 });
 
 test("concurrent serialized guarded increases recheck live effort immediately before invoking the runner", async () => {
@@ -1356,12 +1444,15 @@ test("concurrent serialized guarded increases recheck live effort immediately be
   const second = bridge.adjustReasoning("increase", { includeUltra: false });
   const results = await Promise.all([first, second]);
 
-  assert.deepEqual([...results].sort(), ["applied", "blocked-ultra"]);
+  assert.deepEqual(results, [
+    { outcome: "applied", reasoningEffort: "max" },
+    { outcome: "blocked-ultra", reasoningEffort: "max" }
+  ]);
   assert.deepEqual(harness.runnerCalls, [["composer.increaseReasoningEffort", "codex_micro_hid"]]);
   assert.equal(harness.currentEffort(), "max");
 });
 
-test("an unconfirmed guarded transition reserves its prior state against later increases", async () => {
+test("an unconfirmed guarded transition fails and reserves its prior state against later increases", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const harness = createGuardedRendererHarness({
     currentEffort: "xhigh",
@@ -1374,7 +1465,10 @@ test("an unconfirmed guarded transition reserves its prior state against later i
   testBridge.ensureConnected = async () => {};
   testBridge.evaluate = harness.evaluate;
 
-  assert.equal(await bridge.adjustReasoning("increase", { includeUltra: false }), "applied");
+  await assert.rejects(
+    bridge.adjustReasoning("increase", { includeUltra: false }),
+    /Codex reasoning metadata is unavailable\./
+  );
   await assert.rejects(
     bridge.adjustReasoning("increase", { includeUltra: false }),
     /Codex reasoning metadata is unavailable\./
@@ -1421,7 +1515,7 @@ test("guarded reasoning expression serializes every helper dependency into rende
   testBridge.ensureConnected = async () => {};
   testBridge.evaluate = async <T>(source: string): Promise<T> => {
     expression = source;
-    return "blocked-ultra" as T;
+    return { outcome: "blocked-ultra", reasoningEffort: "max" } as T;
   };
 
   await bridge.adjustReasoning("increase", { includeUltra: false });
@@ -1442,6 +1536,7 @@ test("guarded reasoning expression serializes every helper dependency into rende
     "readReasoningModelCatalogMatch",
     "readActiveReasoningMetadata",
     "decideReasoningAdjustment",
+    "readConfirmedReasoningEffort",
     "resolveCommandRunner"
   ]) assert.match(expression, new RegExp(`const ${helper} = \\(`), `${helper} is defined in renderer scope`);
 });
@@ -1456,7 +1551,9 @@ test("protected generic keycaps cannot reach the low-level reasoning runner", as
   testBridge.ensureConnected = async () => {};
   testBridge.evaluate = async <T>(source: string): Promise<T> => {
     expressions.push(source);
-    return true as T;
+    return (source.includes("composer.increaseReasoningEffort") || source.includes("composer.decreaseReasoningEffort")
+      ? { outcome: "applied", reasoningEffort: "high" }
+      : true) as T;
   };
 
   await bridge.runKeycap("TERM");

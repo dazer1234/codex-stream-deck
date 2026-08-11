@@ -391,7 +391,8 @@ async function executeRelayCommand(
     return undefined;
   }
   if (command.kind === "reasoning") {
-    return control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
+    const execution = await control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
+    return execution.outcome;
   }
   if (command.kind === "usage-refresh") {
     await control.refreshUsage();

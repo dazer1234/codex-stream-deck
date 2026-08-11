@@ -6,7 +6,7 @@ import { expandDialPreset, type DialCommandQueue } from "../src/dial-domain.js";
 import type { CodexDialSettings, DialRuntimeState } from "../src/dial-types.js";
 import type {
   CodexHost, HostHealth, MicroSnapshot, ReasoningAdjustmentPolicy,
-  ReasoningAdjustmentResult, RoutedAgentSlot
+  ReasoningAdjustmentExecution, ReasoningAdjustmentResult, RoutedAgentSlot
 } from "../src/types.js";
 
 type FakeDial = DialAction<CodexDialSettings> & {
@@ -44,7 +44,7 @@ type ControllerProbe = {
     adjustReasoning?(
       direction: string,
       policy?: ReasoningAdjustmentPolicy
-    ): Promise<void | ReasoningAdjustmentResult>;
+    ): Promise<ReasoningAdjustmentExecution>;
     runKeycap?(keycapId: string): Promise<void>;
     consumeRateLimitReset?(): Promise<void>;
     refresh?(): Promise<MicroSnapshot>;
@@ -592,6 +592,7 @@ test("paired detents continue after a dispatch failure and alert only the failin
     async adjustReasoning() {
       attempts.push(`attempt-${attempts.length + 1}`);
       if (attempts.length === 1) throw new Error("first detent failed");
+      return { outcome: "applied" };
     }
   };
 
@@ -615,7 +616,7 @@ test("reasoning dial maps each direction to one dedicated adjustment without enc
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning(direction) { adjustments.push(direction); },
+    async adjustReasoning(direction) { adjustments.push(direction); return { outcome: "applied" }; },
     async sendEncoder(act) { encoderClicks.push(act); }
   };
 
@@ -642,7 +643,7 @@ test("local reasoning detents capture and pass each dial's explicit Ultra policy
     async sendAgent() {},
     async adjustReasoning(direction, policy) {
       policies.push([direction, policy]);
-      return "applied";
+      return { outcome: "applied" };
     }
   };
 
@@ -733,7 +734,7 @@ test("public reasoning actions remain unrestricted locally and remotely", async 
     async sendAgent() {},
     async adjustReasoning(direction, policy) {
       localPolicies.push([direction, policy]);
-      return "applied";
+      return { outcome: "applied" };
     }
   };
   state.relayClient = {
@@ -776,7 +777,7 @@ test("blocked local and remote reasoning show identical registration-safe Ultra 
     state.localHealth = { state: "ready", changedAt: 1_000 };
     state.microBridge = {
       async sendAgent() {},
-      async adjustReasoning() { return "blocked-ultra"; }
+      async adjustReasoning() { return { outcome: "blocked-ultra" }; }
     };
     state.relayClient = {
       currentHost: () => REMOTE_HOST,
@@ -842,7 +843,7 @@ test("Ultra notice serializes behind an in-flight authoritative render for its f
     async sendAgent() {},
     async adjustReasoning() {
       blockedReturned.resolve();
-      return "blocked-ultra";
+      return { outcome: "blocked-ultra" };
     }
   };
 
@@ -879,7 +880,7 @@ test("blocked reasoning restores the latest authoritative feedback after 1.2 sec
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning() { return "blocked-ultra"; }
+    async adjustReasoning() { return { outcome: "blocked-ultra" }; }
   };
   controller.registerDial(action, {
     ...expandDialPreset("reasoning"), includeUltraReasoning: false
@@ -915,7 +916,7 @@ test("Ultra notices are canceled safely by settings changes, disposal, and regis
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning() { return "blocked-ultra"; }
+    async adjustReasoning() { return { outcome: "blocked-ultra" }; }
   };
   const blockedSettings = {
     ...expandDialPreset("reasoning"), includeUltraReasoning: false
@@ -1001,7 +1002,7 @@ test("a stale in-flight Ultra notice cannot overwrite replacement registration f
     state.localHealth = { state: "ready", changedAt: 1_000 };
     state.microBridge = {
       async sendAgent() {},
-      async adjustReasoning() { return "blocked-ultra"; }
+      async adjustReasoning() { return { outcome: "blocked-ultra" }; }
     };
     const settings = { ...expandDialPreset("reasoning"), includeUltraReasoning: false };
 
@@ -1058,7 +1059,7 @@ test("disposing during an in-flight failed Ultra notice does not restore or reje
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning() { return "blocked-ultra"; }
+    async adjustReasoning() { return { outcome: "blocked-ultra" }; }
   };
   controller.registerDial(action, {
     ...expandDialPreset("reasoning"), includeUltraReasoning: false
@@ -1090,7 +1091,7 @@ test("failed Ultra notice feedback clears suppression and falls back to authorit
   state.localHealth = { state: "ready", changedAt: 1_000 };
   state.microBridge = {
     async sendAgent() {},
-    async adjustReasoning() { return "blocked-ultra"; }
+    async adjustReasoning() { return { outcome: "blocked-ultra" }; }
   };
   controller.registerDial(action, {
     ...expandDialPreset("reasoning"), includeUltraReasoning: false
@@ -1345,7 +1346,7 @@ test("dial host commands require ready health for starts but execute when ready"
       state.localHealth = { state: health, changedAt: 1_000 };
       state.microBridge = {
         async sendAgent() {},
-        async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); },
+        async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); return { outcome: "applied" }; },
         async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
         async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
         async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }
@@ -1371,7 +1372,7 @@ test("dial host commands require ready health for starts but execute when ready"
     state.localHealth = { state: "ready", changedAt: 1_000 };
     state.microBridge = {
       async sendAgent() {},
-      async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); },
+      async adjustReasoning(direction) { sends.push(`reasoning:${direction}`); return { outcome: "applied" }; },
       async runKeycap(keycapId) { sends.push(`keycap:${keycapId}`); },
       async sendAction(slot, act) { sends.push(`action:${slot}:${act}`); },
       async sendJoystick(direction, distance) { sends.push(`joystick:${direction}:${distance}`); }

@@ -28,6 +28,10 @@ export type MicroDirection = "up" | "right" | "down" | "left";
 export type ReasoningAdjustment = "decrease" | "increase";
 export type ReasoningAdjustmentPolicy = { includeUltra: boolean };
 export type ReasoningAdjustmentResult = "applied" | "blocked-ultra";
+export type ReasoningAdjustmentExecution = {
+  outcome: ReasoningAdjustmentResult;
+  reasoningEffort?: string;
+};
 
 export type MicroLayout = {
   version: 1;
