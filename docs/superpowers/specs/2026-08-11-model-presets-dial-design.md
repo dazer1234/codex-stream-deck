@@ -127,15 +127,13 @@ The operation runs under the same renderer-global serialization boundary as Reas
 
 1. Reads authoritative active metadata and the current catalog.
 2. Verifies the requested pair exists in the same validated catalog record and passes the Ultra policy.
-3. Resolves Codex's application-level model-selection handler or store operation from the current installed bundle.
-4. Applies the exact model without keyboard, focus, or Tab navigation.
-5. Waits for the visible composer to confirm the requested model.
-6. Re-reads the model's resulting reasoning level.
-7. Uses the existing confirmed Reasoning command path to reach the requested level, one supported step at a time.
-8. Confirms that the final visible model and reasoning pair both match the request.
-9. Returns only the confirmed pair.
+3. Resolves the unique active model-picker component's native `onSelectModel(modelId, reasoningEffort)` callback from the current installed bundle.
+4. Verifies that the callback is the bounded, descriptor-safe, direct two-argument application wrapper associated with the same unique visible composer and validated catalog.
+5. Invokes that callback exactly once with the requested pair. Codex then submits model and reasoning together through its native thread/default settings operation and retains its own permission and Ultra safeguards.
+6. Re-resolves the active component seam while polling and confirms that its exact model ID and reasoning effort both match the request.
+7. Returns only the confirmed pair.
 
-The model selection integration must be discovered and validated against the current Codex bundle before implementation. It may use an application callback, command, or state-store operation only when the bridge can bind it to the validated active composer and confirm the visible result. Generic DOM clicks, menu-coordinate clicks, keyboard events, and low-level state mutation without visible confirmation are prohibited.
+The current Codex 26.803.41515 bundle exposes the required native callback as the unique visible model-picker React ancestor's own `onSelectModel(modelId, effort)` data property. Its application path performs one native model-and-reasoning settings request for the active thread or host default. Implementation must still resolve and validate this seam at runtime rather than assuming a minified function name. It must require exactly one qualifying ancestor, bounded own-data descriptor traversal, the paired one-argument reasoning callback, an exact validated component catalog, strict callback arity/direct-forwarder shape, and final state confirmation. Generic DOM clicks, menu-coordinate clicks, keyboard events, direct Electron IPC, and unconfirmed state mutation are prohibited.
 
 Rapid detents queue in arrival order. Each queued operation resolves its target from the state confirmed by its predecessor. The controller retains the bounded command queue and backpressure behavior already used by dials.
 
@@ -166,7 +164,7 @@ If validation fails before model selection, send no command and keep the last au
 
 An absent, stale, or generation-mismatched catalog is not evidence that saved entries are invalid. In that state the dial shows `UNAVAILABLE`, sends no command, and makes no deletion or skip decision until an authoritative catalog returns. `NO PRESETS` is reserved for an empty saved list or a current authoritative catalog proving that every saved entry is invalid.
 
-If model selection succeeds but reasoning adjustment or final confirmation fails, do not attempt an automatic rollback. A rollback could itself target a stale composer or unsupported pair. Instead:
+After the paired callback has been invoked, failure to confirm the exact requested pair is an uncertain result. This includes a partial model-only or effort-only state, a timeout, or an unreadable post-state. Do not attempt an automatic rollback because a rollback could itself target a stale composer or unsupported pair. Instead:
 
 1. reserve uncertainty in the shared renderer guard;
 2. force a fresh snapshot;
@@ -202,8 +200,8 @@ Use test-driven slices with a failing regression before each production change.
 
 - live catalog extraction and active-model matching;
 - exact application-level model selection with no keyboard/focus navigation;
-- model confirmation before reasoning steps;
-- multi-step reasoning confirmation and final pair confirmation;
+- exactly one native model-and-reasoning callback invocation per preset change;
+- re-resolved component state confirmation of the final pair;
 - serialized rapid requests that resolve direction only at queue execution time, plus mixed Reasoning/preset requests;
 - partial failure, uncertainty, timeout, reconnect, and late response behavior;
 - hostile getters, proxies, symbols, conflicting catalogs, and traversal bounds.
