@@ -754,12 +754,13 @@ export function readActiveReasoningMetadata(
 type ModelPresetSelector = {
   modelId: string;
   reasoningEffort: string;
+  modelCatalog: CodexModelCatalogEntry[];
   select: (modelId: string, reasoningEffort: string) => unknown;
 };
 
 export function readComponentModelCatalog(value: unknown): CodexModelCatalogEntry[] | undefined {
   try {
-    const records = readBoundedOwnDataArray(value, 32);
+    const records = readExactBoundedOwnDataArray(value, 32);
     if (!records || records.length === 0 || Object.getOwnPropertySymbols(value).length > 0) return undefined;
     const catalog: CodexModelCatalogEntry[] = [];
     const seen = new Set<string>();
@@ -774,8 +775,11 @@ export function readComponentModelCatalog(value: unknown): CodexModelCatalogEntr
           typeof displayName.value !== "string" || displayName.value.length === 0 ||
           displayName.value.length > 80) return undefined;
       const normalizedName = normalizeReasoningModelLabel(displayName.value, true);
+      const exactEffortRecords = readExactBoundedOwnDataArray(effortRecords.value, 16);
       const efforts = normalizeReasoningEffortOrder(effortRecords.value);
-      if (!normalizedName || !efforts || efforts.length > 16) return undefined;
+      if (!normalizedName || !exactEffortRecords || exactEffortRecords.length === 0 || !efforts || efforts.length > 16) {
+        return undefined;
+      }
       const normalizedDisplayName = displayName.value.trim().replace(/^gpt[ -]+/i, "").replace(/[ -]+/g, " ");
       if (!normalizedDisplayName || normalizedDisplayName.length > 80) return undefined;
       seen.add(model.value);
@@ -785,33 +789,70 @@ export function readComponentModelCatalog(value: unknown): CodexModelCatalogEntr
   } catch { return undefined; }
 }
 
-export function areModelCatalogsEqual(leftValue: unknown, rightValue: unknown): boolean {
+export function readNormalizedModelCatalog(value: unknown): CodexModelCatalogEntry[] | undefined {
   try {
-      const left = readBoundedOwnDataArray(leftValue, 32);
-      const right = readBoundedOwnDataArray(rightValue, 32);
-      if (!left || !right || left.length === 0 || left.length !== right.length) return false;
-      for (let index = 0; index < left.length; index++) {
-        const leftEntry = left[index];
-        const rightEntry = right[index];
-        if (!leftEntry || typeof leftEntry !== "object" || !rightEntry || typeof rightEntry !== "object" ||
-            Object.getOwnPropertySymbols(leftEntry).length > 0 ||
-            Object.getOwnPropertySymbols(rightEntry).length > 0) return false;
-        const leftId = readOwnDataProperty(leftEntry, "modelId");
-        const rightId = readOwnDataProperty(rightEntry, "modelId");
-        const leftName = readOwnDataProperty(leftEntry, "displayName");
-        const rightName = readOwnDataProperty(rightEntry, "displayName");
-        const leftEfforts = readOwnDataProperty(leftEntry, "supportedReasoningEfforts");
-        const rightEfforts = readOwnDataProperty(rightEntry, "supportedReasoningEfforts");
-        if (!leftId?.exists || !rightId?.exists || leftId.value !== rightId.value ||
-            !leftName?.exists || !rightName?.exists || leftName.value !== rightName.value ||
-            !leftEfforts?.exists || !rightEfforts?.exists) return false;
-        const leftItems = readBoundedOwnDataArray(leftEfforts.value, 16);
-        const rightItems = readBoundedOwnDataArray(rightEfforts.value, 16);
-        if (!leftItems || !rightItems || leftItems.length === 0 || leftItems.length !== rightItems.length ||
-            leftItems.some((effort, effortIndex) => effort !== rightItems[effortIndex])) return false;
+    const rawEntries = readExactBoundedOwnDataArray(value, 32);
+    if (!rawEntries || rawEntries.length === 0 || Object.getOwnPropertySymbols(value).length > 0) return undefined;
+    const entries: CodexModelCatalogEntry[] = [];
+    const modelIds = new Set<string>();
+    const displayNames = new Set<string>();
+    for (const rawEntry of rawEntries) {
+      if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry) ||
+          Object.getOwnPropertySymbols(rawEntry).length > 0) return undefined;
+      const prototype = Object.getPrototypeOf(rawEntry);
+      const names = Object.getOwnPropertyNames(rawEntry);
+      if ((prototype !== Object.prototype && prototype !== null) || names.length !== 3 ||
+          !names.includes("modelId") || !names.includes("displayName") ||
+          !names.includes("supportedReasoningEfforts")) return undefined;
+      const modelId = readOwnDataProperty(rawEntry, "modelId");
+      const displayName = readOwnDataProperty(rawEntry, "displayName");
+      const rawEfforts = readOwnDataProperty(rawEntry, "supportedReasoningEfforts");
+      if (!modelId?.exists || !isSafeReasoningIdentifier(modelId.value, 128) || modelIds.has(modelId.value) ||
+          !displayName?.exists || typeof displayName.value !== "string" || displayName.value.length === 0 ||
+          displayName.value.length > 80 || !rawEfforts?.exists) return undefined;
+      const normalizedDisplayName = normalizeReasoningModelLabel(displayName.value);
+      const efforts = readExactBoundedOwnDataArray(rawEfforts.value, 16);
+      if (!normalizedDisplayName || displayNames.has(normalizedDisplayName) || !efforts || efforts.length === 0 ||
+          Object.getOwnPropertySymbols(rawEfforts.value).length > 0) return undefined;
+      const normalizedEfforts: string[] = [];
+      const seenEfforts = new Set<string>();
+      for (const effort of efforts) {
+        if (!isSafeReasoningIdentifier(effort) || seenEfforts.has(effort)) return undefined;
+        seenEfforts.add(effort);
+        normalizedEfforts.push(effort);
       }
-      return true;
-  } catch { return false; }
+      modelIds.add(modelId.value);
+      displayNames.add(normalizedDisplayName);
+      entries.push({
+        modelId: modelId.value,
+        displayName: normalizedDisplayName,
+        supportedReasoningEfforts: normalizedEfforts
+      });
+    }
+    return entries;
+  } catch { return undefined; }
+}
+
+export function isAuthorizedModelCatalogProjection(
+  componentValue: unknown,
+  authoritativeValue: unknown
+): boolean {
+  const component = readNormalizedModelCatalog(componentValue);
+  const authoritative = readNormalizedModelCatalog(authoritativeValue);
+  if (!component || !authoritative) return false;
+  const authoritativeById = new Map(authoritative.map((entry) => [entry.modelId, entry]));
+  for (const componentEntry of component) {
+    const authoritativeEntry = authoritativeById.get(componentEntry.modelId);
+    if (!authoritativeEntry || componentEntry.displayName !== authoritativeEntry.displayName) return false;
+    let authoritativeIndex = 0;
+    for (const effort of componentEntry.supportedReasoningEfforts) {
+      while (authoritativeIndex < authoritativeEntry.supportedReasoningEfforts.length &&
+          authoritativeEntry.supportedReasoningEfforts[authoritativeIndex] !== effort) authoritativeIndex++;
+      if (authoritativeIndex >= authoritativeEntry.supportedReasoningEfforts.length) return false;
+      authoritativeIndex++;
+    }
+  }
+  return true;
 }
 
 export function readModelPresetSelector(
@@ -881,12 +922,13 @@ export function readModelPresetSelector(
           const modelMatch = /^\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)=>\{([A-Za-z_$][\w$]*)\(\1,\2\)\}$/.exec(modelSource);
           const effortMatch = /^([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\1\)\}$/.exec(effortSource);
           const active = componentCatalog?.find((entry) => entry.modelId === currentModel);
-          if (!componentCatalog || !areModelCatalogsEqual(componentCatalog, authoritative) || !active ||
+          if (!componentCatalog || !isAuthorizedModelCatalogProjection(componentCatalog, authoritative) || !active ||
               !active.supportedReasoningEfforts.includes(currentEffort) || !modelMatch || !effortMatch ||
               modelMatch[3] !== effortMatch[2] || effortMatch[3] === effortMatch[1]) return undefined;
           candidates.push({
             modelId: currentModel,
             reasoningEffort: currentEffort,
+            modelCatalog: componentCatalog,
             select: modelSelector
           });
         }
@@ -1504,7 +1546,8 @@ export class CodexMicroRendererBridge {
         const matchActiveReasoningModel = (${matchActiveReasoningModel.toString()});
         const readActiveReasoningMetadata = (${readActiveReasoningMetadata.toString()});
         const readComponentModelCatalog = (${readComponentModelCatalog.toString()});
-        const areModelCatalogsEqual = (${areModelCatalogsEqual.toString()});
+        const readNormalizedModelCatalog = (${readNormalizedModelCatalog.toString()});
+        const isAuthorizedModelCatalogProjection = (${isAuthorizedModelCatalogProjection.toString()});
         const readModelPresetSelector = (${readModelPresetSelector.toString()});
         const reasoningSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"]';
         const readAuthority = () => {
@@ -1535,12 +1578,16 @@ export class CodexMicroRendererBridge {
         const targetModel = metadata.modelCatalog.find((entry) => entry.modelId === request.modelId);
         if (!targetModel || !targetModel.supportedReasoningEfforts.includes(request.reasoningEffort) ||
             (!request.includeUltra && request.reasoningEffort === 'ultra')) return 'metadata-unavailable';
-        if (metadata.modelId === request.modelId && metadata.currentEffort === request.reasoningEffort) {
-          return { modelId: metadata.modelId, reasoningEffort: metadata.currentEffort };
-        }
         const selector = readSeam(metadata);
         if (!selector || selector.modelId !== metadata.modelId ||
             selector.reasoningEffort !== metadata.currentEffort) return 'metadata-unavailable';
+        const selectorTarget = selector.modelCatalog.find((entry) => entry.modelId === request.modelId);
+        if (!selectorTarget || !selectorTarget.supportedReasoningEfforts.includes(request.reasoningEffort)) {
+          return 'metadata-unavailable';
+        }
+        if (metadata.modelId === request.modelId && metadata.currentEffort === request.reasoningEffort) {
+          return { modelId: metadata.modelId, reasoningEffort: metadata.currentEffort };
+        }
         guardState.uncertain = {
           modelId: metadata.modelId,
           currentEffort: metadata.currentEffort,

@@ -11,6 +11,28 @@ import type { MicroSnapshot, ModelPresetRequest } from "../src/types.js";
 
 let guardedRendererHarnessId = 0;
 
+const liveAuthoritativeCatalog = [
+  { modelId: "gpt-5.6-sol", displayName: "5.6 Sol", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+  { modelId: "gpt-5.6-sol-wm", displayName: "5.6 Sol WM", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+  { modelId: "gpt-5.6-terra", displayName: "5.6 Terra", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+  { modelId: "gpt-5.6-luna", displayName: "5.6 Luna", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+  { modelId: "gpt-5.5", displayName: "5.5", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.4", displayName: "5.4", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.4-mini", displayName: "5.4 Mini", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.3-codex-spark", displayName: "5.3 Codex Spark", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "codex-auto-review", displayName: "Codex Auto Review", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }
+];
+
+const liveComponentCatalog = [
+  { modelId: "gpt-5.6-sol", displayName: "5.6 Sol", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"] },
+  { modelId: "gpt-5.6-terra", displayName: "5.6 Terra", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"] },
+  { modelId: "gpt-5.6-luna", displayName: "5.6 Luna", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.5", displayName: "5.5", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.4", displayName: "5.4", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.4-mini", displayName: "5.4 Mini", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  { modelId: "gpt-5.3-codex-spark", displayName: "5.3 Codex Spark", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] }
+];
+
 class ReasoningQueryClientFixture {
   #entries: unknown;
 
@@ -172,6 +194,7 @@ function createModelPresetHarness(options: {
   symbolFiber?: boolean;
   getterCounter?: { count: number };
   callbackLengthAccessors?: boolean;
+  liveCatalogProjection?: boolean;
   ancestorTailDepth?: number;
   hiddenTrigger?: boolean;
   modelSource?: string;
@@ -184,19 +207,24 @@ function createModelPresetHarness(options: {
   let _ = modelId;
   let reasoningEffort = options.reasoningEffort ?? "high";
   const selectorCalls: Array<[string, string]> = [];
-  const records = [
+  const basicCatalog = [
     {
-      displayName: "GPT-5.6-Sol",
-      model: "gpt-5.6-sol",
-      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"].map((value) => ({ reasoningEffort: value }))
+      modelId: "gpt-5.6-sol", displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
     },
     {
-      displayName: "GPT-5.6-Terra",
-      model: "gpt-5.6-terra",
-      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"].map((value) => ({ reasoningEffort: value }))
+      modelId: "gpt-5.6-terra", displayName: "5.6 Terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
     }
   ];
-  const queryClient = new ReasoningQueryClientFixture([[ ["models", "list"], { data: records } ]]);
+  const toRawRecords = (catalog: typeof liveAuthoritativeCatalog) => catalog.map((entry) => ({
+    displayName: `GPT-${entry.displayName.replace(/ /g, "-")}`,
+    model: entry.modelId,
+    supportedReasoningEfforts: entry.supportedReasoningEfforts.map((value) => ({ reasoningEffort: value }))
+  }));
+  const authoritativeRecords = toRawRecords(options.liveCatalogProjection ? liveAuthoritativeCatalog : basicCatalog);
+  const componentRecords = toRawRecords(options.liveCatalogProjection ? liveComponentCatalog : basicCatalog);
+  const queryClient = new ReasoningQueryClientFixture([[ ["models", "list"], { data: authoritativeRecords } ]]);
   const root = { "__reactContainer$modelPreset": { memoizedProps: { value: queryClient }, child: null, sibling: null } };
   let trigger: Record<string, any>;
   let componentFiber: Record<string, any>;
@@ -230,7 +258,7 @@ function createModelPresetHarness(options: {
     const props = {
       model: modelId,
       reasoningEffort,
-      models: records,
+      models: componentRecords,
       onSelectModel,
       onSelectReasoningEffort
     };
@@ -272,7 +300,10 @@ function createModelPresetHarness(options: {
       getAttribute: () => null,
       parentElement: trigger,
       children: [],
-      get textContent() { return modelId === "gpt-5.6-sol" ? "5.6 Sol" : "5.6 Terra"; }
+      get textContent() {
+        return (options.liveCatalogProjection ? liveAuthoritativeCatalog : basicCatalog)
+          .find((entry) => entry.modelId === modelId)?.displayName ?? modelId;
+      }
     }] : [],
     "__reactFiber$modelPreset": componentFiber
   };
@@ -2080,8 +2111,41 @@ test("concurrent serialized guarded increases recheck live effort immediately be
   assert.equal(harness.currentEffort(), "max");
 });
 
+test("authorized model catalog projection accepts the exact live subset and rejects hostile drift", () => {
+  const authorize = Reflect.get(microBridgeModule, "isAuthorizedModelCatalogProjection") as unknown;
+  assert.equal(typeof authorize, "function");
+  const isAuthorized = authorize as (component: unknown, authoritative: unknown) => boolean;
+  assert.equal(isAuthorized(liveComponentCatalog, liveAuthoritativeCatalog), true);
+
+  const mutate = (callback: (catalog: typeof liveComponentCatalog) => void) => {
+    const catalog = structuredClone(liveComponentCatalog);
+    callback(catalog);
+    return catalog;
+  };
+  assert.equal(isAuthorized(mutate((catalog) => catalog[0]!.supportedReasoningEfforts.push("unsupported")), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => catalog[0]!.supportedReasoningEfforts.reverse()), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => { catalog[0]!.displayName = "5.6 Terra"; }), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => { catalog[0]!.supportedReasoningEfforts = []; }), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => catalog[0]!.supportedReasoningEfforts.push("medium")), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => { catalog[1]!.modelId = catalog[0]!.modelId; }), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => { catalog[1]!.displayName = catalog[0]!.displayName; }), liveAuthoritativeCatalog), false);
+  assert.equal(isAuthorized(mutate((catalog) => catalog.push({
+    modelId: "gpt-hostile", displayName: "Hostile", supportedReasoningEfforts: ["medium"]
+  })), liveAuthoritativeCatalog), false);
+
+  let getterCalls = 0;
+  const accessorEntry = Object.defineProperties({}, {
+    modelId: { enumerable: true, get() { getterCalls++; return "gpt-5.6-sol"; } },
+    displayName: { enumerable: true, value: "5.6 Sol" },
+    supportedReasoningEfforts: { enumerable: true, value: ["medium"] }
+  });
+  assert.equal(isAuthorized([accessorEntry], liveAuthoritativeCatalog), false);
+  assert.equal(getterCalls, 0);
+  assert.equal(isAuthorized(new Proxy([], { ownKeys() { throw new Error("hostile"); } }), liveAuthoritativeCatalog), false);
+});
+
 test("paired model preset selector invokes the exact native pair once and confirms a microtask re-render", async () => {
-  const harness = createModelPresetHarness({ reasoningSource: "e=>{ye(_,e)}" });
+  const harness = createModelPresetHarness({ liveCatalogProjection: true, reasoningSource: "e=>{ye(_,e)}" });
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const testBridge = bridge as unknown as {
     ensureConnected: () => Promise<void>;
@@ -2100,6 +2164,37 @@ test("paired model preset selector invokes the exact native pair once and confir
     reasoningEffort: "medium"
   });
   assert.deepEqual(harness.selectorCalls, [["gpt-5.6-terra", "medium"]]);
+});
+
+test("paired model preset selector requires current and target pairs in both catalog authorities", async () => {
+  const hiddenCurrent = createModelPresetHarness({
+    liveCatalogProjection: true, modelId: "gpt-5.6-sol-wm", reasoningEffort: "medium"
+  });
+  const hiddenCurrentBridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const hiddenCurrentTestBridge = hiddenCurrentBridge as unknown as {
+    ensureConnected: () => Promise<void>; evaluate: typeof hiddenCurrent.evaluate;
+  };
+  hiddenCurrentTestBridge.ensureConnected = async () => {};
+  hiddenCurrentTestBridge.evaluate = hiddenCurrent.evaluate;
+  await assert.rejects(hiddenCurrentBridge.applyModelPreset({
+    modelId: "gpt-5.6-sol-wm", reasoningEffort: "medium", includeUltra: false
+  }), /metadata|selector/i);
+  assert.equal(hiddenCurrent.selectorCalls.length, 0);
+
+  for (const request of [
+    { modelId: "gpt-5.6-sol", reasoningEffort: "max", includeUltra: false },
+    { modelId: "gpt-5.6-sol-wm", reasoningEffort: "medium", includeUltra: false }
+  ]) {
+    const hiddenTarget = createModelPresetHarness({ liveCatalogProjection: true });
+    const hiddenTargetBridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+    const hiddenTargetTestBridge = hiddenTargetBridge as unknown as {
+      ensureConnected: () => Promise<void>; evaluate: typeof hiddenTarget.evaluate;
+    };
+    hiddenTargetTestBridge.ensureConnected = async () => {};
+    hiddenTargetTestBridge.evaluate = hiddenTarget.evaluate;
+    await assert.rejects(hiddenTargetBridge.applyModelPreset(request), /metadata|selector/i);
+    assert.equal(hiddenTarget.selectorCalls.length, 0);
+  }
 });
 
 test("paired model preset selector validates direct shared-callee forwarders before invocation", async () => {
