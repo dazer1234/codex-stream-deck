@@ -14,6 +14,7 @@ import { getOrCreateHostIdentity } from "./host-identity.js";
 import { ADDITIONAL_KEYCAPS, type OfficialKeycapId } from "./keycaps.js";
 import {
   DialCommandQueue,
+  MAX_DIAL_QUEUE_PENDING,
   bindingLifecycle,
   deriveDialFeedback,
   dialBindingLabel,
@@ -88,7 +89,9 @@ type DialGesture = {
   startedAt: number;
   endedAt?: number;
   phase: DialGesturePhase;
+  modelReasoningReservation?: ModelReasoningMutationReservation;
 };
+type ModelReasoningMutationReservation = { released: boolean };
 type DialRegistration = {
   action: CodexDialAction;
   settings: CodexDialSettings;
@@ -182,6 +185,7 @@ export class DeckController {
   private animation?: NodeJS.Timeout;
   private refreshInFlight?: Promise<void>;
   private modelReasoningMutationTail: Promise<void> = Promise.resolve();
+  private modelReasoningMutationPending = 0;
   private localSnapshotGeneration = 0;
   private controllerLifecycleGeneration = 0;
   private stopped = false;
@@ -527,8 +531,13 @@ export class DeckController {
   }
 
   private serializeModelReasoningMutation<Result>(
-    operation: () => Promise<Result>
+    operation: () => Promise<Result>,
+    reserved?: ModelReasoningMutationReservation
   ): Promise<Result> {
+    const reservation = reserved ?? this.reserveModelReasoningMutations(1)?.[0];
+    if (!reservation) {
+      return Promise.reject(new Error("Model and reasoning mutation queue is full."));
+    }
     const lifecycleGeneration = this.controllerLifecycleGeneration;
     const guardedOperation = async (): Promise<Result> => {
       this.assertControllerLifecycle(lifecycleGeneration);
@@ -536,9 +545,54 @@ export class DeckController {
       this.assertControllerLifecycle(lifecycleGeneration);
       return result;
     };
-    const result = this.modelReasoningMutationTail.then(guardedOperation, guardedOperation);
+    const ordered = this.modelReasoningMutationTail.then(guardedOperation, guardedOperation);
+    const result = ordered.finally(() => this.releaseModelReasoningMutation(reservation));
     this.modelReasoningMutationTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private reserveModelReasoningMutations(
+    count: number
+  ): ModelReasoningMutationReservation[] | undefined {
+    if (!Number.isSafeInteger(count) || count < 0 ||
+        this.modelReasoningMutationPending + count > MAX_DIAL_QUEUE_PENDING) {
+      return undefined;
+    }
+    this.modelReasoningMutationPending += count;
+    return Array.from(
+      { length: count },
+      (): ModelReasoningMutationReservation => ({ released: false })
+    );
+  }
+
+  private releaseModelReasoningMutation(reservation: ModelReasoningMutationReservation): void {
+    if (reservation.released) return;
+    reservation.released = true;
+    this.modelReasoningMutationPending -= 1;
+  }
+
+  private reserveDialGestureMutation(gesture: DialGesture): boolean {
+    if (gesture.binding !== "reasoning.decrease" && gesture.binding !== "reasoning.increase") {
+      return true;
+    }
+    const reservation = this.reserveModelReasoningMutations(1)?.[0];
+    if (!reservation) return false;
+    gesture.modelReasoningReservation = reservation;
+    return true;
+  }
+
+  private releaseDialGestureMutation(gesture: DialGesture): void {
+    if (!gesture.modelReasoningReservation) return;
+    this.releaseModelReasoningMutation(gesture.modelReasoningReservation);
+    gesture.modelReasoningReservation = undefined;
+  }
+
+  private takeDialGestureMutation(
+    gesture: DialGesture
+  ): ModelReasoningMutationReservation | undefined {
+    const reservation = gesture.modelReasoningReservation;
+    gesture.modelReasoningReservation = undefined;
+    return reservation;
   }
 
   private assertControllerLifecycle(lifecycleGeneration: number): void {
@@ -640,9 +694,17 @@ export class DeckController {
         );
         return;
       }
+      const reservations = this.reserveModelReasoningMutations(count);
+      if (!reservations) {
+        void this.reportDialCommandError(
+          registration,
+          new Error("Dial rotation ignored: model and reasoning mutation queue is full.")
+        );
+        return;
+      }
       const direction: ModelPresetDirection = ticks > 0 ? "clockwise" : "counter-clockwise";
       for (let detent = 0; detent < count; detent += 1) {
-        this.enqueueModelPresetDirection(registration, direction);
+        this.enqueueModelPresetDirection(registration, direction, reservations[detent]!);
       }
       return;
     }
@@ -663,16 +725,31 @@ export class DeckController {
       );
       return;
     }
+    const reasoningCount = reduced.bindings.filter((binding) =>
+      binding === "reasoning.decrease" || binding === "reasoning.increase").length;
+    const reasoningReservations = this.reserveModelReasoningMutations(reasoningCount);
+    if (!reasoningReservations) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial rotation ignored: model and reasoning mutation queue is full.")
+      );
+      return;
+    }
     const startedAt = Date.now();
+    let reasoningReservationIndex = 0;
     for (const binding of reduced.bindings) {
       const gesture = this.captureDialGesture(registration, binding, undefined, startedAt);
+      if (binding === "reasoning.decrease" || binding === "reasoning.increase") {
+        gesture.modelReasoningReservation = reasoningReservations[reasoningReservationIndex++];
+      }
       this.enqueueDialTap(registration, gesture);
     }
   }
 
   private enqueueModelPresetDirection(
     registration: DialRegistration,
-    direction: ModelPresetDirection
+    direction: ModelPresetDirection,
+    reservation: ModelReasoningMutationReservation
   ): void {
     const accepted = registration.queue.enqueue(async () => {
       await this.serializeModelReasoningMutation(async () => {
@@ -711,8 +788,11 @@ export class DeckController {
           await this.renderDialSafely(registration);
           await this.reportDialCommandError(registration, error);
         }
-      });
+      }, reservation);
     });
+    if (!accepted) {
+      this.releaseModelReasoningMutation(reservation);
+    }
     if (!accepted && this.isCurrentDialRegistration(registration)) {
       void this.reportDialCommandError(
         registration,
@@ -727,6 +807,13 @@ export class DeckController {
     if (registration.pressed) return registration.queue.idle();
     registration.settings = normalizeDialSettings(registration.settings);
     const pressed = this.resolveDialPress(registration, Date.now());
+    if (!this.reserveDialGestureMutation(pressed)) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial press ignored: model and reasoning mutation queue is full.")
+      );
+      return registration.queue.idle();
+    }
     registration.pressed = pressed;
     this.enqueueDialDown(registration, pressed);
     return registration.queue.idle();
@@ -753,6 +840,13 @@ export class DeckController {
       undefined,
       Date.now()
     );
+    if (!this.reserveDialGestureMutation(gesture)) {
+      void this.reportDialCommandError(
+        registration,
+        new Error("Dial gesture ignored: model and reasoning mutation queue is full.")
+      );
+      return registration.queue.idle();
+    }
     this.enqueueDialTap(registration, gesture);
     return registration.queue.idle();
   }
@@ -1419,6 +1513,7 @@ export class DeckController {
     const accepted = registration.queue.enqueue(async () => {
       if (!this.isCurrentDialRegistration(registration)) {
         gesture.phase = "canceled";
+        this.releaseDialGestureMutation(gesture);
         return;
       }
       try {
@@ -1450,6 +1545,7 @@ export class DeckController {
     });
     if (!accepted) {
       gesture.phase = "failed";
+      this.releaseDialGestureMutation(gesture);
       if (this.isCurrentDialRegistration(registration)) {
         void this.reportDialCommandError(
           registration,
@@ -1511,6 +1607,7 @@ export class DeckController {
     const accepted = registration.queue.enqueue(async () => {
       if (!this.isCurrentDialRegistration(registration)) {
         gesture.phase = "canceled";
+        this.releaseDialGestureMutation(gesture);
         return;
       }
       if (gesture.lifecycle === "hold") {
@@ -1542,6 +1639,7 @@ export class DeckController {
     });
     if (!accepted) {
       gesture.phase = "failed";
+      this.releaseDialGestureMutation(gesture);
       if (this.isCurrentDialRegistration(registration)) {
         void this.reportDialCommandError(
           registration,
@@ -1601,7 +1699,7 @@ export class DeckController {
         else if (reasoningResultEffort(result) !== undefined) {
           await this.renderDialSafely(registration);
         }
-      });
+      }, this.takeDialGestureMutation(gesture));
       return;
     }
     if (binding === "reasoning.increase") {
@@ -1623,7 +1721,7 @@ export class DeckController {
         else if (reasoningResultEffort(result) !== undefined) {
           await this.renderDialSafely(registration);
         }
-      });
+      }, this.takeDialGestureMutation(gesture));
       return;
     }
     if (binding === "new-task") {

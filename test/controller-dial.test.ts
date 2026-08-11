@@ -32,6 +32,7 @@ type ControllerProbe = {
   targetHostId?: string;
   targetPlatform: CodexHost["platform"];
   localSnapshotGeneration: number;
+  modelReasoningMutationPending: number;
   relayClient?: {
     currentHost(): CodexHost | undefined;
     currentHealth(): HostHealth;
@@ -3331,4 +3332,75 @@ test("shutdown invalidates an in-flight preset and cancels queued dial and publi
   assert.equal(state.localSnapshot, retainedSnapshot, "late in-flight confirmation cannot patch state");
   assert.equal(presetDial.feedbackCalls.length, feedbackCount);
   assert.equal(state.dials.size, 0, "shutdown disposes all dial registrations");
+});
+
+test("controller-wide model and reasoning backlog rejects mixed sources and recovers after drain", async () => {
+  const controller = new DeckController();
+  const firstDial = fakeDial("global-cap-first");
+  const secondDial = fakeDial("global-cap-second");
+  const overflowDial = fakeDial("global-cap-overflow");
+  const state = probe(controller);
+  const firstResult = deferred<ModelPresetExecution>();
+  const presetRequests: ModelPresetRequest[] = [];
+  let reasoningCalls = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      if (presetRequests.length === 1) return firstResult.promise;
+      return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
+    },
+    async adjustReasoning() {
+      reasoningCalls += 1;
+      return { outcome: "applied", reasoningEffort: "medium" };
+    }
+  };
+  controller.registerDial(firstDial, modelPresetSettings());
+  controller.registerDial(secondDial, modelPresetSettings());
+  controller.registerDial(overflowDial, modelPresetSettings());
+  await settle();
+
+  controller.rotateDial(firstDial, 64);
+  controller.rotateDial(secondDial, 64);
+  controller.rotateDial(overflowDial, 1);
+  const publicOverflow = controller.adjustReasoning("increase").then(
+    () => false,
+    (error: unknown) => /model|reasoning|mutation|queue.*full/i.test(String(error))
+  );
+  const relayOverflow = state.adjustLocalReasoningFromRelay(
+    "decrease", { includeUltra: false }
+  ).then(
+    () => false,
+    (error: unknown) => /model|reasoning|mutation|queue.*full/i.test(String(error))
+  );
+  await settle();
+
+  assert.equal(state.modelReasoningMutationPending, 128);
+  assert.equal(presetRequests.length, 1);
+  assert.equal(overflowDial.alerts, 1, "overflowing dial detent is rejected immediately");
+  firstResult.resolve({
+    modelId: presetRequests[0]!.modelId,
+    reasoningEffort: presetRequests[0]!.reasoningEffort
+  });
+  const [, , , publicRejected, relayRejected] = await Promise.all([
+    state.dials.get(firstDial.id)!.queue.idle(),
+    state.dials.get(secondDial.id)!.queue.idle(),
+    state.dials.get(overflowDial.id)!.queue.idle(),
+    publicOverflow,
+    relayOverflow
+  ]);
+
+  assert.equal(publicRejected, true);
+  assert.equal(relayRejected, true);
+  assert.equal(presetRequests.length, 128);
+  assert.equal(reasoningCalls, 0, "overflowed public and relay mutations never reach the bridge");
+  assert.equal(state.modelReasoningMutationPending, 0);
+  await state.adjustLocalReasoningFromRelay("increase", { includeUltra: true });
+  assert.equal(reasoningCalls, 1, "capacity is released after the shared tail drains");
+  assert.equal(state.modelReasoningMutationPending, 0);
 });
