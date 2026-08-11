@@ -11,7 +11,7 @@ import {
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
-import type { CodexHost, ReasoningAdjustmentExecution } from "./types.js";
+import { isSafeReasoningIdentifier, type CodexHost, type ReasoningAdjustmentExecution } from "./types.js";
 
 export type RelayServerConfig = {
   enabled: boolean;
@@ -452,9 +452,7 @@ function validatedRelayExecution(
       if (command.includeReasoningFeedback === true && reasoningEffort === undefined) {
         throw new Error("Invalid reasoning adjustment result.");
       }
-      if (reasoningEffort !== undefined &&
-          (typeof reasoningEffort !== "string" || reasoningEffort.trim().length === 0 ||
-            reasoningEffort.length > 64)) {
+      if (reasoningEffort !== undefined && !isSafeReasoningIdentifier(reasoningEffort)) {
         throw new Error("Invalid reasoning adjustment result.");
       }
       return {

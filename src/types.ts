@@ -33,6 +33,11 @@ export type ReasoningAdjustmentExecution = {
   reasoningEffort?: string;
 };
 
+export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
 export type MicroLayout = {
   version: 1;
   slots: Record<MicroActionSlot, { keycapId: string; commandId?: string }>;

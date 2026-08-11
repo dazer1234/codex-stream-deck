@@ -42,6 +42,7 @@ import {
 } from "./render.js";
 import { openCodexThread } from "./codex-open.js";
 import { visualStatusFromMicro } from "./status.js";
+import { isSafeReasoningIdentifier } from "./types.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
   ReasoningAdjustmentExecution, ReasoningAdjustmentPolicy, ReasoningAdjustmentResult, RoutedAgentSlot,
@@ -1762,9 +1763,7 @@ function parseReasoningExecution(value: unknown): ReasoningAdjustmentExecution |
     const outcome = outcomeProperty.value;
     const reasoningEffort = effortProperty?.value;
     if (outcome !== "applied" && outcome !== "blocked-ultra") return undefined;
-    if (reasoningEffort !== undefined &&
-        (typeof reasoningEffort !== "string" || reasoningEffort.trim().length === 0 ||
-          reasoningEffort.length > 64)) return undefined;
+    if (reasoningEffort !== undefined && !isSafeReasoningIdentifier(reasoningEffort)) return undefined;
     return {
       outcome,
       ...(reasoningEffort === undefined ? {} : { reasoningEffort })

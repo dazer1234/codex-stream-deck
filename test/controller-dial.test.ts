@@ -817,6 +817,7 @@ test("local confirmed reasoning never patches a genuinely replaced host", async 
 
 test("local reasoning feedback accepts only exact own bounded execution data", async () => {
   const controller = new DeckController();
+  const action = fakeDial("reasoning-local-invalid-feedback");
   const state = probe(controller);
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
@@ -834,13 +835,23 @@ test("local reasoning feedback accepts only exact own bounded execution data", a
   });
   const invalid = [
     { outcome: "applied", reasoningEffort: "" },
-    { outcome: "applied", reasoningEffort: " ".repeat(3) },
+    { outcome: "applied", reasoningEffort: " high " },
+    { outcome: "applied", reasoningEffort: "x high" },
+    { outcome: "applied", reasoningEffort: "\n" },
+    { outcome: "applied", reasoningEffort: "high\n" },
+    { outcome: "applied", reasoningEffort: "\u0000" },
+    { outcome: "applied", reasoningEffort: "!!!" },
+    { outcome: "applied", reasoningEffort: "é" },
+    { outcome: "applied", reasoningEffort: "推理" },
     { outcome: "applied", reasoningEffort: "x".repeat(65) },
     { outcome: "applied", reasoningEffort: 1 },
     { outcome: "applied", reasoningEffort: "xhigh", extra: true },
     { outcome: "applied", reasoningEffort: "xhigh", [Symbol("extra")]: true },
     accessor
   ];
+
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
 
   for (const execution of invalid) {
     const result = await state.sendDialToHost(
@@ -854,8 +865,11 @@ test("local reasoning feedback accepts only exact own bounded execution data", a
     );
     assert.equal(result, undefined);
     assert.equal(state.localSnapshot.snapshot.reasoningEffort, "high");
+    await state.renderAll();
+    assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "HIGH");
   }
   assert.equal(getterReads, 0);
+  controller.unregisterDial(action);
 });
 
 test("remote reasoning detents carry each dial's explicit Ultra policy", async () => {

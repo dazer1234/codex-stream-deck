@@ -1,4 +1,5 @@
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
+import { isSafeReasoningIdentifier } from "./types.js";
 import type {
   CodexHost, HostSessionPresence, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
   ReasoningAdjustmentResult, RoutedAgentSlot
@@ -275,7 +276,7 @@ export function parseRelayServerMessage(value: unknown): RelayServerMessage | nu
     const hasReasoningEffort = message.reasoningEffort !== undefined;
     if (message.ok === true &&
         (!hasOutcome || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
-        (!hasReasoningEffort || (hasOutcome && boundedNonblankString(message.reasoningEffort, 64))) &&
+        (!hasReasoningEffort || (hasOutcome && isSafeReasoningIdentifier(message.reasoningEffort))) &&
         exactOwnDataKeys(message, [
           "type", "protocol", "requestId", "ok",
           ...(hasOutcome ? ["outcome"] : []),
@@ -329,8 +330,7 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   if (!boundedNonblankString(value.lightingAutoOff, 64) || !(["light", "dark"] as const).includes(value.theme as never)) return false;
   if (value.activeThreadKey !== undefined && !isThreadKey(value.activeThreadKey)) return false;
   if (value.activeThreadTitle !== undefined && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
-  if (value.reasoningEffort !== undefined &&
-      (typeof value.reasoningEffort !== "string" || value.reasoningEffort.trim().length === 0 || value.reasoningEffort.length > 64)) return false;
+  if (value.reasoningEffort !== undefined && !isSafeReasoningIdentifier(value.reasoningEffort)) return false;
   if (value.fastModeEnabled !== undefined && typeof value.fastModeEnabled !== "boolean") return false;
   if (value.usage !== undefined && !isUsageSnapshot(value.usage)) return false;
   if (value.hostSessions === undefined) return true;

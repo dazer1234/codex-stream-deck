@@ -7,10 +7,13 @@ import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
+import { isSafeReasoningIdentifier } from "./types.js";
 import type {
   MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, ReasoningAdjustmentPolicy,
   ReasoningAdjustmentExecution, ReasoningAdjustmentResult, UsageSnapshot, UsageWindow
 } from "./types.js";
+
+export { isSafeReasoningIdentifier };
 
 type DebugTarget = {
   type: string;
@@ -263,11 +266,6 @@ export function readConfirmedReasoningEffort(
     }
     return candidate;
   } catch { return undefined; }
-}
-
-export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
-    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
 export function readOwnDataProperty(

@@ -235,7 +235,14 @@ test("reasoning feedback results require exact own bounded data", () => {
   };
   assert.deepEqual(parseRelayServerMessage(result), result);
 
-  for (const reasoningEffort of ["", "   ", "x".repeat(65), null, 1, {}, []]) {
+  for (const reasoningEffort of ["high", "xhigh", "extra-high", "reasoning_v2", "level.2"]) {
+    assert.notEqual(parseRelayServerMessage({ ...result, reasoningEffort }), null);
+  }
+
+  for (const reasoningEffort of [
+    "", " high ", "x high", "\n", "high\n", "\u0000", "!!!", "é", "推理",
+    "x".repeat(65), null, 1, {}, []
+  ]) {
     assert.equal(parseRelayServerMessage({ ...result, reasoningEffort }), null);
   }
   assert.equal(parseRelayServerMessage({ ...result, extra: true }), null);
@@ -267,14 +274,16 @@ test("relay snapshots accept an optional bounded reasoning effort", async () => 
   const { parseRelayServerMessage } = await import("../src/relay-protocol.js");
   const message = { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: structuredClone(snapshot) };
   assert.notEqual(parseRelayServerMessage(message), null, "older peers may omit the optional field");
-  message.snapshot.reasoningEffort = "high";
-  assert.notEqual(parseRelayServerMessage(message), null);
-  message.snapshot.reasoningEffort = "";
-  assert.equal(parseRelayServerMessage(message), null);
-  message.snapshot.reasoningEffort = "   ";
-  assert.equal(parseRelayServerMessage(message), null);
-  message.snapshot.reasoningEffort = "x".repeat(65);
-  assert.equal(parseRelayServerMessage(message), null);
+  for (const reasoningEffort of ["high", "xhigh", "extra-high", "reasoning_v2", "level.2"]) {
+    message.snapshot.reasoningEffort = reasoningEffort;
+    assert.notEqual(parseRelayServerMessage(message), null);
+  }
+  for (const reasoningEffort of [
+    "", " high ", "x high", "\n", "high\n", "\u0000", "!!!", "é", "推理", "x".repeat(65)
+  ]) {
+    message.snapshot.reasoningEffort = reasoningEffort;
+    assert.equal(parseRelayServerMessage(message), null);
+  }
 });
 
 test("relay snapshots accept only an optional boolean Fast mode state", async () => {
@@ -1405,6 +1414,14 @@ test("relay client receives an error when a reasoning control omits its mandator
   for (execution of [
     undefined, null, {}, { outcome: "unexpected" },
     { outcome: "applied", reasoningEffort: "" },
+    { outcome: "applied", reasoningEffort: " high " },
+    { outcome: "applied", reasoningEffort: "x high" },
+    { outcome: "applied", reasoningEffort: "\n" },
+    { outcome: "applied", reasoningEffort: "high\n" },
+    { outcome: "applied", reasoningEffort: "\u0000" },
+    { outcome: "applied", reasoningEffort: "!!!" },
+    { outcome: "applied", reasoningEffort: "é" },
+    { outcome: "applied", reasoningEffort: "推理" },
     { outcome: "applied", reasoningEffort: "x".repeat(65) },
     { outcome: "applied", reasoningEffort: 1 },
     { outcome: "applied", reasoningEffort: "xhigh", extra: true },
