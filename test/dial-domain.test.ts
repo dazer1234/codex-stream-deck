@@ -13,6 +13,7 @@ import {
   normalizeDialSettings,
   reconcileSelector,
   reduceDialRotation,
+  resolveModelPresetDirection,
   selectedItem,
   selectorItems
 } from "../src/dial-domain.js";
@@ -23,6 +24,7 @@ import {
   type DialBindingId,
   type CodexDialSettings,
   type DialPreset,
+  type ModelPresetsDialSettings,
   type DialRuntimeView
 } from "../src/dial-types.js";
 import { OFFICIAL_KEYCAP_IDS } from "../src/keycaps.js";
@@ -94,9 +96,35 @@ function actionSelector(
 ): CodexDialSettings {
   return normalizeDialSettings({
     ...expandDialPreset("actions"),
+    version: 1,
     rotation: { kind: "selector", source: "actions", wrap: true, items }
   });
 }
+
+function modelPresetSettings(
+  modelPresets: ModelPresetsDialSettings["modelPresets"] = []
+): ModelPresetsDialSettings {
+  return { ...expandDialPreset("model-presets"), modelPresets } as ModelPresetsDialSettings;
+}
+
+const MODEL_VIEW: DialRuntimeView = {
+  ...RUNTIME_VIEW,
+  activeModelId: "gpt-5.6-sol",
+  activeModelDisplayName: "5.6 Sol",
+  reasoningEffort: "high",
+  modelCatalog: [
+    {
+      modelId: "gpt-5.6-sol",
+      displayName: "5.6 Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+    },
+    {
+      modelId: "gpt-5.6-terra",
+      displayName: "5.6 Terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"]
+    }
+  ]
+};
 
 test("binding lifecycle distinguishes momentary, one-shot, and protected hold commands", () => {
   assert.equal(bindingLifecycle("none"), "none");
@@ -726,7 +754,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
   ];
   assert.deepEqual(DEFAULT_ACTION_SELECTOR_ITEMS, actionItems);
   assert.deepEqual(expandDialPreset("reasoning"), {
-    version: 1,
+    version: 2,
     preset: "reasoning",
     customized: false,
     includeUltraReasoning: false,
@@ -736,7 +764,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     feedback: "reasoning"
   });
   assert.deepEqual(expandDialPreset("agents"), {
-    version: 1,
+    version: 2,
     preset: "agents",
     customized: false,
     includeUltraReasoning: false,
@@ -746,7 +774,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     feedback: "agent"
   });
   assert.deepEqual(expandDialPreset("actions"), {
-    version: 1,
+    version: 2,
     preset: "actions",
     customized: false,
     includeUltraReasoning: false,
@@ -758,7 +786,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     feedback: "action"
   });
   assert.deepEqual(expandDialPreset("navigation"), {
-    version: 1,
+    version: 2,
     preset: "navigation",
     customized: false,
     includeUltraReasoning: false,
@@ -768,7 +796,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     feedback: "navigation"
   });
   assert.deepEqual(expandDialPreset("usage"), {
-    version: 1,
+    version: 2,
     preset: "usage",
     customized: false,
     includeUltraReasoning: false,
@@ -778,7 +806,7 @@ test("status-focused presets expand to the approved independent bindings", () =>
     feedback: "usage"
   });
   assert.deepEqual(expandDialPreset("custom"), {
-    version: 1,
+    version: 2,
     preset: "custom",
     customized: false,
     includeUltraReasoning: false,
@@ -786,6 +814,17 @@ test("status-focused presets expand to the approved independent bindings", () =>
     press: "none",
     touchTap: "none",
     feedback: "static"
+  });
+  assert.deepEqual(expandDialPreset("model-presets"), {
+    version: 2,
+    preset: "model-presets",
+    customized: false,
+    includeUltraReasoning: false,
+    rotation: { kind: "model-presets" },
+    press: "none",
+    touchTap: "keycap.FAST",
+    feedback: "model-presets",
+    modelPresets: []
   });
 });
 
@@ -868,7 +907,7 @@ test("malformed settings normalize to a safe preset and reject executable string
   assert.deepEqual(normalizeDialSettings({}), expandDialPreset("reasoning"));
   assert.deepEqual(
     normalizeDialSettings({ version: 2, preset: "usage" }),
-    expandDialPreset("reasoning")
+    expandDialPreset("usage")
   );
   assert.deepEqual(
     normalizeDialSettings({ version: 1, preset: "unknown" }),
@@ -895,6 +934,7 @@ test("malformed settings normalize to a safe preset and reject executable string
 test("runtime normalization matches the property inspector when paired rotation cannot activate a selector", () => {
   const normalized = normalizeDialSettings({
     ...expandDialPreset("agents"),
+    version: 1,
     customized: true,
     rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
     press: "selector.activate"
@@ -917,7 +957,7 @@ test("normalization ignores inherited top-level settings properties", () => {
     touchTap: "keycap.FAST",
     feedback: "reasoning"
   };
-  assert.deepEqual(normalizeDialSettings(values), values);
+  assert.deepEqual(normalizeDialSettings(values), { ...values, version: 2 });
 
   for (const key of ["version", "preset"]) {
     assert.deepEqual(
@@ -1090,9 +1130,238 @@ test("normalization retains only exact customization and bounded non-empty label
 
   const blank = normalizeDialSettings({
     ...normalized,
+    version: 1,
     customized: true,
     staticLabel: "   "
   });
   assert.equal(blank.customized, true);
   assert.equal("staticLabel" in blank, false);
+});
+
+test("version 1 migration preserves every legacy preset while emitting complete version 2", () => {
+  for (const preset of DIAL_PRESETS.filter((candidate) => candidate !== "model-presets")) {
+    const expected = expandDialPreset(preset);
+    const legacy = { ...expected, version: 1 };
+    assert.deepEqual(normalizeDialSettings(legacy), expected, preset);
+    assert.equal(normalizeDialSettings(legacy).version, 2, preset);
+  }
+});
+
+test("valid exact version 2 settings round-trip and legacy presets never persist modelPresets", () => {
+  const configured = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]);
+  assert.deepEqual(normalizeDialSettings(configured), configured);
+
+  for (const preset of DIAL_PRESETS.filter((candidate) => candidate !== "model-presets")) {
+    const input = { ...expandDialPreset(preset), modelPresets: configured.modelPresets };
+    const normalized = normalizeDialSettings(input);
+    assert.deepEqual(normalized, expandDialPreset(preset), preset);
+    assert.equal(Object.hasOwn(normalized, "modelPresets"), false, preset);
+  }
+});
+
+test("model preset normalization accepts zero, one, and twelve unique exact entries", () => {
+  for (const count of [0, 1, 12]) {
+    const entries = Array.from({ length: count }, (_, index) => ({
+      modelId: `gpt-5.6-model-${index}`,
+      reasoningEffort: index % 2 === 0 ? "high" : "medium"
+    }));
+    const settings = modelPresetSettings(entries);
+    assert.deepEqual(normalizeDialSettings(settings), settings, String(count));
+  }
+});
+
+test("malformed version 2 model presets fail closed to complete declared-preset defaults", () => {
+  const valid = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+  ]);
+  const fallback = expandDialPreset("model-presets");
+  const malformed: unknown[] = [
+    modelPresetSettings(Array.from({ length: 13 }, (_, index) => ({
+      modelId: `model-${index}`, reasoningEffort: "high"
+    }))),
+    modelPresetSettings([
+      { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+      { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+    ]),
+    modelPresetSettings([{ modelId: " bad", reasoningEffort: "high" }]),
+    modelPresetSettings([{ modelId: "x".repeat(129), reasoningEffort: "high" }]),
+    modelPresetSettings([{ modelId: "gpt-5.6-sol", reasoningEffort: " high" }]),
+    modelPresetSettings([{ modelId: "gpt-5.6-sol", reasoningEffort: "x".repeat(65) }]),
+    { ...valid, modelPresets: [{ ...valid.modelPresets[0]!, extra: true }] },
+    { ...valid, modelPresets: "not-an-array" },
+    { ...valid, rotation: { kind: "model-presets", extra: true } },
+    { ...valid, feedback: "reasoning" },
+    { ...valid, extra: true }
+  ];
+  for (const input of malformed) assert.deepEqual(normalizeDialSettings(input), fallback);
+});
+
+test("version 2 normalization rejects hostile prototypes, inherited data, symbols, and accessors", () => {
+  const valid = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+  ]);
+  const fallback = expandDialPreset("model-presets");
+  const customTop = Object.assign(Object.create({}), valid);
+  const customEntry = { ...valid, modelPresets: [Object.assign(Object.create({}), valid.modelPresets[0])] };
+  const inheritedEntry = { ...valid, modelPresets: [withInheritedProperty(valid.modelPresets[0]!, "modelId")] };
+  const topSymbol = { ...valid, [Symbol("extra")]: true };
+  const nestedSymbol = {
+    ...valid,
+    modelPresets: [{ ...valid.modelPresets[0]!, [Symbol("extra")]: true }]
+  };
+  for (const input of [customTop, customEntry, inheritedEntry, topSymbol, nestedSymbol]) {
+    assert.deepEqual(normalizeDialSettings(input), fallback);
+  }
+
+  let topReads = 0;
+  const topAccessor = { ...valid } as Record<string, unknown>;
+  Object.defineProperty(topAccessor, "modelPresets", {
+    enumerable: true,
+    get() { topReads += 1; return valid.modelPresets; }
+  });
+  assert.deepEqual(normalizeDialSettings(topAccessor), fallback);
+  assert.equal(topReads, 0);
+
+  let entryReads = 0;
+  const entryAccessor: Record<string, unknown> = { reasoningEffort: "high" };
+  Object.defineProperty(entryAccessor, "modelId", {
+    enumerable: true,
+    get() { entryReads += 1; return "gpt-5.6-sol"; }
+  });
+  assert.deepEqual(normalizeDialSettings({ ...valid, modelPresets: [entryAccessor] }), fallback);
+  assert.equal(entryReads, 0);
+});
+
+test("model preset resolver wraps, reverses, starts unlisted at an edge, and counts valid pairs", () => {
+  const settings = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]);
+  assert.deepEqual(resolveModelPresetDirection(settings, MODEL_VIEW, "clockwise"), {
+    kind: "target",
+    entry: { modelId: "gpt-5.6-terra", reasoningEffort: "medium" },
+    index: 1,
+    count: 2
+  });
+  assert.deepEqual(resolveModelPresetDirection(settings, MODEL_VIEW, "counter-clockwise"), {
+    kind: "target",
+    entry: { modelId: "gpt-5.6-terra", reasoningEffort: "medium" },
+    index: 1,
+    count: 2
+  });
+  const terraView = {
+    ...MODEL_VIEW, activeModelId: "gpt-5.6-terra", activeModelDisplayName: "5.6 Terra",
+    reasoningEffort: "medium"
+  };
+  assert.equal(resolveModelPresetDirection(settings, terraView, "clockwise").kind, "target");
+  assert.deepEqual(resolveModelPresetDirection(settings, terraView, "clockwise"), {
+    kind: "target",
+    entry: { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+    index: 0,
+    count: 2
+  });
+  const unlisted = { ...MODEL_VIEW, reasoningEffort: "low" };
+  assert.equal((resolveModelPresetDirection(settings, unlisted, "clockwise") as { index: number }).index, 0);
+  assert.equal(
+    (resolveModelPresetDirection(settings, unlisted, "counter-clockwise") as { index: number }).index,
+    1
+  );
+});
+
+test("model preset resolver skips unavailable and Ultra-disabled pairs without deleting them", () => {
+  const settings = modelPresetSettings([
+    { modelId: "removed-model", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-sol", reasoningEffort: "ultra" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]);
+  assert.deepEqual(resolveModelPresetDirection(settings, MODEL_VIEW, "clockwise"), {
+    kind: "target",
+    entry: { modelId: "gpt-5.6-terra", reasoningEffort: "medium" },
+    index: 0,
+    count: 1
+  });
+  const ultra = normalizeDialSettings({ ...settings, includeUltraReasoning: true });
+  assert.deepEqual(resolveModelPresetDirection(ultra, MODEL_VIEW, "clockwise"), {
+    kind: "target",
+    entry: { modelId: "gpt-5.6-sol", reasoningEffort: "ultra" },
+    index: 0,
+    count: 2
+  });
+});
+
+test("model preset resolver distinguishes missing authority from authoritative emptiness", () => {
+  const settings = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+  ]);
+  assert.deepEqual(resolveModelPresetDirection(settings, { ...MODEL_VIEW, modelCatalog: undefined }, "clockwise"), {
+    kind: "unavailable"
+  });
+  assert.deepEqual(resolveModelPresetDirection(settings, { ...MODEL_VIEW, modelCatalog: [] }, "clockwise"), {
+    kind: "empty"
+  });
+  assert.deepEqual(resolveModelPresetDirection(modelPresetSettings([]), {
+    ...MODEL_VIEW, modelCatalog: undefined
+  }, "clockwise"), { kind: "empty" });
+});
+
+test("model preset rotation emits no ordinary binding and defers target resolution", () => {
+  const state = initialDialRuntimeState();
+  assert.deepEqual(reduceDialRotation(modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+  ]), state, MODEL_VIEW, 2), { state, bindings: [] });
+});
+
+test("model preset feedback reports confirmed, unlisted, switching, empty, and unavailable states", () => {
+  const settings = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+    { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+  ]);
+  assert.deepEqual(deriveDialFeedback(settings, initialDialRuntimeState(), MODEL_VIEW), {
+    title: "MODEL PRESET 1/2",
+    value: "5.6 SOL",
+    detail: "HIGH",
+    indicator: 50,
+    accent: "#4CE0C2"
+  });
+  assert.deepEqual(deriveDialFeedback(settings, initialDialRuntimeState(), {
+    ...MODEL_VIEW, reasoningEffort: "low"
+  }), {
+    title: "MODEL PRESET",
+    value: "5.6 SOL",
+    detail: "LOW · UNLISTED",
+    indicator: 0,
+    accent: "#707B85"
+  });
+  assert.deepEqual(deriveDialFeedback(settings, {
+    ...initialDialRuntimeState(), modelPresetSwitching: true
+  }, MODEL_VIEW), {
+    title: "MODEL PRESET",
+    value: "SWITCHING…",
+    detail: "WAIT",
+    indicator: 0,
+    accent: "#1683FF"
+  });
+  assert.equal(deriveDialFeedback(modelPresetSettings([]), initialDialRuntimeState(), MODEL_VIEW).value, "NO PRESETS");
+  assert.equal(deriveDialFeedback(settings, initialDialRuntimeState(), {
+    ...MODEL_VIEW, modelCatalog: undefined
+  }).value, "UNAVAILABLE");
+});
+
+test("model preset feedback preserves the existing host health override", () => {
+  const settings = modelPresetSettings([
+    { modelId: "gpt-5.6-sol", reasoningEffort: "high" }
+  ]);
+  assert.deepEqual(deriveDialFeedback(settings, initialDialRuntimeState(), {
+    ...MODEL_VIEW, health: "offline"
+  }), {
+    title: "MODEL PRESET 1/1",
+    value: "OFFLINE",
+    detail: "LIVE DATA UNAVAILABLE",
+    indicator: 0,
+    accent: "#FF4B61"
+  });
 });

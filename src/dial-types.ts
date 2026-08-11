@@ -5,14 +5,16 @@ export type JsonValue = boolean | number | string | null | undefined | JsonObjec
 export interface JsonObject { [key: string]: JsonValue }
 
 export const DIAL_PRESETS = Object.freeze(
-  ["reasoning", "agents", "actions", "navigation", "usage", "custom"] as const
+  ["reasoning", "agents", "actions", "navigation", "usage", "custom", "model-presets"] as const
 );
 export type DialPreset = typeof DIAL_PRESETS[number];
+export type LegacyDialPreset = Exclude<DialPreset, "model-presets">;
 
 export const DIAL_FEEDBACK_MODES = Object.freeze(
-  ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"] as const
+  ["auto", "reasoning", "agent", "action", "navigation", "usage", "static", "model-presets"] as const
 );
 export type DialFeedbackMode = typeof DIAL_FEEDBACK_MODES[number];
+export type LegacyDialFeedbackMode = Exclude<DialFeedbackMode, "model-presets">;
 
 export const DIAL_SELECTOR_SOURCES = Object.freeze(["agents", "actions", "usage"] as const);
 export type DialSelectorSource = typeof DIAL_SELECTOR_SOURCES[number];
@@ -37,19 +39,55 @@ export interface SelectorDialRotation extends JsonObject {
   items: DialBindingId[];
 }
 
-export type DialRotation = PairedDialRotation | SelectorDialRotation;
+export interface ModelPresetRotation extends JsonObject {
+  kind: "model-presets";
+}
 
-export interface CodexDialSettings extends JsonObject {
-  version: 1;
-  preset: DialPreset;
+export interface ModelPresetEntry extends JsonObject {
+  modelId: string;
+  reasoningEffort: string;
+}
+
+export type LegacyDialRotation = PairedDialRotation | SelectorDialRotation;
+export type DialRotation = LegacyDialRotation | ModelPresetRotation;
+
+export interface CodexDialSettingsBase extends JsonObject {
   customized: boolean;
   includeUltraReasoning: boolean;
-  rotation: DialRotation;
   press: DialBindingId;
   touchTap: DialBindingId;
-  feedback: DialFeedbackMode;
   staticLabel?: string;
 }
+
+export interface CodexDialSettingsV1 extends CodexDialSettingsBase {
+  version: 1;
+  preset: LegacyDialPreset;
+  rotation: LegacyDialRotation;
+  feedback: LegacyDialFeedbackMode;
+}
+
+export interface ExistingDialSettingsV2 extends CodexDialSettingsBase {
+  version: 2;
+  preset: LegacyDialPreset;
+  rotation: LegacyDialRotation;
+  feedback: LegacyDialFeedbackMode;
+}
+
+export interface ModelPresetsDialSettings extends CodexDialSettingsBase {
+  version: 2;
+  preset: "model-presets";
+  rotation: ModelPresetRotation;
+  feedback: "model-presets";
+  modelPresets: ModelPresetEntry[];
+}
+
+export type CodexDialSettings = ExistingDialSettingsV2 | ModelPresetsDialSettings;
+
+export type ModelPresetDirection = "clockwise" | "counter-clockwise";
+export type ModelPresetResolution =
+  | { kind: "target"; entry: ModelPresetEntry; index: number; count: number }
+  | { kind: "empty" }
+  | { kind: "unavailable" };
 
 export type DialSelectorItem = {
   id: string;
@@ -65,6 +103,13 @@ export type DialRuntimeState = {
   selectedIndex?: number;
   usageMode: "auto" | "five-hour" | "weekly";
   usageOverview: boolean;
+  modelPresetSwitching?: boolean;
+};
+
+export type DialRuntimeModelCatalogEntry = {
+  modelId: string;
+  displayName: string;
+  supportedReasoningEfforts: string[];
 };
 
 export type DialRuntimeAgent = {
@@ -90,6 +135,9 @@ export type DialRuntimeUsage = {
 export type DialRuntimeView = {
   health: HostHealthState;
   reasoningEffort?: string;
+  activeModelId?: string;
+  activeModelDisplayName?: string;
+  modelCatalog?: DialRuntimeModelCatalogEntry[];
   agents: DialRuntimeAgent[];
   actionLabels: Partial<Record<DialBindingId, string>>;
   usage?: DialRuntimeUsage;

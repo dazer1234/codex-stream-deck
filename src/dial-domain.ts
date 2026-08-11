@@ -1,4 +1,5 @@
 import { OFFICIAL_KEYCAP_IDS } from "./keycaps.js";
+import { isSafeReasoningIdentifier } from "./types.js";
 import {
   DIAL_FEEDBACK_MODES,
   DIAL_PRESETS,
@@ -10,7 +11,14 @@ import {
   type DialPreset,
   type DialRuntimeState,
   type DialRuntimeView,
-  type DialRotation,
+  type ExistingDialSettingsV2,
+  type LegacyDialFeedbackMode,
+  type LegacyDialPreset,
+  type LegacyDialRotation,
+  type ModelPresetEntry,
+  type ModelPresetDirection,
+  type ModelPresetResolution,
+  type ModelPresetsDialSettings,
   type DialSelectorItem,
   type DialSelectorSource
 } from "./dial-types.js";
@@ -148,6 +156,9 @@ export function reduceDialRotation(
   if (!isDialTickCount(ticks) || ticks === 0) {
     return { state, bindings: [] };
   }
+  if (settings.rotation.kind === "model-presets") {
+    return { state, bindings: [] };
+  }
   if (settings.rotation.kind === "paired") {
     const binding = ticks > 0
       ? settings.rotation.clockwise
@@ -188,6 +199,29 @@ export function selectedItem(
   return items.find((item) => item.id === reconciled.selectedId);
 }
 
+export function resolveModelPresetDirection(
+  settings: CodexDialSettings,
+  view: DialRuntimeView,
+  direction: ModelPresetDirection
+): ModelPresetResolution {
+  if (settings.preset !== "model-presets") return { kind: "unavailable" };
+  if (settings.modelPresets.length === 0) return { kind: "empty" };
+  const entries = validModelPresetEntries(settings, view);
+  if (entries == null) return { kind: "unavailable" };
+  if (entries.length === 0) return { kind: "empty" };
+  const activeIndex = entries.findIndex(({ entry }) =>
+    entry.modelId === view.activeModelId && entry.reasoningEffort === view.reasoningEffort);
+  const targetIndex = activeIndex < 0
+    ? direction === "clockwise" ? 0 : entries.length - 1
+    : modulo(activeIndex + (direction === "clockwise" ? 1 : -1), entries.length);
+  return {
+    kind: "target",
+    entry: { ...entries[targetIndex]!.entry },
+    index: targetIndex,
+    count: entries.length
+  };
+}
+
 export function deriveDialFeedback(
   settings: CodexDialSettings,
   state: DialRuntimeState,
@@ -204,6 +238,8 @@ export function deriveDialFeedback(
           ? feedback("NAVIGATION", "BACK / FORWARD", "TURN LEFT / RIGHT", 50, DIAL_ACCENTS.blue)
           : mode === "usage"
             ? usageFeedback(state, view)
+            : mode === "model-presets"
+              ? modelPresetsFeedback(settings, state, view)
             : staticFeedback(settings);
   const emptySelector = (mode === "agent" || mode === "action") &&
     selectorItems(settings, view).length === 0;
@@ -212,6 +248,19 @@ export function deriveDialFeedback(
 }
 
 export function expandDialPreset(preset: DialPreset): CodexDialSettings {
+  if (preset === "model-presets") {
+    return {
+      version: 2,
+      preset: "model-presets",
+      customized: false,
+      includeUltraReasoning: false,
+      rotation: { kind: "model-presets" },
+      press: "none",
+      touchTap: "keycap.FAST",
+      feedback: "model-presets",
+      modelPresets: []
+    };
+  }
   if (preset === "agents") {
     return selectorPreset("agents", "selector.activate", "keycap.TIME", "agent");
   }
@@ -255,35 +304,155 @@ export function isDialBindingId(
 }
 
 export function normalizeDialSettings(input: unknown): CodexDialSettings {
-  if (!record(input) || !hasOwn(input, "version") || input.version !== 1 ||
-      !hasOwn(input, "preset") || !isPreset(input.preset)) {
+  const version = ownDataValue(input, "version");
+  const preset = ownDataValue(input, "preset");
+  if (version === 2 && isPreset(preset)) {
+    const fallback = expandDialPreset(preset);
+    try {
+      return normalizeVersion2(input, preset) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  if (version !== 1 || !isLegacyPreset(preset)) {
     return expandDialPreset("reasoning");
   }
 
-  const fallback = expandDialPreset(input.preset);
-  const staticLabel = hasOwn(input, "staticLabel") && typeof input.staticLabel === "string"
-    ? input.staticLabel.trim().slice(0, 40)
+  if (!record(input)) return expandDialPreset("reasoning");
+  const fallback = expandDialPreset(preset) as ExistingDialSettingsV2;
+  const staticLabelValue = ownDataValue(input, "staticLabel");
+  const staticLabel = typeof staticLabelValue === "string"
+    ? staticLabelValue.trim().slice(0, 40)
     : undefined;
-  const rotation = normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation);
-  const requestedPress = hasOwn(input, "press") && isDialBindingId(input.press, "press")
-    ? input.press
+  const rotation = normalizeRotation(ownDataValue(input, "rotation"), fallback.rotation);
+  const pressValue = ownDataValue(input, "press");
+  const requestedPress = isDialBindingId(pressValue, "press")
+    ? pressValue
     : fallback.press;
+  const touchTapValue = ownDataValue(input, "touchTap");
+  const feedbackValue = ownDataValue(input, "feedback");
   return {
-    version: 1,
-    preset: input.preset,
-    customized: hasOwn(input, "customized") && input.customized === true,
-    includeUltraReasoning: hasOwn(input, "includeUltraReasoning") &&
-      input.includeUltraReasoning === true,
+    version: 2,
+    preset,
+    customized: ownDataValue(input, "customized") === true,
+    includeUltraReasoning: ownDataValue(input, "includeUltraReasoning") === true,
     rotation,
     press: rotation.kind === "paired" && requestedPress === "selector.activate" ? "none" : requestedPress,
-    touchTap: hasOwn(input, "touchTap") && isDialBindingId(input.touchTap, "touch")
-      ? input.touchTap
+    touchTap: isDialBindingId(touchTapValue, "touch")
+      ? touchTapValue
       : "none",
-    feedback: hasOwn(input, "feedback") && isFeedback(input.feedback)
-      ? input.feedback
+    feedback: isLegacyFeedback(feedbackValue)
+      ? feedbackValue
       : fallback.feedback,
     ...(staticLabel ? { staticLabel } : {})
   };
+}
+
+function normalizeVersion2(input: unknown, preset: DialPreset): CodexDialSettings | undefined {
+  const requiredKeys = [
+    "version", "preset", "customized", "includeUltraReasoning", "rotation", "press",
+    "touchTap", "feedback", ...(preset === "model-presets" ? ["modelPresets"] : [])
+  ];
+  if (!exactPlainDataRecord(input, requiredKeys, ["staticLabel"])) return undefined;
+  if (ownDataValue(input, "version") !== 2 || ownDataValue(input, "preset") !== preset) {
+    return undefined;
+  }
+  const customized = ownDataValue(input, "customized");
+  const includeUltraReasoning = ownDataValue(input, "includeUltraReasoning");
+  const press = ownDataValue(input, "press");
+  const touchTap = ownDataValue(input, "touchTap");
+  const staticLabel = ownDataValue(input, "staticLabel");
+  if (typeof customized !== "boolean" || typeof includeUltraReasoning !== "boolean" ||
+      !isDialBindingId(press, "press") || !isDialBindingId(touchTap, "touch") ||
+      (Object.hasOwn(input, "staticLabel") &&
+        (typeof staticLabel !== "string" || staticLabel.length === 0 ||
+          staticLabel.length > 40 || staticLabel.trim() !== staticLabel))) {
+    return undefined;
+  }
+
+  if (preset === "model-presets") {
+    const rotation = ownDataValue(input, "rotation");
+    const feedbackMode = ownDataValue(input, "feedback");
+    const entries = normalizeModelPresetEntries(ownDataValue(input, "modelPresets"));
+    if (!exactPlainDataRecord(rotation, ["kind"]) ||
+        ownDataValue(rotation, "kind") !== "model-presets" ||
+        feedbackMode !== "model-presets" || press === "selector.activate" || entries == null) {
+      return undefined;
+    }
+    return {
+      version: 2,
+      preset,
+      customized,
+      includeUltraReasoning,
+      rotation: { kind: "model-presets" },
+      press,
+      touchTap,
+      feedback: "model-presets",
+      modelPresets: entries,
+      ...(typeof staticLabel === "string" ? { staticLabel } : {})
+    };
+  }
+
+  const rotation = strictLegacyRotation(ownDataValue(input, "rotation"));
+  const feedbackMode = ownDataValue(input, "feedback");
+  if (rotation == null || !isLegacyFeedback(feedbackMode) ||
+      (rotation.kind === "paired" && press === "selector.activate")) return undefined;
+  return {
+    version: 2,
+    preset,
+    customized,
+    includeUltraReasoning,
+    rotation,
+    press,
+    touchTap,
+    feedback: feedbackMode,
+    ...(typeof staticLabel === "string" ? { staticLabel } : {})
+  };
+}
+
+function strictLegacyRotation(value: unknown): LegacyDialRotation | undefined {
+  const kind = ownDataValue(value, "kind");
+  if (kind === "paired") {
+    if (!exactPlainDataRecord(value, ["kind", "counterClockwise", "clockwise"])) return undefined;
+    const counterClockwise = ownDataValue(value, "counterClockwise");
+    const clockwise = ownDataValue(value, "clockwise");
+    if (!isDialBindingId(counterClockwise, "rotation") ||
+        !isDialBindingId(clockwise, "rotation")) return undefined;
+    return { kind, counterClockwise, clockwise };
+  }
+  if (kind !== "selector" ||
+      !exactPlainDataRecord(value, ["kind", "source", "wrap", "items"])) return undefined;
+  const source = ownDataValue(value, "source");
+  const wrap = ownDataValue(value, "wrap");
+  const items = ownDataValue(value, "items");
+  if (!isSelectorSource(source) || typeof wrap !== "boolean" || !exactDataArray(items, 30)) {
+    return undefined;
+  }
+  const bindings: DialBindingId[] = [];
+  for (const item of items) {
+    if (!isDialBindingId(item, "selector") || bindings.includes(item)) return undefined;
+    bindings.push(item);
+  }
+  if (source !== "actions" && bindings.length !== 0) return undefined;
+  return { kind, source, wrap, items: bindings };
+}
+
+function normalizeModelPresetEntries(value: unknown): ModelPresetEntry[] | undefined {
+  if (!exactDataArray(value, 12)) return undefined;
+  const entries: ModelPresetEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!exactPlainDataRecord(item, ["modelId", "reasoningEffort"])) return undefined;
+    const modelId = ownDataValue(item, "modelId");
+    const reasoningEffort = ownDataValue(item, "reasoningEffort");
+    if (!isSafeReasoningIdentifier(modelId, 128) ||
+        !isSafeReasoningIdentifier(reasoningEffort)) return undefined;
+    const identity = `${modelId}\u0000${reasoningEffort}`;
+    if (seen.has(identity)) return undefined;
+    seen.add(identity);
+    entries.push({ modelId, reasoningEffort });
+  }
+  return entries;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -294,12 +463,63 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.hasOwn(value, key);
 }
 
+function ownDataValue(value: unknown, key: string): unknown {
+  if (!record(value)) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor != null && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactPlainDataRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[] = []
+): value is Record<string, unknown> {
+  if (!record(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.getOwnPropertySymbols(value).length !== 0) return false;
+  const keys = Object.keys(descriptors);
+  if (keys.length < requiredKeys.length ||
+      keys.some((key) => !requiredKeys.includes(key) && !optionalKeys.includes(key)) ||
+      requiredKeys.some((key) => !Object.hasOwn(descriptors, key))) return false;
+  return keys.every((key) => {
+    const descriptor = descriptors[key];
+    return descriptor != null && "value" in descriptor && descriptor.enumerable === true;
+  });
+}
+
+function exactDataArray(value: unknown, maximum: number): value is unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length > maximum || Object.getOwnPropertySymbols(value).length !== 0) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const expectedKeys = Array.from({ length: value.length }, (_, index) => String(index));
+  const keys = Object.keys(descriptors).filter((key) => key !== "length");
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    return false;
+  }
+  return expectedKeys.every((key) => {
+    const descriptor = descriptors[key];
+    return descriptor != null && "value" in descriptor && descriptor.enumerable === true;
+  });
+}
+
 function isPreset(value: unknown): value is DialPreset {
   return typeof value === "string" && PRESET_IDS.has(value);
 }
 
+function isLegacyPreset(value: unknown): value is LegacyDialPreset {
+  return isPreset(value) && value !== "model-presets";
+}
+
 function isFeedback(value: unknown): value is DialFeedbackMode {
   return typeof value === "string" && FEEDBACK_MODE_IDS.has(value);
+}
+
+function isLegacyFeedback(value: unknown): value is LegacyDialFeedbackMode {
+  return isFeedback(value) && value !== "model-presets";
 }
 
 function isSelectorSource(value: unknown): value is DialSelectorSource {
@@ -307,15 +527,15 @@ function isSelectorSource(value: unknown): value is DialSelectorSource {
 }
 
 function pairedPreset(
-  preset: DialPreset,
+  preset: LegacyDialPreset,
   counterClockwise: DialBindingId,
   clockwise: DialBindingId,
   press: DialBindingId,
   touchTap: DialBindingId,
-  feedback: DialFeedbackMode
-): CodexDialSettings {
+  feedback: LegacyDialFeedbackMode
+): ExistingDialSettingsV2 {
   return {
-    version: 1,
+    version: 2,
     preset,
     customized: false,
     includeUltraReasoning: false,
@@ -330,11 +550,11 @@ function selectorPreset(
   preset: DialSelectorSource,
   press: DialBindingId,
   touchTap: DialBindingId,
-  feedback: DialFeedbackMode,
+  feedback: LegacyDialFeedbackMode,
   items: DialBindingId[] = []
-): CodexDialSettings {
+): ExistingDialSettingsV2 {
   return {
-    version: 1,
+    version: 2,
     preset,
     customized: false,
     includeUltraReasoning: false,
@@ -345,7 +565,7 @@ function selectorPreset(
   };
 }
 
-function normalizeRotation(value: unknown, fallback: DialRotation): DialRotation {
+function normalizeRotation(value: unknown, fallback: LegacyDialRotation): LegacyDialRotation {
   if (!record(value) || !hasOwn(value, "kind")) return fallback;
   if (value.kind === "paired") {
     return {
@@ -439,6 +659,63 @@ function resolveFeedbackMode(settings: CodexDialSettings): Exclude<DialFeedbackM
   if (settings.rotation.counterClockwise.startsWith("joystick.") ||
       settings.rotation.clockwise.startsWith("joystick.")) return "navigation";
   return "static";
+}
+
+function validModelPresetEntries(
+  settings: ModelPresetsDialSettings,
+  view: DialRuntimeView
+): Array<{ entry: ModelPresetEntry; displayName: string }> | undefined {
+  if (view.modelCatalog == null) return undefined;
+  const valid: Array<{ entry: ModelPresetEntry; displayName: string }> = [];
+  for (const entry of settings.modelPresets) {
+    if (!settings.includeUltraReasoning && entry.reasoningEffort.toLowerCase() === "ultra") continue;
+    const model = view.modelCatalog.find((candidate) => candidate.modelId === entry.modelId);
+    if (model == null || !model.supportedReasoningEfforts.includes(entry.reasoningEffort)) continue;
+    valid.push({ entry, displayName: model.displayName });
+  }
+  return valid;
+}
+
+function modelPresetsFeedback(
+  settings: CodexDialSettings,
+  state: DialRuntimeState,
+  view: DialRuntimeView
+): DialFeedback {
+  if (settings.preset !== "model-presets") {
+    return feedback("MODEL PRESET", "UNAVAILABLE", "LIVE VALUE NOT REPORTED", 0, DIAL_ACCENTS.muted);
+  }
+  if (state.modelPresetSwitching === true) {
+    return feedback("MODEL PRESET", "SWITCHING…", "WAIT", 0, DIAL_ACCENTS.blue);
+  }
+  if (settings.modelPresets.length === 0) {
+    return feedback("MODEL PRESET", "NO PRESETS", "ADD IN SETTINGS", 0, DIAL_ACCENTS.muted);
+  }
+  const entries = validModelPresetEntries(settings, view);
+  if (entries == null || view.activeModelId == null || view.reasoningEffort == null) {
+    return feedback("MODEL PRESET", "UNAVAILABLE", "LIVE VALUE NOT REPORTED", 0, DIAL_ACCENTS.muted);
+  }
+  if (entries.length === 0) {
+    return feedback("MODEL PRESET", "NO PRESETS", "ADD IN SETTINGS", 0, DIAL_ACCENTS.muted);
+  }
+  const index = entries.findIndex(({ entry }) =>
+    entry.modelId === view.activeModelId && entry.reasoningEffort === view.reasoningEffort);
+  if (index >= 0) {
+    return feedback(
+      `MODEL PRESET ${index + 1}/${entries.length}`,
+      entries[index]!.displayName,
+      titleCase(view.reasoningEffort),
+      ((index + 1) / entries.length) * 100,
+      DIAL_ACCENTS.teal
+    );
+  }
+  const activeCatalogEntry = view.modelCatalog?.find((entry) => entry.modelId === view.activeModelId);
+  return feedback(
+    "MODEL PRESET",
+    cleanDisplaySource(view.activeModelDisplayName) ?? activeCatalogEntry?.displayName ?? view.activeModelId,
+    `${titleCase(view.reasoningEffort)} · UNLISTED`,
+    0,
+    DIAL_ACCENTS.muted
+  );
 }
 
 function reasoningFeedback(view: DialRuntimeView): DialFeedback {
