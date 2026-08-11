@@ -445,6 +445,41 @@ test("relay parser rejects malformed snapshot fields before activity merge", () 
   assert.deepEqual(new HostActivityIndex().merge(accepted, 2_000, host.hostId), []);
 });
 
+test("relay server-message parsing rejects hostile nested records without throwing or invoking getters", () => {
+  let getterReads = 0;
+  const accessorHost = Object.create(null) as Record<string, unknown>;
+  Object.defineProperties(accessorHost, {
+    hostId: { enumerable: true, get() { getterReads += 1; return host.hostId; } },
+    hostName: { enumerable: true, value: host.hostName },
+    platform: { enumerable: true, value: host.platform }
+  });
+  const nestedAccessor = structuredClone(snapshot);
+  Object.defineProperty(nestedAccessor.slots[0]!, "status", {
+    enumerable: true, get() { getterReads += 1; return "working"; }
+  });
+  const symbolSlot = { ...structuredClone(snapshot.slots[0]!), [Symbol("hostile")]: true };
+  const hostileSlots = new Proxy(structuredClone(snapshot.slots), {
+    ownKeys() { throw new Error("hostile slots"); }
+  });
+  const messages = [
+    { type: "ready", protocol: 1, host: accessorHost },
+    { type: "snapshot", protocol: 1, host, observedAt: 1, snapshot: nestedAccessor },
+    {
+      type: "snapshot", protocol: 1, host, observedAt: 1,
+      snapshot: { ...structuredClone(snapshot), slots: [symbolSlot, ...structuredClone(snapshot.slots.slice(1))] }
+    },
+    {
+      type: "snapshot", protocol: 1, host, observedAt: 1,
+      snapshot: { ...structuredClone(snapshot), slots: hostileSlots }
+    }
+  ];
+  for (const message of messages) {
+    assert.doesNotThrow(() => parseRelayServerMessage(message));
+    assert.equal(parseRelayServerMessage(message), null);
+  }
+  assert.equal(getterReads, 0);
+});
+
 test("relay snapshot parser strictly validates a complete active model catalog", () => {
   const packet = {
     type: "snapshot", protocol: 1, host: structuredClone(host), observedAt: 2_000,
