@@ -3439,6 +3439,11 @@ test("delayed reasoning confirmation cannot overwrite a newer authoritative gene
   state.localSnapshotGeneration += 1;
   state.committedLocalSnapshotGeneration = state.localSnapshotGeneration;
   state.localSnapshot = newerSnapshot;
+  state.refresh = async () => {
+    const generation = ++state.localSnapshotGeneration;
+    state.localSnapshot = newerSnapshot;
+    state.committedLocalSnapshotGeneration = generation;
+  };
   heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
 
   assert.deepEqual(await adjustment, { outcome: "applied", reasoningEffort: "medium" });
@@ -3479,6 +3484,11 @@ test("delayed model preset confirmation cannot overwrite a newer authoritative g
   state.localSnapshotGeneration += 1;
   state.committedLocalSnapshotGeneration = state.localSnapshotGeneration;
   state.localSnapshot = newerSnapshot;
+  state.refresh = async () => {
+    const generation = ++state.localSnapshotGeneration;
+    state.localSnapshot = newerSnapshot;
+    state.committedLocalSnapshotGeneration = generation;
+  };
   heldPreset.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
   await idle(controller, dial.id);
 
@@ -3487,13 +3497,15 @@ test("delayed model preset confirmation cannot overwrite a newer authoritative g
   controller.unregisterDial(dial);
 });
 
-test("reasoning waits for a newer refresh commit before releasing a dependent preset", async () => {
+test("reasoning requires a post-result refresh when a newer refresh committed the old pair", async () => {
   const controller = new DeckController();
   const presetDial = fakeDial("reasoning-awaits-refresh-commit");
   const state = probe(controller);
   const heldReasoning = deferred<ReasoningAdjustmentExecution>();
   const heldRefresh = deferred<MicroSnapshot>();
+  const postResultRefresh = deferred<MicroSnapshot>();
   const presetRequests: ModelPresetRequest[] = [];
+  let postResultRefreshCalls = 0;
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
@@ -3509,6 +3521,14 @@ test("reasoning waits for a newer refresh commit before releasing a dependent pr
       return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
     }
   };
+  state.refresh = async () => {
+    postResultRefreshCalls += 1;
+    const generation = ++state.localSnapshotGeneration;
+    const snapshot = await postResultRefresh.promise;
+    state.localSnapshot = { host: HOST, observedAt: 3_000, snapshot };
+    state.committedLocalSnapshotGeneration = generation;
+    state.localHealth = { state: "ready", changedAt: 3_000 };
+  };
   controller.registerDial(presetDial, modelPresetSettings());
   await settle();
 
@@ -3523,15 +3543,17 @@ test("reasoning waits for a newer refresh commit before releasing a dependent pr
     state.localHealth = { state: "ready", changedAt: 2_000 };
   });
   state.refreshInFlight = refresh;
-  await settle();
+  heldRefresh.resolve(modelSnapshot());
+  await refresh;
+  state.refreshInFlight = undefined;
   controller.rotateDial(presetDial, 1);
-  heldReasoning.resolve({ outcome: "applied", reasoningEffort: "high" });
+  heldReasoning.resolve({ outcome: "applied", reasoningEffort: "xhigh" });
   await settle();
 
   assert.equal(reasoningSettled, false);
-  assert.equal(presetRequests.length, 0, "dependent preset remains behind uncommitted authority");
-  heldRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
-  await refresh;
+  assert.equal(postResultRefreshCalls, 1);
+  assert.equal(presetRequests.length, 0, "dependent preset remains behind pre-confirmation authority");
+  postResultRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
   assert.deepEqual(await adjustment, { outcome: "applied", reasoningEffort: "medium" });
   await idle(controller, presetDial.id);
   assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
@@ -3540,13 +3562,15 @@ test("reasoning waits for a newer refresh commit before releasing a dependent pr
   controller.unregisterDial(presetDial);
 });
 
-test("model preset waits for a newer refresh commit before its queued successor resolves", async () => {
+test("model preset requires a post-result refresh when a newer refresh committed the old pair", async () => {
   const controller = new DeckController();
   const presetDial = fakeDial("preset-awaits-refresh-commit");
   const state = probe(controller);
   const heldPreset = deferred<ModelPresetExecution>();
   const heldRefresh = deferred<MicroSnapshot>();
+  const postResultRefresh = deferred<MicroSnapshot>();
   const presetRequests: ModelPresetRequest[] = [];
+  let postResultRefreshCalls = 0;
   state.localHost = HOST;
   state.targetHostId = HOST.hostId;
   state.targetPlatform = HOST.platform;
@@ -3562,6 +3586,14 @@ test("model preset waits for a newer refresh commit before its queued successor 
       return { modelId: request.modelId, reasoningEffort: request.reasoningEffort };
     }
   };
+  state.refresh = async () => {
+    postResultRefreshCalls += 1;
+    const generation = ++state.localSnapshotGeneration;
+    const snapshot = await postResultRefresh.promise;
+    state.localSnapshot = { host: HOST, observedAt: 3_000, snapshot };
+    state.committedLocalSnapshotGeneration = generation;
+    state.localHealth = { state: "ready", changedAt: 3_000 };
+  };
   controller.registerDial(presetDial, modelPresetSettings());
   await settle();
 
@@ -3574,13 +3606,15 @@ test("model preset waits for a newer refresh commit before its queued successor 
     state.localHealth = { state: "ready", changedAt: 2_000 };
   });
   state.refreshInFlight = refresh;
-  await settle();
+  heldRefresh.resolve(modelSnapshot());
+  await refresh;
+  state.refreshInFlight = undefined;
   heldPreset.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
   await settle();
 
   assert.equal(presetRequests.length, 1, "queued successor waits for committed authority");
-  heldRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
-  await refresh;
+  assert.equal(postResultRefreshCalls, 1);
+  postResultRefresh.resolve(modelSnapshot("gpt-5.6-terra", "medium"));
   await idle(controller, presetDial.id);
   assert.deepEqual(presetRequests.map(({ modelId, reasoningEffort }) => [modelId, reasoningEffort]), [
     ["gpt-5.6-sol", "medium"],

@@ -643,6 +643,7 @@ export class DeckController {
     const mutationGeneration = ++this.localSnapshotGeneration;
     const rawExecution = await this.microBridge.adjustReasoning(direction, policy);
     this.assertControllerLifecycle(lifecycleGeneration);
+    const resultObservationFloor = this.localSnapshotGeneration;
     let execution = parseReasoningExecution(rawExecution);
     if (!execution) {
       if (!isAppliedReasoningExecutionWithUnconfirmedEffort(rawExecution)) {
@@ -653,11 +654,8 @@ export class DeckController {
       execution = await this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
     }
     if (execution.outcome === "applied" && this.localSnapshotGeneration !== mutationGeneration) {
-      const authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
-      if (authoritativeEffort !== undefined) {
-        return { outcome: "applied", reasoningEffort: authoritativeEffort };
-      }
-      return this.awaitSupersedingLocalReasoning(lifecycleGeneration, operationHost);
+      return this.reconcileLocalReasoningAfterResult(
+        lifecycleGeneration, operationHost, resultObservationFloor);
     }
     const current = this.localSnapshot;
     if (execution.reasoningEffort !== undefined && operationHost != null &&
@@ -690,18 +688,29 @@ export class DeckController {
     return effort;
   }
 
-  private async awaitSupersedingLocalReasoning(
+  private async reconcileLocalReasoningAfterResult(
     lifecycleGeneration: number,
-    operationHost?: CodexHost
+    operationHost: CodexHost | undefined,
+    resultObservationFloor: number
   ): Promise<ReasoningAdjustmentExecution> {
     const pendingRefresh = this.refreshInFlight;
     if (pendingRefresh) {
       try { await pendingRefresh; }
       catch { /* Authority and health are checked below. */ }
+      if (this.refreshInFlight === pendingRefresh) this.refreshInFlight = undefined;
       this.assertControllerLifecycle(lifecycleGeneration);
     }
-    const authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
-    if (authoritativeEffort !== undefined) {
+    let authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
+    if (this.committedLocalSnapshotGeneration > resultObservationFloor &&
+        authoritativeEffort !== undefined) {
+      return { outcome: "applied", reasoningEffort: authoritativeEffort };
+    }
+    try { await this.refresh(); }
+    catch { /* Authority and health are checked below. */ }
+    this.assertControllerLifecycle(lifecycleGeneration);
+    authoritativeEffort = this.authoritativeLocalReasoningEffort(operationHost);
+    if (this.committedLocalSnapshotGeneration > resultObservationFloor &&
+        authoritativeEffort !== undefined) {
       return { outcome: "applied", reasoningEffort: authoritativeEffort };
     }
     this.localHealth = {
@@ -1928,17 +1937,19 @@ export class DeckController {
     }
 
     const mutationGeneration = ++this.localSnapshotGeneration;
+    let reconcilingSupersededResult = false;
     try {
       const parsed = parseModelPresetExecution(await this.microBridge.applyModelPreset(request));
       this.assertControllerLifecycle(lifecycleGeneration);
+      const resultObservationFloor = this.localSnapshotGeneration;
       if (!parsed || parsed.modelId !== request.modelId ||
           parsed.reasoningEffort !== request.reasoningEffort) {
         throw new Error("Codex returned an invalid or unconfirmed model preset result.");
       }
       if (this.localSnapshotGeneration !== mutationGeneration) {
-        const authoritative = this.authoritativeLocalModelPreset(localHost);
-        if (authoritative) return authoritative;
-        return await this.reconcileSupersededLocalModelPreset(lifecycleGeneration, localHost);
+        reconcilingSupersededResult = true;
+        return await this.reconcileSupersededLocalModelPreset(
+          lifecycleGeneration, localHost, resultObservationFloor);
       }
       const current = this.localSnapshot;
       if (!localHost || this.localHost?.hostId !== localHost.hostId ||
@@ -1965,6 +1976,7 @@ export class DeckController {
       return parsed;
     } catch (error) {
       this.assertControllerLifecycle(lifecycleGeneration);
+      if (reconcilingSupersededResult) throw error;
       try {
         if (this.refreshInFlight) await this.refreshInFlight;
         this.assertControllerLifecycle(lifecycleGeneration);
@@ -1996,25 +2008,34 @@ export class DeckController {
 
   private async reconcileSupersededLocalModelPreset(
     lifecycleGeneration: number,
-    localHost?: CodexHost
+    localHost: CodexHost | undefined,
+    resultObservationFloor: number
   ): Promise<ModelPresetExecution> {
     const pendingRefresh = this.refreshInFlight;
     if (pendingRefresh) {
       try { await pendingRefresh; }
       catch { /* Authority and health are checked below. */ }
+      if (this.refreshInFlight === pendingRefresh) this.refreshInFlight = undefined;
       this.assertControllerLifecycle(lifecycleGeneration);
       const committed = this.authoritativeLocalModelPreset(localHost);
-      if (committed) return committed;
-      throw new Error("Authoritative model preset state is unavailable after the newer refresh.");
+      if (this.committedLocalSnapshotGeneration > resultObservationFloor && committed) {
+        return committed;
+      }
     }
     this.assertControllerLifecycle(lifecycleGeneration);
-    await this.refresh();
+    try { await this.refresh(); }
+    catch { /* Authority and health are checked below. */ }
     this.assertControllerLifecycle(lifecycleGeneration);
     const authoritative = this.authoritativeLocalModelPreset(localHost);
-    if (!authoritative) {
-      throw new Error("Authoritative model preset state is unavailable after confirmation.");
+    if (this.committedLocalSnapshotGeneration > resultObservationFloor && authoritative) {
+      return authoritative;
     }
-    return authoritative;
+    this.localHealth = {
+      state: "degraded",
+      reason: "local-bridge-unavailable",
+      changedAt: Date.now()
+    };
+    throw new Error("Authoritative model preset state is unavailable after confirmation.");
   }
 
   private async refreshDialUsage(route: DialHostRoute): Promise<void> {
