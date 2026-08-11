@@ -2975,6 +2975,54 @@ test("relay bounds oversized bridge errors before writing a complete result fram
   assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 64 * 1024);
 });
 
+test("failed forced model snapshot emits degraded health and error before later recovery", async (t) => {
+  const port = await freePort();
+  let refreshCalls = 0;
+  const control = {
+    refresh: async () => {
+      refreshCalls += 1;
+      if (refreshCalls === 2) throw new Error("forced snapshot failed");
+      return relayModelSnapshot();
+    },
+    sendAgent: async () => {}, sendAction: async () => {}, sendJoystick: async () => {},
+    sendEncoder: async () => {}, adjustReasoning: async () => ({ outcome: "applied" as const }),
+    applyModelPreset: async () => ({ modelId: "gpt-5.6-sol", reasoningEffort: "high" }),
+    runKeycap: async () => {}, consumeRateLimitReset: async () => {}, refreshUsage: async () => {}
+  };
+  const server = new CodexRelayServer(
+    { enabled: true, listenHost: "127.0.0.1", port, token: "t".repeat(32) }, host, control, () => {}
+  );
+  await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  t.after(async () => { socket.close(); await server.close(); });
+  const messages = messageQueue(socket);
+  await onceOpen(socket);
+  socket.send(JSON.stringify({ type: "auth", protocol: 1, token: "t".repeat(32) }));
+  assert.equal((await messages.next()).type, "ready");
+  assert.equal((await messages.next()).type, "snapshot");
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "forced-failure",
+    command: {
+      kind: "model-preset", modelId: "gpt-5.6-sol", reasoningEffort: "high",
+      includeUltra: false, includeModelPresetFeedback: true
+    }
+  }));
+  const health = await messages.next();
+  const failure = await messages.next();
+  assert.deepEqual({ type: health.type, state: health.state, reason: health.reason }, {
+    type: "health", state: "degraded", reason: "native-signals-unavailable"
+  });
+  assert.equal(failure.type, "result");
+  assert.equal(failure.ok, false);
+
+  socket.send(JSON.stringify({
+    type: "command", protocol: 1, requestId: "recovery",
+    command: { kind: "action", slot: "ACT06", act: 1 }
+  }));
+  assert.equal((await messages.next()).type, "result");
+  assert.equal((await messages.next()).type, "snapshot");
+});
+
 test("model preset client patches an exact confirmed pair immutably after the snapshot barrier", async (t) => {
   const port = await freePort();
   const relay = new WebSocketServer({ host: "127.0.0.1", port });

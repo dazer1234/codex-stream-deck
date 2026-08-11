@@ -229,7 +229,13 @@ export class CodexRelayServer {
       if (command.kind === "reasoning" && command.includeReasoningFeedback === true) {
         await this.publishSnapshot(undefined, true);
       }
-      if (command.kind === "model-preset") await this.publishSnapshot(undefined, true);
+      if (command.kind === "model-preset") {
+        try { await this.publishSnapshot(undefined, true); }
+        catch (error) {
+          this.handleSnapshotFailure(error, undefined, true);
+          throw error;
+        }
+      }
       this.sendResult(socket, message.requestId, true, undefined, execution);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
       if (command.kind !== "usage-refresh" &&
@@ -286,10 +292,10 @@ export class CodexRelayServer {
     this.log(`Relay snapshot unavailable: ${message}`);
   }
 
-  private handleSnapshotFailure(error: unknown, only?: WebSocket): void {
+  private handleSnapshotFailure(error: unknown, only?: WebSocket, forceDegraded = false): void {
     this.reportSnapshotError(error);
     this.consecutiveSnapshotFailures += 1;
-    if (!relaySnapshotFailureShouldDegrade(
+    if (!forceDegraded && !relaySnapshotFailureShouldDegrade(
       this.hasPublishedSnapshot, this.consecutiveSnapshotFailures
     )) return;
     const health: RelayHealthMessage = {
