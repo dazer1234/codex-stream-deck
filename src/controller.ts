@@ -183,6 +183,7 @@ export class DeckController {
   private refreshInFlight?: Promise<void>;
   private modelReasoningMutationTail: Promise<void> = Promise.resolve();
   private localSnapshotGeneration = 0;
+  private controllerLifecycleGeneration = 0;
   private stopped = false;
   private animationFrame = 0;
   private lastError = "";
@@ -197,6 +198,7 @@ export class DeckController {
   private catalogRevision = 0;
 
   async start(): Promise<void> {
+    this.controllerLifecycleGeneration += 1;
     this.stopped = false;
     try {
       const settings = await streamDeck.settings.getGlobalSettings<ContextRingSettings>();
@@ -287,10 +289,13 @@ export class DeckController {
   }
 
   stop(): void {
+    this.controllerLifecycleGeneration += 1;
     this.stopped = true;
     if (this.poll) clearInterval(this.poll);
     if (this.animation) clearInterval(this.animation);
-    for (const registration of this.dials.values()) this.clearDialNotice(registration);
+    for (const registration of [...this.dials.values()]) {
+      this.disposeDialRegistration(registration, false);
+    }
     this.relayClient?.close();
     void this.mobileRelayServer?.close();
     void this.localMobileRelayServer?.close();
@@ -492,7 +497,10 @@ export class DeckController {
       this.sendModelCatalogToInspector(registration, 0, false)));
   }
 
-  private disposeDialRegistration(registration: DialRegistration): void {
+  private disposeDialRegistration(
+    registration: DialRegistration,
+    releaseActiveMomentary = true
+  ): void {
     if (registration.disposed) return;
     registration.disposed = true;
     registration.generation = -Math.abs(registration.generation);
@@ -505,10 +513,10 @@ export class DeckController {
     const pressed = registration.pressed;
     registration.pressed = undefined;
     if (!pressed) return;
-    if (pressed.phase === "active" && pressed.lifecycle === "momentary") {
+    if (pressed.phase === "active" && pressed.lifecycle === "momentary" && releaseActiveMomentary) {
       const release = () => this.releaseDialGesture(registration, pressed, false);
       if (!registration.queue.enqueue(release)) registration.queue.enqueueCleanup(release);
-    } else if (pressed.lifecycle === "hold") {
+    } else {
       pressed.phase = "canceled";
     }
   }
@@ -521,9 +529,22 @@ export class DeckController {
   private serializeModelReasoningMutation<Result>(
     operation: () => Promise<Result>
   ): Promise<Result> {
-    const result = this.modelReasoningMutationTail.then(operation, operation);
+    const lifecycleGeneration = this.controllerLifecycleGeneration;
+    const guardedOperation = async (): Promise<Result> => {
+      this.assertControllerLifecycle(lifecycleGeneration);
+      const result = await operation();
+      this.assertControllerLifecycle(lifecycleGeneration);
+      return result;
+    };
+    const result = this.modelReasoningMutationTail.then(guardedOperation, guardedOperation);
     this.modelReasoningMutationTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private assertControllerLifecycle(lifecycleGeneration: number): void {
+    if (this.stopped || lifecycleGeneration !== this.controllerLifecycleGeneration) {
+      throw new Error("Codex controller lifecycle was stopped or superseded.");
+    }
   }
 
   private adjustLocalReasoningFromRelay(
@@ -538,17 +559,19 @@ export class DeckController {
     direction: ReasoningAdjustment,
     policy?: ReasoningAdjustmentPolicy
   ): Promise<ReasoningAdjustmentExecution> {
+    const lifecycleGeneration = this.controllerLifecycleGeneration;
     const operationHost = this.localHost;
     this.localSnapshotGeneration += 1;
     const rawExecution = await this.microBridge.adjustReasoning(direction, policy);
+    this.assertControllerLifecycle(lifecycleGeneration);
     let execution = parseReasoningExecution(rawExecution);
     if (!execution) {
       if (!isAppliedReasoningExecutionWithUnconfirmedEffort(rawExecution)) {
         throw new Error("Codex returned an invalid reasoning adjustment result.");
       }
-      execution = await this.reconcileUnconfirmedLocalReasoning();
+      execution = await this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
     } else if (execution.outcome === "applied" && execution.reasoningEffort === undefined) {
-      execution = await this.reconcileUnconfirmedLocalReasoning();
+      execution = await this.reconcileUnconfirmedLocalReasoning(lifecycleGeneration);
     }
     const current = this.localSnapshot;
     if (execution.reasoningEffort !== undefined && operationHost != null &&
@@ -564,15 +587,19 @@ export class DeckController {
     return execution;
   }
 
-  private async reconcileUnconfirmedLocalReasoning(): Promise<ReasoningAdjustmentExecution> {
+  private async reconcileUnconfirmedLocalReasoning(
+    lifecycleGeneration = this.controllerLifecycleGeneration
+  ): Promise<ReasoningAdjustmentExecution> {
     if (this.refreshInFlight) {
       try { await this.refreshInFlight; }
       catch { /* A fresh refresh is still attempted below. */ }
     }
+    this.assertControllerLifecycle(lifecycleGeneration);
     const priorSnapshot = this.localSnapshot;
     let refreshCompleted = false;
     try {
       await this.refresh();
+      this.assertControllerLifecycle(lifecycleGeneration);
       refreshCompleted = true;
     } catch { /* Authority is checked below so overridden/test refresh paths fail closed identically. */ }
     const localHost = this.localHost;
@@ -1708,6 +1735,7 @@ export class DeckController {
     route: DialHostRoute,
     request: ModelPresetRequest
   ): Promise<ModelPresetExecution> {
+    const lifecycleGeneration = this.controllerLifecycleGeneration;
     const localHost = this.localHost;
     const localRequested = route.hostId != null
       ? route.hostId === localHost?.hostId
@@ -1722,6 +1750,7 @@ export class DeckController {
     this.localSnapshotGeneration += 1;
     try {
       const parsed = parseModelPresetExecution(await this.microBridge.applyModelPreset(request));
+      this.assertControllerLifecycle(lifecycleGeneration);
       if (!parsed || parsed.modelId !== request.modelId ||
           parsed.reasoningEffort !== request.reasoningEffort) {
         throw new Error("Codex returned an invalid or unconfirmed model preset result.");
@@ -1749,9 +1778,12 @@ export class DeckController {
       };
       return parsed;
     } catch (error) {
+      this.assertControllerLifecycle(lifecycleGeneration);
       try {
         if (this.refreshInFlight) await this.refreshInFlight;
+        this.assertControllerLifecycle(lifecycleGeneration);
         await this.refresh();
+        this.assertControllerLifecycle(lifecycleGeneration);
       } catch {
         // refresh() records degraded health; retain the original command error for the dial alert.
       }

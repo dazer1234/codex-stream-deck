@@ -3282,3 +3282,53 @@ test("unconfirmed applied reasoning degrades and prevents a dependent preset whe
   assert.equal(presetCalls, 0, "dependent model mutation is refused on degraded authority");
   controller.unregisterDial(presetDial);
 });
+
+test("shutdown invalidates an in-flight preset and cancels queued dial and public mutations", async () => {
+  const controller = new DeckController();
+  const presetDial = fakeDial("model-preset-shutdown");
+  const state = probe(controller);
+  const firstResult = deferred<ModelPresetExecution>();
+  const presetRequests: ModelPresetRequest[] = [];
+  let reasoningCalls = 0;
+  let closeCalls = 0;
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.localSnapshot = { host: HOST, observedAt: 1_000, snapshot: modelSnapshot() };
+  const retainedSnapshot = state.localSnapshot;
+  state.microBridge = {
+    async sendAgent() {},
+    async applyModelPreset(request) {
+      presetRequests.push(structuredClone(request));
+      return firstResult.promise;
+    },
+    async adjustReasoning() {
+      reasoningCalls += 1;
+      return { outcome: "applied", reasoningEffort: "medium" };
+    },
+    close() { closeCalls += 1; }
+  };
+  controller.registerDial(presetDial, modelPresetSettings());
+  await settle();
+  const registration = state.dials.get(presetDial.id)!;
+
+  controller.rotateDial(presetDial, 2);
+  await settle();
+  assert.equal(presetRequests.length, 1);
+  const queuedPublic = controller.adjustReasoning("decrease");
+  await settle();
+  controller.stop();
+  const feedbackCount = presetDial.feedbackCalls.length;
+  firstResult.resolve({ modelId: "gpt-5.6-sol", reasoningEffort: "medium" });
+  await registration.queue.idle();
+  await assert.rejects(queuedPublic, /stopped|superseded|lifecycle/i);
+  await settle();
+
+  assert.equal(closeCalls, 1);
+  assert.equal(presetRequests.length, 1, "queued preset never reconnects after bridge close");
+  assert.equal(reasoningCalls, 0, "queued public reasoning never reaches the closed bridge");
+  assert.equal(state.localSnapshot, retainedSnapshot, "late in-flight confirmation cannot patch state");
+  assert.equal(presetDial.feedbackCalls.length, feedbackCount);
+  assert.equal(state.dials.size, 0, "shutdown disposes all dial registrations");
+});
