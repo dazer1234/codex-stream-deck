@@ -4,7 +4,7 @@
 
 **Goal:** Update Reasoning dial feedback immediately from Codex's confirmed result while repairing current live model discovery without weakening the Ultra guard.
 
-**Architecture:** Extend reasoning execution with an optional confirmed effort, propagate it through the exact relay result contract, and commit it to the matching host snapshot before immediately rendering dials. Read the unique visible ordinary-DOM model label beneath the unique visible reasoning trigger, strictly normalize it, and resolve it uniquely to a descriptor-safe, bounded, fully validated `models/list` record whose ordered supported efforts remain authoritative.
+**Architecture:** Extend reasoning execution with an optional confirmed effort and commit it to the matching host snapshot before immediately rendering dials. Local commits advance `localSnapshotGeneration`; remote commits use an additive protocol-v1 `reasoning-feedback` opt-in and a forced post-command snapshot barrier before the result. Read the unique visible ordinary-DOM model label beneath the unique visible reasoning trigger, strictly normalize it, and resolve it uniquely to a descriptor-safe, bounded, fully validated `models/list` record whose ordered supported efforts remain authoritative.
 
 **Tech Stack:** TypeScript, Node test runner via `tsx --test`, Elgato Stream Deck SDK, Electron CDP renderer evaluation, WebSocket relay protocol, Swift source contract.
 
@@ -106,7 +106,7 @@ export type ReasoningAdjustmentExecution = {
 };
 ```
 
-Make all bridge reasoning paths return this type. Poll `readActiveReasoningEffort` after the verified command, include only safe confirmed values, preserve the global mutex and uncertainty reservation, and fail honestly when an interior transition cannot be confirmed. Mechanically extract `.outcome` in the controller and relay server so existing behavior remains type-safe until Tasks 3 and 4 consume the new effort. Update typed test stubs without adding immediate-render or relay-effort behavior early.
+Make all bridge reasoning paths return this type. Poll `readActiveReasoningEffort` after the verified command, include only safe confirmed values, preserve the global mutex and uncertainty reservation, and fail honestly when an interior transition cannot be confirmed. Mechanically extract `.outcome` in the controller and relay server so existing behavior remains type-safe until Task 3 consumes the new effort. Update typed test stubs without adding immediate-render or relay-effort behavior early.
 
 - [ ] **Step 4: Run bridge tests and typecheck**
 
@@ -126,73 +126,60 @@ git add src/types.ts src/codex-micro-renderer-bridge.ts src/controller.ts src/co
 git commit -m "feat: return confirmed reasoning effort"
 ```
 
-### Task 3: Propagate confirmed effort through the relay safely
+### Task 3: Propagate and render confirmed effort without stale regressions
 
 **Files:**
 - Modify: `src/relay-protocol.ts`
 - Modify: `src/codex-relay-server.ts`
 - Modify: `src/codex-relay-client.ts`
+- Modify: `src/controller.ts`
 - Modify: `ios/CodexDeckMobile/Models/RelayModels.swift` only if decoding requires an explicit ignored field
 - Test: `test/relay.test.ts`
+- Test: `test/controller-dial.test.ts`
 - Test: `ios/CodexDeckMobileTests/MobileMergeTests.swift` only if Swift decoding changes
 
-- [ ] **Step 1: Write failing exact-shape and generation tests**
+- [ ] **Step 1: Write failing protocol, ordering, generation, and no-poll tests**
 
-Cover a capable reasoning success with:
+Add `RELAY_REASONING_FEEDBACK_CAPABILITY = "reasoning-feedback"` to the wished-for protocol. Cover a capable client command and successful result with these exact additive v1 shapes:
 
 ```json
+{"kind":"reasoning","direction":"increase","includeUltra":false,"includeReasoningFeedback":true}
 {"type":"result","protocol":1,"requestId":"r1","ok":true,"outcome":"applied","reasoningEffort":"xhigh"}
 ```
 
-Reject blank/oversized/malformed effort, effort on failure, effort on non-reasoning pending commands, accessors, symbols, and extra keys. Prove only a current ready-generation reasoning request can patch the retained remote snapshot. Preserve legacy unrestricted outcome-less mapping without a fabricated effort.
+Reject `includeReasoningFeedback: false`, unknown/extra command keys, blank/oversized/malformed effort, effort on failure, effort on a non-reasoning or non-opted-in pending command, accessors, symbols, and extra result keys. Prove only a request recorded against the current ready connection generation and host can patch the retained remote snapshot.
 
-- [ ] **Step 2: Run relay tests and verify RED**
+Add explicit rolling-upgrade cases:
 
-Run: `npx tsx --test --test-name-pattern='reasoning effort|reasoning outcome' test/relay.test.ts`
+- Old client to new server sends no feedback flag; even if the new bridge confirms an effort, the server returns no `reasoningEffort` key.
+- New client to old server sees no `reasoning-feedback` capability, sends the legacy command shape, accepts the legacy reasoning outcome, and preserves the existing outcome-less unrestricted mapping when `reasoning-policy` is absent.
+- New client to new server advertises/detects `reasoning-feedback`, sends `includeReasoningFeedback: true`, and receives the exact confirmed effort.
+- Restricted reasoning remains rejected before send unless the same current-ready peer also advertises `reasoning-policy`.
 
-Expected: FAIL because relay results cannot carry or commit a confirmed effort.
+Add a deterministic server/client ordering test in one connection generation. Hold a pre-command `control.refresh()`, execute an opted-in reasoning command, and prove no result is sent while that read is held. Release it, then assert the socket/client observes the old snapshot, a forced fresh post-command snapshot, and only then the result. After the result patches the retained remote snapshot, prove no pre-command snapshot can arrive or commit and regress the displayed effort.
 
-- [ ] **Step 3: Implement the exact protocol and client commit**
+For local feedback, hold `microBridge.refresh()` after it captures the current `localSnapshotGeneration`, return `{ outcome: "applied", reasoningEffort: "xhigh" }` from the command, and prove the controller advances the generation, patches the local snapshot, and renders `XHIGH` without waiting for the poll. Release the held refresh with an older effort and prove both snapshot and dial remain `xhigh`. Also cover remote current-generation parity, rapid ordered detents, `ULTRA OFF`, and failure/no-confirmation cases.
 
-Add optional bounded `reasoningEffort` only to successful typed reasoning results. Correlate validation with the pending command kind and current ready connection generation. Patch only `snapshot.snapshot.reasoningEffort`; do not change the rest of the snapshot or its observation time.
-
-- [ ] **Step 4: Run relay tests and typecheck**
+- [ ] **Step 2: Run focused tests and verify RED**
 
 Run:
 
 ```bash
-npx tsx --test test/relay.test.ts
-npm run check
+npx tsx --test --test-name-pattern='reasoning feedback|reasoning outcome|pre-command reasoning' test/relay.test.ts
+npx tsx --test --test-name-pattern='confirmed reasoning feedback|pre-command reasoning|Reasoning dial' test/controller-dial.test.ts
 ```
 
-Expected: relay tests and typecheck pass after Task 4 propagation is complete.
+Expected: FAIL because protocol v1 has no feedback opt-in/result field, the relay does not place a forced post-command snapshot barrier before the result, and the controller neither invalidates an older local refresh nor commits/renders confirmed effort.
 
-- [ ] **Step 5: Commit the slice**
+- [ ] **Step 3: Implement additive negotiation, ordered relay commit, and local invalidation**
 
-```bash
-git add src/relay-protocol.ts src/codex-relay-server.ts src/codex-relay-client.ts test/relay.test.ts
-git commit -m "feat: relay confirmed reasoning effort"
-```
+Keep protocol version 1 and add the explicit `reasoning-feedback` ready capability. Permit the exact `includeReasoningFeedback: true` command key only on reasoning commands. The client adds it only when the current ready connection advertises the capability; otherwise it sends the legacy command shape. Keep `reasoning-policy` gating independent and unchanged. Record command kind, feedback opt-in, ready host ID, and connection generation in the pending entry.
 
-### Task 4: Render confirmed feedback immediately
+The server may serialize `reasoningEffort` only when the reasoning command opted in and its structured execution returned a safe confirmed effort; opted-in success without an exact outcome/effort fails rather than emitting a partial feedback result. When the flag is absent, strip the effort and emit the legacy-compatible result shape. On opted-in success, call and await `publishSnapshot(undefined, true)` before `sendResult`. This reuses `currentSnapshotMessage(true)`: it captures and awaits any prior `snapshotInFlight`, ignores only that prior read's rejection, performs a new `control.refresh()`, broadcasts the forced fresh snapshot, and then allows the result send. Since an already-awaiting older publisher sends first and all frames use the same WebSocket, FIFO order is old snapshot, fresh snapshot, result.
 
-**Files:**
-- Modify: `src/controller.ts`
-- Test: `test/controller-dial.test.ts`
+On the client, accept and apply effort only for the correlated opted-in reasoning request while its recorded generation and host still match the current ready connection and retained snapshot. Patch only `snapshot.snapshot.reasoningEffort`; preserve the rest of the snapshot and `observedAt`. Exact parsing must reject feedback fields in every uncorrelated shape.
 
-- [ ] **Step 1: Write the failing no-poll controller test**
-
-Hold the global refresh indefinitely, return `{ outcome: "applied", reasoningEffort: "xhigh" }` from the local bridge, rotate one detent, await the dial queue, and assert the final Encoder feedback is `XHIGH`. Add remote current-generation parity, rapid ordered detents, blocked notice, and failure/no-confirmation cases.
-
-- [ ] **Step 2: Run and verify RED**
-
-Run: `npx tsx --test --test-name-pattern='confirmed reasoning feedback|Reasoning dial' test/controller-dial.test.ts`
-
-Expected: FAIL because the controller neither commits the returned effort nor rerenders after the command.
-
-- [ ] **Step 3: Commit and render the confirmed value**
-
-For local results, immutably copy the current matching `localSnapshot` with the confirmed `reasoningEffort`. For remote results, rely on the relay client's current-generation patch. Immediately call the existing registration-safe dial renderer after the snapshot commit. Do nothing on missing effort, errors, stale host identity, or malformed results. Preserve `ULTRA OFF` notice serialization.
+For a local confirmed result, synchronously increment `localSnapshotGeneration` before immutably replacing `localSnapshot.snapshot.reasoningEffort`, with no `await` between invalidation and replacement. This makes any `refreshOnce()` that captured the old generation return before committing. Immediately call the existing registration-safe dial renderer. Remote commands rely on the server barrier and current-generation client patch before the controller renders. Do nothing on missing effort, command error, stale host/generation, or malformed result, and preserve `ULTRA OFF` notice serialization.
 
 - [ ] **Step 4: Run controller, relay, bridge, and type checks**
 
@@ -203,16 +190,17 @@ npx tsx --test test/controller-dial.test.ts test/relay.test.ts test/micro-bridge
 npm run check
 ```
 
-Expected: all focused tests pass and no 1.2-second timer is needed by the immediate-feedback test.
+Expected: every focused test and the full TypeScript check pass in this commit. The immediate-feedback tests do not require the 1.2-second timer; held pre-command local/remote reads cannot regress confirmed feedback; and both rolling-upgrade directions retain their legacy shapes.
 
 - [ ] **Step 5: Commit the slice**
 
 ```bash
-git add src/controller.ts test/controller-dial.test.ts
-git commit -m "fix: render reasoning feedback immediately"
+git add src/relay-protocol.ts src/codex-relay-server.ts src/codex-relay-client.ts src/controller.ts test/relay.test.ts test/controller-dial.test.ts
+# If Swift decoding changed, also stage the two conditional iOS files listed above.
+git commit -m "fix: render confirmed reasoning feedback immediately"
 ```
 
-### Task 5: Document, review, verify, merge, and install
+### Task 4: Document, review, verify, merge, and install
 
 **Files:**
 - Modify: `docs/STREAM_DECK_PLUS.md`

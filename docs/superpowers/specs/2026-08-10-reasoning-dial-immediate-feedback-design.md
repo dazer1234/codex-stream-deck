@@ -12,13 +12,16 @@ This design is a forward correction that supersedes the model-discovery behavior
 
 - Make a successful Reasoning detent update the Stream Deck as soon as Codex confirms the resulting level, without waiting for the 1.2-second background poll.
 - Keep feedback authoritative. Never invent or optimistically advance a level Codex has not reported.
+- Prevent pre-command local or remote snapshot work from regressing a confirmed feedback patch.
 - Preserve the per-knob `Include Ultra` policy and the exact temporary `ULTRA OFF` notice.
 - Discover the current model from the unique visible, non-hidden, non-measurement ordinary-DOM label beneath the unique visible reasoning trigger, then map it uniquely to a validated `models/list` record by `displayName`.
+- Preserve protocol-v1 rolling upgrades by negotiating confirmed effort feedback separately from the existing reasoning policy.
 - Preserve local and current-generation relay behavior; legacy unrestricted peers may continue without immediate confirmed-level feedback.
 
 ## Non-goals
 
 - Do not lower the global poll interval.
+- Do not add a new control or change the approved dial UI.
 - Do not change the Action selector, keypad Reasoning controls, Fast Mode, or native Codex confirmation dialogs.
 - Do not add optimistic animation or synthetic intermediate levels.
 - Do not use React `selectedValue`, React siblings, or any other React model value to authorize the active model.
@@ -67,18 +70,29 @@ type ReasoningAdjustmentExecution = {
 
 ### Controller behavior
 
-After a local result with `reasoningEffort`, the controller copies that value into the current local host snapshot and immediately rerenders registered dials. After a current-generation relay result with `reasoningEffort`, the relay client patches only the matching retained snapshot's reasoning field before the controller rerenders. Host identity and ready-generation checks remain mandatory.
+After a local result with `reasoningEffort`, the controller synchronously increments `localSnapshotGeneration` before immutably replacing the matching local snapshot's reasoning field, with no `await` between those operations. Any refresh that captured the older generation is then unable to commit its pre-command snapshot. The controller immediately rerenders registered dials from the patched snapshot.
+
+For remote results, the relay server provides the stale-read barrier. For an opted-in reasoning command, it waits for any prior `snapshotInFlight`, forces and publishes a fresh post-command snapshot with `publishSnapshot(undefined, true)`, and only then sends the result on the same socket. The existing `currentSnapshotMessage(true)` path awaits the prior read before starting the fresh `control.refresh()`; the older publisher sends its snapshot before the forced publisher, and WebSocket FIFO preserves the older snapshot, fresh snapshot, result order. The relay client patches only the matching retained snapshot's reasoning field when the result belongs to the current ready connection generation and host; the controller then rerenders. No new per-command remote sequence counter is needed because a pre-command snapshot cannot arrive after the result under this server barrier; the existing connection/snapshot generation checks remain in force.
 
 The 1.2-second poll continues normally and replaces the field with the next authoritative snapshot. A command failure, missing confirmation, stale relay generation, or malformed result does not change displayed feedback.
 
 ### Relay protocol
 
-Capable peers may include bounded `reasoningEffort` only on a successful reasoning result. The result parser remains exact-data-only and rejects accessors, extra keys, malformed efforts, an effort on failed/non-reasoning results, and capable reasoning success without an outcome. Legacy unrestricted peers without `reasoning-policy` may still map an outcome-less response to `applied`, but never manufacture a confirmed effort.
+Protocol v1 gains an additive `reasoning-feedback` capability. A client sends `includeReasoningFeedback: true` on a reasoning command only when the current ready peer advertises that capability. The server returns bounded `reasoningEffort` only for a successful reasoning command that carried that opt-in; no opt-in means no extra result key even when the server internally confirmed an effort. This does not alter `reasoning-policy`: restricted commands still require that existing capability, and legacy unrestricted peers without it may still map an outcome-less response to `applied` without manufacturing an effort.
+
+Rolling upgrades remain symmetric:
+
+- Old client to new server: the client sends the legacy reasoning shape; the server omits `reasoningEffort` and returns the legacy-compatible result.
+- New client to old server: because the peer does not advertise `reasoning-feedback`, the client sends the legacy shape and accepts the existing outcome, or the existing outcome-less unrestricted success when `reasoning-policy` is also absent.
+- New client to new server: the client opts in, the server completes the post-command snapshot barrier before its result, and the result carries the exact confirmed effort.
+
+Command and result parsing remains exact-data-only. It rejects false/unknown feedback flags, accessors, symbols, extra keys, malformed efforts, an effort without a successful opted-in reasoning request, and opted-in reasoning success without an outcome or confirmed effort. Pending requests record command kind, feedback opt-in, ready host, and connection generation so a late or mismatched result cannot patch state.
 
 ## Timing and UX Contract
 
 - The dial redraw is causally attached to the successful command result; it must not depend on the scheduled 1.2-second poll.
 - Tests will hold the scheduled refresh indefinitely and prove the dial still changes to the confirmed effort.
+- A local refresh that began before the command cannot regress the confirmed patch after it is released. On relay, an older same-generation snapshot and the forced post-command snapshot both arrive before the opted-in result, so neither can regress the result patch afterward.
 - Rapid detents remain serialized so every command is ordered, but each confirmed result can update feedback before the next queued detent completes.
 - `ULTRA OFF` keeps its existing 1.2-second notice and lifecycle protections.
 
@@ -86,7 +100,7 @@ Capable peers may include bounded `reasoningEffort` only on a successful reasoni
 
 - Metadata ambiguity or absence fails closed and reports the existing dial alert/error path.
 - No confirmed effort means no immediate feedback mutation.
-- Pre-command or stale relay snapshots cannot overwrite a newer confirmed local result; current connection-generation rules remain authoritative.
+- The local generation advance rejects pre-command refresh commits. The relay post-command publication barrier and same-socket FIFO order older snapshot, fresh snapshot, then result; current ready-connection and host checks reject late results from stale generations.
 - The command runner remains restricted to the two verified reasoning commands and cannot bypass protected keycap access controls.
 
 ## Testing
@@ -94,8 +108,8 @@ Capable peers may include bounded `reasoningEffort` only on a successful reasoni
 - Unit-test ordinary-DOM label discovery with the current live shape: hidden measurement `5.3 Codex Spark`, visible `5.6 Sol`, current effort `high`, and a uniquely matched validated catalog record whose `displayName` is `GPT-5.6-Sol` and model ID is `gpt-5.6-sol`.
 - Prove the matched record's ordered `supportedReasoningEfforts` is preserved without hardcoding an order not established by the live probe. Cover zero/multiple visible labels, normalization collisions, zero/multiple catalog matches, React-only model data, hidden/measurement nodes, accessors, proxies, malformed data, and depth/node/query traversal bounds.
 - Execute the serialized renderer expression and prove applied/blocked results carry only authoritative efforts.
-- Controller tests must prove immediate feedback with the global poll disabled, no update on failure/unconfirmed results, and ordered rapid detents.
-- Relay tests must cover exact result parsing, current-generation snapshot patching, malformed efforts, legacy unrestricted compatibility, and restricted-peer fail-closed behavior.
+- Controller tests must prove immediate feedback with the global poll disabled, no update on failure/unconfirmed results, ordered rapid detents, and local generation invalidation. Deterministically hold a refresh that captured the pre-command generation, apply and render a confirmed effort, release the old refresh, and prove it cannot regress the display.
+- Relay tests must cover the additive `reasoning-feedback` capability, opt-in command/result exactness, both rolling-upgrade directions, preservation of `reasoning-policy`, malformed efforts, and current-ready-generation/host patching. A deterministic same-generation test must hold a pre-command server refresh, execute an opted-in reasoning command, release the old read, observe old snapshot then forced fresh snapshot then result, and prove the client display cannot regress after the result.
 - Run TypeScript checks, the complete test suite, Stream Deck package validation, the three-root release audit, and a live read-only Codex metadata probe before installation.
 
 ## Acceptance Criteria
@@ -106,3 +120,5 @@ Capable peers may include bounded `reasoningEffort` only on a successful reasoni
 - Turning above the highest non-Ultra level with Ultra excluded still shows `ULTRA OFF` and runs no increase command.
 - Action-selector behavior is unchanged.
 - No unconfirmed, failed, stale-host, or malformed result changes the displayed reasoning level.
+- A pre-command local refresh cannot overwrite a confirmed local patch, and a pre-command same-generation remote snapshot cannot arrive or commit after an opted-in result.
+- Protocol v1 rolling upgrades preserve both old-client/new-server and new-client/old-server reasoning behavior; only mutually capable, explicitly opted-in peers exchange `reasoningEffort`.
