@@ -307,8 +307,10 @@ export class DeckController {
       this.disposeDialRegistration(registration, false);
     }
     this.relayClient?.close();
-    void this.mobileRelayServer?.close();
-    void this.localMobileRelayServer?.close();
+    void this.mobileRelayServer?.close().catch((error) =>
+      streamDeck.logger.error(`Mobile relay close failed: ${String(error)}`));
+    void this.localMobileRelayServer?.close().catch((error) =>
+      streamDeck.logger.error(`Nearby mobile relay close failed: ${String(error)}`));
     this.microBridge.close();
   }
 

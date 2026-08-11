@@ -3345,6 +3345,36 @@ test("shutdown invalidates an in-flight preset and cancels queued dial and publi
   assert.equal(state.dials.size, 0, "shutdown disposes all dial registrations");
 });
 
+test("shutdown catches and logs both asynchronous relay close failures", async () => {
+  const controller = new DeckController();
+  const state = controller as unknown as {
+    mobileRelayServer: { close(): Promise<void> };
+    localMobileRelayServer: { close(): Promise<void> };
+    microBridge: { close(): void };
+  };
+  state.mobileRelayServer = { async close() { throw new Error("mobile close failed"); } };
+  state.localMobileRelayServer = { async close() { throw new Error("local close failed"); } };
+  state.microBridge = { close() {} };
+  const errors: string[] = [];
+  const unhandled: unknown[] = [];
+  const logger = streamDeck.logger as unknown as { error(message: string): void };
+  const originalError = logger.error;
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  logger.error = (message) => { errors.push(message); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    controller.stop();
+    await settle();
+    await settle();
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    logger.error = originalError;
+  }
+  assert.deepEqual(unhandled, []);
+  assert.equal(errors.some((message) => message.includes("mobile close failed")), true);
+  assert.equal(errors.some((message) => message.includes("local close failed")), true);
+});
+
 test("controller-wide model and reasoning backlog rejects mixed sources and recovers after drain", async () => {
   const controller = new DeckController();
   const firstDial = fakeDial("global-cap-first");
