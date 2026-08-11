@@ -985,25 +985,67 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
     "fiber traversal exhaustion is unavailable");
 });
 
-test("reasoning catalog authorizes only exact two-segment query keys", () => {
+test("reasoning catalog authorizes only supported exact query-key shapes", () => {
   const read = Reflect.get(microBridgeModule, "readReasoningModelCatalogMatch") as (
     queryClients: Iterable<unknown>, visibleLabels: unknown
   ) => { modelId: string; supportedEfforts: string[] } | undefined;
-  const record = {
-    displayName: "GPT-5.6-Sol",
-    model: "gpt-5.6-sol",
+  const record = (displayName = "GPT-5.6-Sol", model = "gpt-5.6-sol") => ({
+    displayName,
+    model,
     supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }]
-  };
+  });
 
   assert.deepEqual(read([
-    new ReasoningQueryClientFixture([[["models", "list"], { data: [record] }]])
+    new ReasoningQueryClientFixture([[["models", "list"], { data: [record()] }]])
   ], ["5.6 Sol"]), {
     modelId: "gpt-5.6-sol",
     supportedEfforts: ["low", "high"]
+  }, "legacy exact two-segment keys remain supported");
+
+  const liveEntries = [
+    [["models", "list", "local", "no-auth", 100], {
+      data: [record("GPT-5.6-Terra", "gpt-5.6-terra")]
+    }],
+    [["models", "list", "local", "chatgpt", 100], { data: [record()] }]
+  ];
+  const liveClient = new ReasoningQueryClientFixture(liveEntries);
+  assert.deepEqual(read([liveClient], ["5.6 Sol"]), {
+    modelId: "gpt-5.6-sol",
+    supportedEfforts: ["low", "high"]
+  }, "the current authenticated five-segment catalog key authorizes Sol");
+  assert.deepEqual(read([liveClient], ["5.6 Terra"]), {
+    modelId: "gpt-5.6-terra",
+    supportedEfforts: ["low", "high"]
+  }, "the current no-auth five-segment catalog key authorizes Terra");
+
+  let accessorReads = 0;
+  const accessorKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(accessorKey, "2", {
+    enumerable: true,
+    get() { accessorReads++; return "local"; }
   });
-  assert.equal(read([
-    new ReasoningQueryClientFixture([[["models", "list", "extra"], { data: [record] }]])
-  ], ["5.6 Sol"]), undefined, "a nested query key cannot authorize the catalog");
+  const symbolKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(symbolKey, Symbol("unsafe"), { value: true });
+  const invalidKeys: unknown[] = [
+    ["models", "list", "extra"],
+    ["models", "list", "local", "chatgpt"],
+    ["models", "list", "local", "chatgpt", 100, "extra"],
+    ["models", "list", "", "chatgpt", 100],
+    ["models", "list", " local ", "chatgpt", 100],
+    ["models", "list", "local", "no auth", 100],
+    ["models", "list", "x".repeat(65), "chatgpt", 100],
+    ["models", "list", "local", "chatgpt", -1],
+    ["models", "list", "local", "chatgpt", 1.5],
+    ["models", "list", "local", "chatgpt", "100"],
+    accessorKey,
+    symbolKey
+  ];
+  for (const [index, queryKey] of invalidKeys.entries()) {
+    assert.equal(read([
+      new ReasoningQueryClientFixture([[queryKey, { data: [record()] }]])
+    ], ["5.6 Sol"]), undefined, `unsupported catalog key fixture ${index} cannot authorize`);
+  }
+  assert.equal(accessorReads, 0, "query-key accessors are never invoked");
 });
 
 test("reasoning catalog deduplicates only identical fully validated matches", () => {

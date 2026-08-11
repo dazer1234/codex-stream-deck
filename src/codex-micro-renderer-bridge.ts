@@ -606,7 +606,13 @@ export function readReasoningModelCatalogMatch(
         if (!entryItems || entryItems.length !== 2) return undefined;
         const queryKey = readBoundedOwnDataArray(entryItems[0], 64);
         if (!queryKey || !isStructuredCloneSafePlainData(entryItems[0], 128, 8, 64)) return undefined;
-        if (queryKey.length !== 2 || queryKey[0] !== "models" || queryKey[1] !== "list") continue;
+        const hasCatalogPrefix = queryKey[0] === "models" && queryKey[1] === "list";
+        const isLegacyCatalogKey = queryKey.length === 2;
+        const isVersionedCatalogKey = queryKey.length === 5 &&
+          isSafeReasoningIdentifier(queryKey[2]) &&
+          isSafeReasoningIdentifier(queryKey[3]) &&
+          Number.isSafeInteger(queryKey[4]) && (queryKey[4] as number) >= 0;
+        if (!hasCatalogPrefix || (!isLegacyCatalogKey && !isVersionedCatalogKey)) continue;
         const queryData = entryItems[1];
         if (queryData === undefined) continue;
         if (!queryData || typeof queryData !== "object") return undefined;
