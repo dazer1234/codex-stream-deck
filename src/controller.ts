@@ -1391,8 +1391,12 @@ export class DeckController {
       if (!parsed) return undefined;
       const current = this.localSnapshot;
       if (parsed.reasoningEffort !== undefined &&
-          localHost != null && localHost === this.localHost &&
-          current != null && current.host.hostId === localHost.hostId) {
+          localHost != null &&
+          this.localHost?.hostId === localHost.hostId &&
+          this.localHost.platform === localHost.platform &&
+          current != null &&
+          current.host.hostId === localHost.hostId &&
+          current.host.platform === localHost.platform) {
         this.localSnapshotGeneration += 1;
         this.localSnapshot = {
           ...current,

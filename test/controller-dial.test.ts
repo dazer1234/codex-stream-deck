@@ -736,6 +736,85 @@ test("local confirmed reasoning renders immediately and supersedes an older refr
   controller.unregisterDial(action);
 });
 
+test("local confirmed reasoning survives same-host identity object replacement", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-local-host-object-replacement");
+  const state = probe(controller);
+  const capturedHost = { ...HOST };
+  state.localHost = capturedHost;
+  state.targetHostId = capturedHost.hostId;
+  state.targetPlatform = capturedHost.platform;
+  state.localSnapshot = {
+    host: capturedHost, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() {
+      const refreshedHost = { ...HOST };
+      state.localHost = refreshedHost;
+      state.localSnapshot = {
+        host: refreshedHost, observedAt: 2_000,
+        snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+      };
+      return { outcome: "applied", reasoningEffort: "xhigh" };
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+
+  assert.notEqual(state.localHost, capturedHost);
+  assert.equal(state.localHost?.hostId, capturedHost.hostId);
+  assert.equal(state.localSnapshotGeneration, 1);
+  assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "xhigh");
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "XHIGH");
+  controller.unregisterDial(action);
+});
+
+test("local confirmed reasoning never patches a genuinely replaced host", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("reasoning-local-different-host");
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localSnapshot = {
+    host: HOST, observedAt: 1_000,
+    snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "high" }
+  };
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning() {
+      const replacementHost = {
+        ...HOST,
+        hostId: "host-replacement"
+      };
+      state.localHost = replacementHost;
+      state.localSnapshot = {
+        host: replacementHost, observedAt: 2_000,
+        snapshot: { ...structuredClone(SNAPSHOT), reasoningEffort: "medium" }
+      };
+      return { outcome: "applied", reasoningEffort: "xhigh" };
+    }
+  };
+  controller.registerDial(action, expandDialPreset("reasoning"));
+  await settle();
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+
+  assert.equal(state.localSnapshotGeneration, 0);
+  assert.equal(state.localSnapshot?.host.hostId, "host-replacement");
+  assert.equal(state.localSnapshot?.snapshot.reasoningEffort, "medium");
+  assert.equal((action.feedbackCalls.at(-1) as { value: string }).value, "MEDIUM");
+  controller.unregisterDial(action);
+});
+
 test("local reasoning feedback accepts only exact own bounded execution data", async () => {
   const controller = new DeckController();
   const state = probe(controller);
