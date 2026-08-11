@@ -31,6 +31,7 @@ function createGuardedRendererHarness(options: {
   currentEffort?: string;
   visibleTriggerCount?: number;
   modelId?: string;
+  queryKey?: unknown[];
   supportedEfforts?: string[];
   advanceEffortOnCommand?: boolean;
   confirmationDelayMs?: number;
@@ -83,7 +84,7 @@ function createGuardedRendererHarness(options: {
   ].join("");
   const modelId = options.modelId ?? "gpt-5.6-sol";
   const queryClient = new ReasoningQueryClientFixture([[
-    ["models", "list"],
+    options.queryKey ?? ["models", "list"],
     { data: [{
           displayName: modelId === "gpt-5.6-sol" ? "GPT-5.6-Sol" : modelId,
           model: modelId,
@@ -1026,6 +1027,18 @@ test("reasoning catalog authorizes only supported exact query-key shapes", () =>
   });
   const symbolKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
   Object.defineProperty(symbolKey, Symbol("unsafe"), { value: true });
+  const extraEnumerableKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(extraEnumerableKey, "extra", { value: true, enumerable: true });
+  const extraNonEnumerableKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(extraNonEnumerableKey, "extra", { value: true });
+  const extraAccessorKey: unknown[] = ["models", "list", "local", "chatgpt", 100];
+  Object.defineProperty(extraAccessorKey, "extra", {
+    enumerable: false,
+    get() { accessorReads++; return true; }
+  });
+  const trappedKey = new Proxy<unknown[]>(["models", "list", "local", "chatgpt", 100], {
+    ownKeys() { throw new Error("query-key ownKeys trap must fail closed"); }
+  });
   const invalidKeys: unknown[] = [
     ["models", "list", "extra"],
     ["models", "list", "local", "chatgpt"],
@@ -1038,7 +1051,11 @@ test("reasoning catalog authorizes only supported exact query-key shapes", () =>
     ["models", "list", "local", "chatgpt", 1.5],
     ["models", "list", "local", "chatgpt", "100"],
     accessorKey,
-    symbolKey
+    symbolKey,
+    extraEnumerableKey,
+    extraNonEnumerableKey,
+    extraAccessorKey,
+    trappedKey
   ];
   for (const [index, queryKey] of invalidKeys.entries()) {
     assert.equal(read([
@@ -1698,6 +1715,31 @@ test("serialized proven boundary no-ops return the unchanged authoritative effor
   }
 });
 
+test("serialized guarded reasoning validates a current five-part key before a boundary no-op", async () => {
+  const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
+  const harness = createGuardedRendererHarness({
+    currentEffort: "low",
+    queryKey: ["models", "list", "local", "chatgpt", 100]
+  });
+  let expression = "";
+  const testBridge = bridge as unknown as {
+    ensureConnected: () => Promise<void>;
+    evaluate: <T>(source: string) => Promise<T>;
+  };
+  testBridge.ensureConnected = async () => {};
+  testBridge.evaluate = async <T>(source: string): Promise<T> => {
+    expression = source;
+    return await harness.evaluate<T>(source);
+  };
+
+  assert.deepEqual(await bridge.adjustReasoning("decrease", { includeUltra: false }), {
+    outcome: "applied", reasoningEffort: "low"
+  });
+  assert.deepEqual(harness.runnerCalls, []);
+  assert.match(expression, /const readExactBoundedOwnDataArray = \(/,
+    "the evaluated renderer expression includes exact query-key validation");
+});
+
 test("concurrent serialized guarded increases recheck live effort immediately before invoking the runner", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const harness = createGuardedRendererHarness({
@@ -1798,6 +1840,7 @@ test("guarded reasoning expression serializes every helper dependency into rende
     "readDataPropertyInPrototypeChain",
     "isCloneableReasoningQueryClient",
     "readBoundedOwnDataArray",
+    "readExactBoundedOwnDataArray",
     "isStructuredCloneSafePlainData",
     "normalizeReasoningEffortOrder",
     "normalizeReasoningModelLabel",

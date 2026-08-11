@@ -354,6 +354,16 @@ export function readBoundedOwnDataArray(value: unknown, maxLength: number): unkn
   } catch { return undefined; }
 }
 
+export function readExactBoundedOwnDataArray(value: unknown, maxLength: number): unknown[] | undefined {
+  try {
+    const items = readBoundedOwnDataArray(value, maxLength);
+    if (!items) return undefined;
+    const names = Object.getOwnPropertyNames(value);
+    const symbols = Object.getOwnPropertySymbols(value);
+    return names.length === items.length + 1 && symbols.length === 0 ? items : undefined;
+  } catch { return undefined; }
+}
+
 export function isStructuredCloneSafePlainData(
   value: unknown,
   maxNodes = 3000,
@@ -597,14 +607,19 @@ export function readReasoningModelCatalogMatch(
       const getQueriesDataProperty = readDataPropertyInPrototypeChain(candidate, "getQueriesData");
       if (!getQueriesDataProperty?.exists || typeof getQueriesDataProperty.value !== "function") return undefined;
       const rawEntries = getQueriesDataProperty.value.call(candidate, { queryKey: ["models", "list"] });
-      if (!readBoundedOwnDataArray(rawEntries, 64) ||
-          !isStructuredCloneSafePlainData(rawEntries, 70000, 32, 1000)) return undefined;
+      const rawEntryItems = readBoundedOwnDataArray(rawEntries, 64);
+      if (!rawEntryItems || !isStructuredCloneSafePlainData(rawEntries, 70000, 32, 1000)) return undefined;
+      for (const rawEntry of rawEntryItems) {
+        const rawEntryParts = readBoundedOwnDataArray(rawEntry, 2);
+        if (!rawEntryParts || rawEntryParts.length !== 2 ||
+            !readExactBoundedOwnDataArray(rawEntryParts[0], 64)) return undefined;
+      }
       const entries = readBoundedOwnDataArray(structuredClone(rawEntries), 64);
       if (!entries) return undefined;
       for (const entry of entries) {
         const entryItems = readBoundedOwnDataArray(entry, 2);
         if (!entryItems || entryItems.length !== 2) return undefined;
-        const queryKey = readBoundedOwnDataArray(entryItems[0], 64);
+        const queryKey = readExactBoundedOwnDataArray(entryItems[0], 64);
         if (!queryKey || !isStructuredCloneSafePlainData(entryItems[0], 128, 8, 64)) return undefined;
         const hasCatalogPrefix = queryKey[0] === "models" && queryKey[1] === "list";
         const isLegacyCatalogKey = queryKey.length === 2;
@@ -1075,6 +1090,7 @@ export class CodexMicroRendererBridge {
       const readDataPropertyInPrototypeChain = (${readDataPropertyInPrototypeChain.toString()});
       const isCloneableReasoningQueryClient = (${isCloneableReasoningQueryClient.toString()});
       const readBoundedOwnDataArray = (${readBoundedOwnDataArray.toString()});
+      const readExactBoundedOwnDataArray = (${readExactBoundedOwnDataArray.toString()});
       const isStructuredCloneSafePlainData = (${isStructuredCloneSafePlainData.toString()});
       const normalizeReasoningEffortOrder = (${normalizeReasoningEffortOrder.toString()});
       const normalizeReasoningModelLabel = (${normalizeReasoningModelLabel.toString()});
