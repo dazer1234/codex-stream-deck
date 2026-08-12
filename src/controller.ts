@@ -650,7 +650,8 @@ export class DeckController {
     registration: DialRegistration,
     gesture: DialGesture
   ): boolean {
-    if (gesture.binding !== "reasoning.decrease" && gesture.binding !== "reasoning.increase") {
+    if (gesture.binding !== "reasoning.decrease" && gesture.binding !== "reasoning.increase" &&
+        gesture.binding !== "keycap.MIND-" && gesture.binding !== "keycap.MIND+") {
       return true;
     }
     const reservation = this.reserveModelReasoningMutations(
@@ -871,7 +872,8 @@ export class DeckController {
       return;
     }
     const reasoningCount = reduced.bindings.filter((binding) =>
-      binding === "reasoning.decrease" || binding === "reasoning.increase").length;
+      binding === "reasoning.decrease" || binding === "reasoning.increase" ||
+      binding === "keycap.MIND-" || binding === "keycap.MIND+").length;
     const reasoningReservations = this.reserveModelReasoningMutations(
       reasoningCount, registration.modelReasoningReservations);
     if (!reasoningReservations) {
@@ -885,7 +887,8 @@ export class DeckController {
     let reasoningReservationIndex = 0;
     for (const binding of reduced.bindings) {
       const gesture = this.captureDialGesture(registration, binding, undefined, startedAt);
-      if (binding === "reasoning.decrease" || binding === "reasoning.increase") {
+      if (binding === "reasoning.decrease" || binding === "reasoning.increase" ||
+          binding === "keycap.MIND-" || binding === "keycap.MIND+") {
         gesture.modelReasoningReservation = reasoningReservations[reasoningReservationIndex++];
       }
       this.enqueueDialTap(registration, gesture);
@@ -1195,6 +1198,8 @@ export class DeckController {
   }
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
+    if (keycapId === "MIND+") return this.adjustReasoning("increase");
+    if (keycapId === "MIND-") return this.adjustReasoning("decrease");
     await this.sendToTarget({ kind: "keycap", keycapId }, () => this.runLocalKeycap(keycapId));
   }
 
@@ -1837,7 +1842,7 @@ export class DeckController {
     }
     const lifecycle = bindingLifecycle(binding);
     if (act === 0 && lifecycle !== "momentary") return;
-    if (binding === "reasoning.decrease") {
+    if (binding === "reasoning.decrease" || binding === "keycap.MIND-") {
       await this.serializeModelReasoningMutation(async () => {
         if (!this.isCurrentDialRegistration(registration)) return;
         const result = await this.sendDialToHost(
@@ -1859,7 +1864,7 @@ export class DeckController {
       }, this.takeDialGestureMutation(gesture));
       return;
     }
-    if (binding === "reasoning.increase") {
+    if (binding === "reasoning.increase" || binding === "keycap.MIND+") {
       await this.serializeModelReasoningMutation(async () => {
         if (!this.isCurrentDialRegistration(registration)) return;
         const result = await this.sendDialToHost(

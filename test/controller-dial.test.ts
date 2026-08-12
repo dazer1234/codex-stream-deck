@@ -1182,6 +1182,86 @@ test("public reasoning actions remain unrestricted locally and remotely", async 
   ]);
 });
 
+test("reasoning keycaps route through guarded public reasoning locally and remotely", async () => {
+  const controller = new DeckController();
+  const localPolicies: Array<[string, ReasoningAdjustmentPolicy | undefined]> = [];
+  const directKeycaps: string[] = [];
+  const remoteCommands: unknown[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning(direction, policy) {
+      localPolicies.push([direction, policy]);
+      return { outcome: "applied", reasoningEffort: "high" };
+    },
+    async runKeycap(keycapId) { directKeycaps.push(keycapId); }
+  };
+  state.relayClient = {
+    currentHost: () => REMOTE_HOST,
+    currentHealth: () => ({ state: "ready", changedAt: 1_000 }),
+    currentSnapshot: () => undefined,
+    async send(command) { remoteCommands.push(command); return "applied"; }
+  };
+
+  await controller.runKeycap("MIND+");
+  state.targetHostId = REMOTE_HOST.hostId;
+  state.targetPlatform = REMOTE_HOST.platform;
+  await controller.runKeycap("MIND-");
+
+  assert.deepEqual(localPolicies, [["increase", { includeUltra: true }]]);
+  assert.deepEqual(remoteCommands, [
+    { kind: "reasoning", direction: "decrease", includeUltra: true }
+  ]);
+  assert.deepEqual(directKeycaps, []);
+});
+
+test("dial reasoning keycaps use guarded reasoning with the dial Ultra policy", async () => {
+  const controller = new DeckController();
+  const action = fakeDial("guarded-reasoning-keycaps");
+  const adjustments: Array<[string, ReasoningAdjustmentPolicy | undefined]> = [];
+  const directKeycaps: string[] = [];
+  const state = probe(controller);
+  state.localHost = HOST;
+  state.targetHostId = HOST.hostId;
+  state.targetPlatform = HOST.platform;
+  state.localHealth = { state: "ready", changedAt: 1_000 };
+  state.microBridge = {
+    async sendAgent() {},
+    async adjustReasoning(direction, policy) {
+      adjustments.push([direction, policy]);
+      return {
+        outcome: "applied",
+        reasoningEffort: direction === "increase" ? "high" : "medium"
+      };
+    },
+    async runKeycap(keycapId) { directKeycaps.push(keycapId); }
+  };
+  controller.registerDial(action, {
+    ...expandDialPreset("custom"),
+    includeUltraReasoning: false,
+    rotation: {
+      kind: "paired",
+      counterClockwise: "keycap.MIND-",
+      clockwise: "keycap.MIND+"
+    }
+  });
+
+  controller.rotateDial(action, 1);
+  await idle(controller, action.id);
+  controller.rotateDial(action, -1);
+  await idle(controller, action.id);
+
+  assert.deepEqual(adjustments, [
+    ["increase", { includeUltra: false }],
+    ["decrease", { includeUltra: false }]
+  ]);
+  assert.deepEqual(directKeycaps, []);
+  controller.unregisterDial(action);
+});
+
 test("blocked local and remote reasoning show identical registration-safe Ultra feedback without alerts", async () => {
   const expected = {
     title: "REASONING",
