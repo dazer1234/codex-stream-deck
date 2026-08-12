@@ -101,6 +101,16 @@ export async function resolveCommandRunner(
   return null;
 }
 
+export async function resolveKeycapCommandRunner(
+  command: string,
+  bridgeSource: string,
+  bridgeUrl: string,
+  importModule: (url: string) => Promise<Record<string, unknown>>
+): Promise<CommandRunner | null> {
+  if (command === "composer.increaseReasoningEffort" || command === "composer.decreaseReasoningEffort") return null;
+  return resolveCommandRunner(bridgeSource, bridgeUrl, importModule);
+}
+
 const execFileAsync = promisify(execFile);
 const PORT_FILE = join(codexDeckStateRoot(), "codex-micro-bridge.json");
 const DEVICE_STATE = {
@@ -1667,6 +1677,9 @@ export class CodexMicroRendererBridge {
       if (!action) throw new Error('The selected Codex Micro keycap has no action.');
 
       if (action.type === 'command') {
+        if (action.command === 'composer.increaseReasoningEffort' || action.command === 'composer.decreaseReasoningEffort') {
+          throw new Error('Reasoning commands require the dedicated guarded controls.');
+        }
         let commandRunner = null;
         if (commandsUrl) {
           const commands = await import(commandsUrl);
@@ -1674,22 +1687,9 @@ export class CodexMicroRendererBridge {
         }
         if (!commandRunner && bridgeUrl) {
           const bridgeSource = await (await fetch(bridgeUrl)).text();
-          const runnerMatch = bridgeSource.match(/([A-Za-z_$][\\w$]*)\\(\\s*[A-Za-z_$][\\w$]*\\??\\.command\\s*,["'\\x60]codex_micro_hid["'\\x60]\\)/);
-          const runnerLocal = runnerMatch?.[1];
-          const importPattern = /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g;
-          let importMatch;
-          while (runnerLocal && (importMatch = importPattern.exec(bridgeSource))) {
-            for (const specifier of importMatch[1].split(',')) {
-              const parts = specifier.trim().split(/\\s+as\\s+/);
-              const exportName = parts[0];
-              const localName = parts[1] ?? parts[0];
-              if (localName !== runnerLocal) continue;
-              const namespace = await import(new URL(importMatch[2], bridgeUrl).href);
-              if (typeof namespace[exportName] === 'function') commandRunner = namespace[exportName];
-              break;
-            }
-            if (commandRunner) break;
-          }
+          const resolveCommandRunner = (${resolveCommandRunner.toString()});
+          const resolveKeycapCommandRunner = (${resolveKeycapCommandRunner.toString()});
+          commandRunner = await resolveKeycapCommandRunner(action.command, bridgeSource, bridgeUrl, (url) => import(url));
         }
         if (typeof commandRunner !== 'function') throw new Error('Codex command runner is unavailable.');
         const handled = commandRunner(action.command, 'codex_micro_hid');

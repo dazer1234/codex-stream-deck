@@ -2533,7 +2533,7 @@ test("guarded reasoning expression serializes every helper dependency into rende
   ]) assert.match(expression, new RegExp(`const ${helper} = \\(`), `${helper} is defined in renderer scope`);
 });
 
-test("protected generic keycaps cannot reach the low-level reasoning runner", async () => {
+test("standalone keycaps reject protected reasoning commands before resolving the current runner", async () => {
   const bridge = new microBridgeModule.CodexMicroRendererBridge(() => {});
   const expressions: string[] = [];
   const testBridge = bridge as unknown as {
@@ -2553,7 +2553,11 @@ test("protected generic keycaps cannot reach the low-level reasoning runner", as
   await bridge.adjustReasoning("decrease");
 
   assert.equal(expressions.length, 3);
-  assert.doesNotMatch(expressions[0]!, /resolveCommandRunner/);
+  const keycapProtection = expressions[0]!.indexOf("action.command === 'composer.increaseReasoningEffort'");
+  const keycapResolution = expressions[0]!.indexOf("const resolveCommandRunner =");
+  assert.ok(keycapProtection >= 0);
+  assert.ok(keycapResolution > keycapProtection);
+  assert.match(expressions[0]!, /resolveKeycapCommandRunner/);
   assert.match(expressions[1]!, /composer\.increaseReasoningEffort/);
   assert.match(expressions[2]!, /composer\.decreaseReasoningEffort/);
   assert.match(expressions[1]!, /resolveCommandRunner/);
@@ -2605,6 +2609,40 @@ test("command runner discovery resolves imported two-argument guarded calls and 
   assert.deepEqual(imports, ["https://codex.example/assets/guarded-runner-live.js"]);
   assert.equal(
     await resolveCommandRunner("import{contextual as Zt}from'./contextual-runner-live.js';Zt(r,p.command,`codex_micro_hid`);", bridgeUrl, importModule),
+    null
+  );
+});
+
+test("standalone keycaps use the current literal Micro runner while reasoning remains protected", async () => {
+  const candidate = Reflect.get(microBridgeModule, "resolveKeycapCommandRunner") as unknown;
+  assert.equal(typeof candidate, "function");
+  const resolveKeycapCommandRunner = candidate as (
+    command: string,
+    bridgeSource: string,
+    bridgeUrl: string,
+    importModule: (url: string) => Promise<Record<string, unknown>>
+  ) => Promise<((command: string, source: string) => unknown) | null>;
+  const calls: Array<[string, string]> = [];
+  const bridgeUrl = "https://codex.example/assets/codex-micro-bridge-current.js";
+  const bridgeSource = [
+    'import{k8 as he}from"./app-initial-current.js";',
+    'function Zt(e,t,n){return K(t)?.requiredAccess!=null&&!e.get(ue)?!1:he(t,n)}',
+    'enabled&&he(`composer.startVoiceMode`,`codex_micro_hid`);',
+    'Zt(r,p.command,`codex_micro_hid`);'
+  ].join("");
+  const importModule = async (url: string): Promise<Record<string, unknown>> => url.endsWith("app-initial-current.js")
+    ? { k8(command: string, source: string) { calls.push([command, source]); return true; } }
+    : {};
+
+  const runner = await resolveKeycapCommandRunner("toggleTerminal", bridgeSource, bridgeUrl, importModule);
+  assert.equal(runner?.("toggleTerminal", "codex_micro_hid"), true);
+  assert.deepEqual(calls, [["toggleTerminal", "codex_micro_hid"]]);
+  assert.equal(
+    await resolveKeycapCommandRunner("composer.increaseReasoningEffort", bridgeSource, bridgeUrl, importModule),
+    null
+  );
+  assert.equal(
+    await resolveKeycapCommandRunner("composer.decreaseReasoningEffort", bridgeSource, bridgeUrl, importModule),
     null
   );
 });
