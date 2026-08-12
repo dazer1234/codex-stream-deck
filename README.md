@@ -97,7 +97,7 @@ The page-navigation and profile-switch keys are built-in Stream Deck actions. Al
 
 ### Optional macOS app focus
 
-The **Agent Display** inspector includes a global **Focus Codex** setting for the six agent keys. It defaults to off. On a local Mac, enabling it activates Codex before the agent action, so keyboard shortcuts such as approval target Codex rather than the previously active app. It never focuses the local app for an agent routed to a remote host. For an environment default, set `CODEX_DECK_FOCUS_CODEX_ON_AGENT_PRESS=true` before starting Stream Deck; an explicit inspector choice takes precedence.
+The **Agent Display** inspector includes a global **Focus Codex** setting for the six agent keys. It defaults to off. On a local Mac, enabling it activates Codex before the agent action, so keyboard shortcuts such as approval target Codex rather than the previously active app. It never focuses the local app for an agent routed to a remote host. For an environment default, run `launchctl setenv CODEX_DECK_FOCUS_CODEX_ON_AGENT_PRESS true` before starting Stream Deck; an explicit inspector choice takes precedence.
 
 ### Usage and reset controls
 
