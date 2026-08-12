@@ -116,4 +116,3 @@ git commit -m "docs: explain usage reset countdowns"
 - [ ] **Step 4: Include the countdown in final review and install**
 
 Request independent review together with the Ultra feature, merge only after approval, and install the same validated build. On Stream Deck +, select Weekly and confirm a 125-hour-and-48-minute interval fits as `RESETS IN 5D 5H 48M` without truncation; also inspect a sub-day interval to confirm the original hour/minute style remains.
-

@@ -407,4 +407,3 @@ Reopen `/Applications/Elgato Stream Deck.app`, confirm the Codex Deck plugin pro
 - [ ] **Step 7: Perform physical Stream Deck + QA**
 
 With the checkbox off, rotate through every lower level and prove the next clockwise detent at the ceiling shows `ULTRA OFF`, sends no command, and opens no Codex dialog. Turn back down and confirm decrease works. Check the box in the property inspector, retry, and confirm Codex owns any Ultra confirmation. Restart Stream Deck and Codex and confirm the per-knob setting persists.
-
