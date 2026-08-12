@@ -87,8 +87,16 @@ export class DeckController {
       const settings = await streamDeck.settings.getGlobalSettings<DeckSettings>();
       this.showContextRings = settings.showContextRings !== false;
       this.focusCodexOnAgentPress = settings.focusCodexOnAgentPress ?? focusCodexOnAgentPressDefault();
+      if (settings.focusCodexOnAgentPress == null) {
+        void streamDeck.settings.setGlobalSettings({
+          ...settings,
+          focusCodexOnAgentPress: this.focusCodexOnAgentPress
+        }).catch((error) => {
+          streamDeck.logger.warn(`Could not persist the effective Focus Codex setting: ${String(error)}`);
+        });
+      }
     } catch (error) {
-      streamDeck.logger.warn(`Context-ring settings were unavailable; using enabled by default: ${String(error)}`);
+      streamDeck.logger.warn(`Global settings were unavailable; using defaults: ${String(error)}`);
     }
     this.localHost = await getOrCreateHostIdentity();
     const persistedTarget = await readControlTarget(undefined, this.localHost.platform);

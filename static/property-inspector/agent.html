@@ -16,17 +16,38 @@
 <body>
   <label>
     <span>Context ring</span>
-    <input id="show-context-rings" type="checkbox" checked>
+    <input id="show-context-rings" type="checkbox" checked disabled>
   </label>
   <label>
     <span>Focus Codex</span>
-    <input id="focus-codex-on-agent-press" type="checkbox">
+    <input id="focus-codex-on-agent-press" type="checkbox" disabled>
   </label>
   <p>These global options apply to all six Codex agent keys on this computer. Focus Codex activates the local Mac app before opening an agent, so its keyboard shortcuts are ready.</p>
   <script>
     let websocket;
     let pluginContext;
-    let globalSettings = {};
+    let globalSettings;
+    const showContextRingsInput = document.getElementById("show-context-rings");
+    const focusCodexOnAgentPressInput = document.getElementById("focus-codex-on-agent-press");
+
+    function renderGlobalSettings() {
+      if (!globalSettings) return;
+      showContextRingsInput.checked = globalSettings.showContextRings !== false;
+      focusCodexOnAgentPressInput.checked = globalSettings.focusCodexOnAgentPress === true;
+      showContextRingsInput.disabled = false;
+      focusCodexOnAgentPressInput.disabled = false;
+    }
+
+    function setGlobalSetting(key, value) {
+      if (!globalSettings || websocket?.readyState !== WebSocket.OPEN) {
+        renderGlobalSettings();
+        return;
+      }
+      globalSettings = { ...globalSettings, [key]: value };
+      websocket.send(JSON.stringify({
+        event: "setGlobalSettings", context: pluginContext, payload: globalSettings
+      }));
+    }
 
     window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent) => {
       pluginContext = uuid;
@@ -35,31 +56,24 @@
         websocket.send(JSON.stringify({ event: registerEvent, uuid }));
         websocket.send(JSON.stringify({ event: "getGlobalSettings", context: pluginContext }));
       });
+      websocket.addEventListener("close", () => {
+        showContextRingsInput.disabled = true;
+        focusCodexOnAgentPressInput.disabled = true;
+      });
       websocket.addEventListener("message", (message) => {
         const event = JSON.parse(message.data);
         if (event.event !== "didReceiveGlobalSettings") return;
         globalSettings = event.payload?.settings ?? {};
-        document.getElementById("show-context-rings").checked = globalSettings.showContextRings !== false;
-        document.getElementById("focus-codex-on-agent-press").checked = globalSettings.focusCodexOnAgentPress === true;
+        renderGlobalSettings();
       });
     };
 
-    document.getElementById("show-context-rings").addEventListener("change", (event) => {
-      globalSettings = { ...globalSettings, showContextRings: event.target.checked };
-      if (websocket?.readyState === WebSocket.OPEN) {
-        websocket.send(JSON.stringify({
-          event: "setGlobalSettings", context: pluginContext, payload: globalSettings
-        }));
-      }
+    showContextRingsInput.addEventListener("change", (event) => {
+      setGlobalSetting("showContextRings", event.target.checked);
     });
 
-    document.getElementById("focus-codex-on-agent-press").addEventListener("change", (event) => {
-      globalSettings = { ...globalSettings, focusCodexOnAgentPress: event.target.checked };
-      if (websocket?.readyState === WebSocket.OPEN) {
-        websocket.send(JSON.stringify({
-          event: "setGlobalSettings", context: pluginContext, payload: globalSettings
-        }));
-      }
+    focusCodexOnAgentPressInput.addEventListener("change", (event) => {
+      setGlobalSetting("focusCodexOnAgentPress", event.target.checked);
     });
   </script>
 </body>
