@@ -460,12 +460,6 @@ async function runWatcher(): Promise<number> {
         } else {
           enabledSignature = "";
           await removeStaleBridgeState(null, log);
-          if (decision.action.type === "restart-for-recovery" && main) {
-            await log(`Recovering Codex bridge once for generation ${main.generation} (${decision.action.reason}).`);
-            await terminateCodex(main);
-            const refreshed = await discoverCodexInstallation();
-            await launchCodex(refreshed, await chooseLoopbackPort());
-          }
         }
       } catch (error) {
         await log(`Watcher iteration failed: ${String(error)}`);
@@ -742,10 +736,10 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a new process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_001, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a stable new process can be recovered once");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a stable new process remains degraded without a restart");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 61_000, generation: "C", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "the global circuit breaker blocks a new-generation restart loop");
+  assert.equal(result.action.type, "wait", "a new generation also remains untouched");
 
   state = createWatcherPolicyState(0);
   result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
@@ -760,7 +754,7 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a replacement process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_000, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a previous healthy bridge recovers after a stable replacement");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a previous healthy bridge never authorizes background restart");
 
   state = createWatcherPolicyState(0);
   result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
@@ -786,7 +780,7 @@ async function selfTest(): Promise<void> {
 
   assert.equal(isBridgeStateStale(70_000, null), true, "stale/invalid port state is rejected");
   assert.equal(isBridgeStateStale(43123, 43123), false, "the active bridge state is retained");
-  console.log("macOS self-test passed: safe recovery, circuit-breaker, race, stale-state, and single-instance scenarios.");
+  console.log("macOS self-test passed: non-destructive degradation, race, stale-state, and single-instance scenarios.");
 }
 
 async function main(): Promise<number> {

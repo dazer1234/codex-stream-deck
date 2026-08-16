@@ -7,8 +7,7 @@ export type WatcherObservation = {
 export type WatcherAction =
   | { type: "preserve-initial-session" }
   | { type: "reuse-bridge" }
-  | { type: "wait"; reason: string }
-  | { type: "restart-for-recovery"; generation: string; reason: string };
+  | { type: "wait"; reason: string };
 
 export type WatcherPolicyState = {
   initialized: boolean;
@@ -134,34 +133,8 @@ export function evaluateWatcherPolicy(
     return { state: next, action: { type: "preserve-initial-session" } };
   }
 
-  if (now < next.recoveryCooldownUntil) {
-    return { state: next, action: { type: "wait", reason: "automatic-recovery-circuit-open" } };
-  }
-
-  if (next.recoveryAttempts.includes(generation)) {
-    return { state: next, action: { type: "wait", reason: "recovery-already-attempted-for-generation" } };
-  }
-
   if (next.unbridgedSince == null || now - next.unbridgedSince < DEFAULT_UNBRIDGED_STABLE_MS) {
     return { state: next, action: { type: "wait", reason: "confirm-stable-unbridged-generation" } };
   }
-
-  const shouldRecover = generationChanged || observedStoppedInterval || next.hadHealthyBridge || now >= next.startupGraceUntil;
-  if (!shouldRecover) {
-    return { state: next, action: { type: "wait", reason: "launch-agent-startup-grace" } };
-  }
-
-  next.recoveryAttempts = [...next.recoveryAttempts.slice(-15), generation];
-  next.recoveryPendingUntil = now + DEFAULT_RECOVERY_STARTUP_MS;
-  next.recoveryCooldownUntil = now + DEFAULT_RECOVERY_COOLDOWN_MS;
-  next.unbridgedGeneration = null;
-  next.unbridgedSince = null;
-  const reason = generationChanged
-    ? "main-process-generation-changed"
-    : observedStoppedInterval
-      ? "normal-launch-after-stopped-interval"
-      : next.hadHealthyBridge
-        ? "previous-healthy-bridge-missing"
-        : "normal-launch-after-startup-grace";
-  return { state: next, action: { type: "restart-for-recovery", generation, reason } };
+  return { state: next, action: { type: "wait", reason: "bridge-unavailable-degraded" } };
 }
