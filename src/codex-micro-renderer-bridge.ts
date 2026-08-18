@@ -408,6 +408,17 @@ export class CodexMicroRendererBridge {
 
   async runKeycap(keycapId: OfficialKeycapId): Promise<void> {
     if (!OFFICIAL_KEYCAP_IDS.includes(keycapId)) throw new Error(`Unknown Codex Micro keycap: ${keycapId}`);
+    
+    // Short-circuit MIC keycap to use native HID path (ACT10 for push-to-talk toggle)
+    // The MIC keycap action type is now 'named' which isn't handled by the JS evaluation path,
+    // and the VS Code API module no longer exists in the build.
+    // Native HID path (ACT10) still works for dictation push-to-talk.
+    if (keycapId === "MIC") {
+      await this.ensureConnected();
+      await this.dispatch("codex-micro-hid-event", { event: { key: "ACT10", act: 1, slot: null, threadKey: null } }, "codex-micro-hid-event");
+      return;
+    }
+    
     await this.ensureConnected();
     const expression = `(async () => {
       const urls = [...new Set([
