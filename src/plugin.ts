@@ -1,6 +1,5 @@
 import streamDeck from "@elgato/streamdeck";
 import { DeckController } from "./controller.js";
-import { focusCodexOnAgentPressDefault } from "./codex-focus.js";
 import {
   Agent1, Agent2, Agent3, Agent4, Agent5, Agent6,
   Approve, Back, Decline, Dictation, Fast, Fork, Forward, NewTask,
@@ -18,7 +17,7 @@ const controller = new DeckController();
 
 streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean; focusCodexOnAgentPress?: boolean }>((event) => {
   controller.setContextRingVisibility(event.settings.showContextRings !== false);
-  controller.setFocusCodexOnAgentPress(event.settings.focusCodexOnAgentPress ?? focusCodexOnAgentPressDefault());
+  controller.setFocusCodexOnAgentPress(event.settings.focusCodexOnAgentPress === true);
 });
 
 for (const pluginAction of [

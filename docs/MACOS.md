@@ -41,15 +41,7 @@ Tailscale remote access remains a separate optional profile; see
 
 ### Focus Codex when opening an agent
 
-Each agent key's **Agent Display** inspector has a global **Focus Codex** option. It is off by default. When enabled, a local Mac agent press activates Codex before its native Micro event is sent, so approval and other keyboard shortcuts target Codex instead of the previously active app. Remote agents never activate the local app.
-
-For a local installation or test environment, set the initial default before starting Stream Deck:
-
-```zsh
-launchctl setenv CODEX_DECK_FOCUS_CODEX_ON_AGENT_PRESS true
-```
-
-Then restart Stream Deck. An explicit inspector setting takes precedence.
+Each agent key's **Agent Display** inspector has a global **Focus Codex** option. It is off by default, applies to all six agent keys, and is persisted by Stream Deck. When enabled, a local Mac agent press activates Codex before its native Micro event is sent, so approval and other keyboard shortcuts target Codex instead of the previously active app. Remote agents never activate the local app.
 
 If an archive tool removed executable permissions, restore only the two launcher files:
 

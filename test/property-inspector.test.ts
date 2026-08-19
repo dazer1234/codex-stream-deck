@@ -83,6 +83,14 @@ test("agent property inspector waits for and preserves complete global settings"
 
   socket.emit("message", {
     event: "didReceiveGlobalSettings",
+    payload: { settings: { unrelatedSetting: "preserved" } }
+  });
+  assert.equal(inputs.get("show-context-rings")?.disabled, false);
+  assert.equal(inputs.get("focus-codex-on-agent-press")?.disabled, false);
+  assert.equal(inputs.get("focus-codex-on-agent-press")?.checked, false);
+
+  socket.emit("message", {
+    event: "didReceiveGlobalSettings",
     payload: {
       settings: {
         showContextRings: true,
@@ -91,8 +99,6 @@ test("agent property inspector waits for and preserves complete global settings"
       }
     }
   });
-  assert.equal(inputs.get("show-context-rings")?.disabled, false);
-  assert.equal(inputs.get("focus-codex-on-agent-press")?.disabled, false);
   assert.equal(inputs.get("focus-codex-on-agent-press")?.checked, true);
 
   const showContextRings = inputs.get("show-context-rings");

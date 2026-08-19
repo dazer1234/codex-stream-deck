@@ -17,7 +17,7 @@ import {
   renderRateLimitResetKey, renderUsageLimitKey, renderUsageOverviewKey, type BuiltinIconName
 } from "./render.js";
 import { openCodexThread } from "./codex-open.js";
-import { focusCodexApp, focusCodexOnAgentPressDefault } from "./codex-focus.js";
+import { focusCodexApp } from "./codex-focus.js";
 import { visualStatusFromMicro } from "./status.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
@@ -86,15 +86,7 @@ export class DeckController {
     try {
       const settings = await streamDeck.settings.getGlobalSettings<DeckSettings>();
       this.showContextRings = settings.showContextRings !== false;
-      this.focusCodexOnAgentPress = settings.focusCodexOnAgentPress ?? focusCodexOnAgentPressDefault();
-      if (settings.focusCodexOnAgentPress == null) {
-        void streamDeck.settings.setGlobalSettings({
-          ...settings,
-          focusCodexOnAgentPress: this.focusCodexOnAgentPress
-        }).catch((error) => {
-          streamDeck.logger.warn(`Could not persist the effective Focus Codex setting: ${String(error)}`);
-        });
-      }
+      this.focusCodexOnAgentPress = settings.focusCodexOnAgentPress === true;
     } catch (error) {
       streamDeck.logger.warn(`Global settings were unavailable; using defaults: ${String(error)}`);
     }
