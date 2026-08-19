@@ -1,7 +1,7 @@
 {
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "Name": "Codex Deck",
-  "Version": "0.7.0.2",
+  "Version": "0.7.0.4",
   "Author": "Dazer",
   "Description": "Unofficial Codex Micro bridge for Stream Deck on Windows and macOS, with optional multi-host relay.",
   "UUID": "com.simeo.codex-deck",
