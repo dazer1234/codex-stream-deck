@@ -17,6 +17,7 @@ import {
   renderRateLimitResetKey, renderUsageLimitKey, renderUsageOverviewKey, type BuiltinIconName
 } from "./render.js";
 import { openCodexThread } from "./codex-open.js";
+import { focusCodexApp } from "./codex-focus.js";
 import { visualStatusFromMicro } from "./status.js";
 import type {
   CodexHost, HostHealth, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
@@ -33,7 +34,10 @@ type AgentRegistration = { action: KeyAction; slot: number };
 type MicroActionRegistration = { action: KeyAction; slot: MicroActionSlot };
 type UsageLimitRegistration = { action: KeyAction; mode: UsageLimitMode };
 type ActionIdentity = { id: string };
-type ContextRingSettings = { showContextRings?: boolean };
+export type DeckSettings = {
+  showContextRings?: boolean;
+  focusCodexOnAgentPress?: boolean;
+};
 
 const USER_ICON_ROOT = join(codexDeckStateRoot(), "icons");
 const LOCAL_MOBILE_CONFIG = "mobile-local-relay-server.json";
@@ -75,14 +79,16 @@ export class DeckController {
   private lastAgentSourceSignature = "";
   private lastHostHealthSignature = "";
   private showContextRings = true;
+  private focusCodexOnAgentPress = false;
 
   async start(): Promise<void> {
     this.stopped = false;
     try {
-      const settings = await streamDeck.settings.getGlobalSettings<ContextRingSettings>();
+      const settings = await streamDeck.settings.getGlobalSettings<DeckSettings>();
       this.showContextRings = settings.showContextRings !== false;
+      this.focusCodexOnAgentPress = settings.focusCodexOnAgentPress === true;
     } catch (error) {
-      streamDeck.logger.warn(`Context-ring settings were unavailable; using enabled by default: ${String(error)}`);
+      streamDeck.logger.warn(`Global settings were unavailable; using defaults: ${String(error)}`);
     }
     this.localHost = await getOrCreateHostIdentity();
     const persistedTarget = await readControlTarget(undefined, this.localHost.platform);
@@ -187,6 +193,10 @@ export class DeckController {
     if (this.showContextRings === visible) return;
     this.showContextRings = visible;
     void Promise.all([...this.agents.values()].map((registration) => this.renderAgent(registration)));
+  }
+
+  setFocusCodexOnAgentPress(enabled: boolean): void {
+    this.focusCodexOnAgentPress = enabled;
   }
 
   registerMicroAction(slot: MicroActionSlot, action: KeyAction): void {
@@ -295,6 +305,10 @@ export class DeckController {
     else this.pressedAgents.delete(slot);
     if (!assignment.threadKey) throw new Error("The selected Codex task has no stable thread identity.");
     if (assignment.host.hostId === this.localHost?.hostId) {
+      if (act === 1 && this.focusCodexOnAgentPress) {
+        try { await focusCodexApp(); }
+        catch (error) { streamDeck.logger.warn(`Could not focus Codex before opening agent ${slot + 1}: ${String(error)}`); }
+      }
       await this.microBridge.sendAgent(assignment.sourceSlot, act, assignment.threadKey);
     } else await this.sendRemote({ kind: "agent", slot: assignment.sourceSlot, threadKey: assignment.threadKey, act });
     if (act === 0) void this.refresh();

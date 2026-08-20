@@ -15,8 +15,9 @@ import {
 
 const controller = new DeckController();
 
-streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean }>((event) => {
+streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean; focusCodexOnAgentPress?: boolean }>((event) => {
   controller.setContextRingVisibility(event.settings.showContextRings !== false);
+  controller.setFocusCodexOnAgentPress(event.settings.focusCodexOnAgentPress === true);
 });
 
 for (const pluginAction of [
