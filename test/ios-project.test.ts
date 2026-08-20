@@ -208,6 +208,8 @@ test("context rings are optional in both Stream Deck and the native iPhone app",
   assert.match(inspector, /setGlobalSettings/);
   assert.match(inspector, /showContextRings/);
   assert.match(inspector, /focusCodexOnAgentPress/);
+  assert.match(inspector, /Focus Codex\*/);
+  assert.match(inspector, /available on macOS only/);
   assert.match(plugin, /onDidReceiveGlobalSettings/);
   assert.match(plugin, /setFocusCodexOnAgentPress\(event\.settings\.focusCodexOnAgentPress === true\)/);
   assert.match(render, /data-context-used/);

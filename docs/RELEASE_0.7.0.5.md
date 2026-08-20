@@ -1,4 +1,4 @@
-# Codex Deck v0.7.0.4
+# Codex Deck v0.7.0.5
 
 This focused macOS hotfix adds an optional, persistent way to bring Codex to
 the foreground before dispatching a local agent press.
@@ -6,6 +6,8 @@ the foreground before dispatching a local agent press.
 ## Changes
 
 - Adds a global **Focus Codex** option to the Agent Display property inspector.
+- Clearly identifies the focus option as macOS-only while keeping it harmless
+  on Windows.
 - Persists the option with Stream Deck so it survives app and computer
   restarts and applies consistently to all six agent keys.
 - Activates Codex through its macOS bundle identifier before sending a local
@@ -17,9 +19,9 @@ the foreground before dispatching a local agent press.
 ## Downloads
 
 - Stream Deck: `com.simeo.codex-deck.streamDeckPlugin`
-- Windows launcher: `codex-deck-launcher-windows-v0.7.0.4.zip`
-- macOS launcher: `codex-deck-launcher-macos-v0.7.0.4.zip`
-- iPhone source: use the Source code archive or clone tag `v0.7.0.4`.
+- Windows launcher: `codex-deck-launcher-windows-v0.7.0.5.zip`
+- macOS launcher: `codex-deck-launcher-macos-v0.7.0.5.zip`
+- iPhone source: use the Source code archive or clone tag `v0.7.0.5`.
 - Checksums: `SHA256SUMS.txt`
 
 Existing v0.7.0 launcher and watcher installations remain compatible. Stream
