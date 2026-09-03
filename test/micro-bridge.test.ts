@@ -1329,6 +1329,31 @@ test("reasoning catalog deduplicates only identical fully validated matches", ()
   "conflicting normalized display names remain ambiguous");
 });
 
+test("catalog response permits only inert non-enumerable Symbol.dispose metadata", () => {
+  const records = [{ model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol",
+    supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }];
+  let calls = 0;
+  const read = (value: unknown) => microBridgeModule.readReasoningModelCatalog([
+    new ReasoningQueryClientFixture([[['models', 'list', 'local', 'chatgpt', 100], value]])
+  ]);
+  const plain = { data: records, nextCursor: null };
+  const decorated = Object.defineProperty({ ...plain }, Symbol.dispose, {
+    value: () => { calls++; }, enumerable: false
+  });
+  assert.deepEqual(read(decorated), read(plain));
+  assert.ok(read(decorated));
+  assert.equal(calls, 0);
+  for (const symbol of [Symbol('Symbol.dispose'), Symbol.for('Symbol.dispose'), Symbol('other')]) {
+    assert.equal(read(Object.defineProperty({ ...plain }, symbol, { value: () => {} })), undefined);
+  }
+  assert.equal(read(Object.defineProperty({ ...plain }, Symbol.dispose, { get() { calls++; return () => {}; } })), undefined);
+  assert.equal(read(Object.defineProperty({ ...plain }, Symbol.dispose, { value: () => {}, enumerable: true })), undefined);
+  assert.equal(read(Object.defineProperty({ ...plain }, Symbol.dispose, { value: 1 })), undefined);
+  assert.equal(read(new Proxy(decorated, {})), undefined);
+  assert.equal(read({ data: [Object.defineProperty({ ...records[0] }, Symbol.dispose, { value: () => {} })] }), undefined);
+  assert.equal(calls, 0);
+});
+
 test("model catalog exposes the complete bounded authoritative catalog and active model", () => {
   const readCatalog = Reflect.get(microBridgeModule, "readReasoningModelCatalog") as (
     queryClients: Iterable<unknown>

@@ -621,14 +621,43 @@ export function readReasoningModelCatalog(
       const getQueriesDataProperty = readDataPropertyInPrototypeChain(candidate, "getQueriesData");
       if (!getQueriesDataProperty?.exists || typeof getQueriesDataProperty.value !== "function") return undefined;
       const rawEntries = getQueriesDataProperty.value.call(candidate, { queryKey: ["models", "list"] });
-      const rawEntryItems = readBoundedOwnDataArray(rawEntries, 64);
-      if (!rawEntryItems || !isStructuredCloneSafePlainData(rawEntries, 70000, 32, 1000)) return undefined;
+      const rawEntryItems = readExactBoundedOwnDataArray(rawEntries, 64);
+      if (!rawEntryItems) return undefined;
+      const catalogEntries: unknown[] = [];
       for (const rawEntry of rawEntryItems) {
-        const rawEntryParts = readBoundedOwnDataArray(rawEntry, 2);
+        const rawEntryParts = readExactBoundedOwnDataArray(rawEntry, 2);
         if (!rawEntryParts || rawEntryParts.length !== 2 ||
             !readExactBoundedOwnDataArray(rawEntryParts[0], 64)) return undefined;
+        let queryData = rawEntryParts[1];
+        if (queryData && typeof queryData === "object" && Object.getOwnPropertySymbols(queryData).length) {
+          // Current Codex decorates the response envelope with a cleanup hook.
+          // Never invoke it, and never extend this exception to model records.
+          const symbols = Object.getOwnPropertySymbols(queryData);
+          if (symbols.length !== 1 || typeof Symbol.dispose !== "symbol" || symbols[0] !== Symbol.dispose) return undefined;
+          const cleanup = Object.getOwnPropertyDescriptor(queryData, Symbol.dispose);
+          if (!cleanup || cleanup.enumerable || !Object.prototype.hasOwnProperty.call(cleanup, "value") ||
+              typeof cleanup.value !== "function") return undefined;
+          const prototype = Object.getPrototypeOf(queryData);
+          if (prototype !== Object.prototype && prototype !== null) return undefined;
+          const names = Object.getOwnPropertyNames(queryData);
+          if (names.length > 64) return undefined;
+          const projection: Record<string, unknown> = Object.create(null);
+          for (const name of names) {
+            const property = readOwnDataProperty(queryData, name);
+            if (!property?.exists) return undefined;
+            projection[name] = property.value;
+          }
+          if (!isStructuredCloneSafePlainData(projection, 70000, 32, 1000)) return undefined;
+          // Descriptor auditing precedes clone so accessors cannot run. Cloning
+          // the original still rejects a proxy envelope rather than laundering it.
+          structuredClone(queryData);
+          queryData = projection;
+        }
+        catalogEntries.push([rawEntryParts[0], queryData]);
       }
-      const entries = readBoundedOwnDataArray(structuredClone(rawEntries), 64);
+      if (!isStructuredCloneSafePlainData(catalogEntries, 70000, 32, 1000)) return undefined;
+      structuredClone(rawEntries);
+      const entries = readBoundedOwnDataArray(structuredClone(catalogEntries), 64);
       if (!entries) return undefined;
       for (const entry of entries) {
         const entryItems = readBoundedOwnDataArray(entry, 2);
