@@ -729,7 +729,7 @@ export function matchActiveReasoningModel(
   if (!labelItems) return undefined;
   const normalizedLabels = new Set<string>();
   for (const label of labelItems) {
-    const normalizedLabel = normalizeReasoningModelLabel(label);
+    const normalizedLabel = normalizeReasoningModelLabel(label, true);
     if (!normalizedLabel) return undefined;
     normalizedLabels.add(normalizedLabel);
   }

@@ -1040,6 +1040,10 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
   };
   const goodRoot = () => root([record()]);
 
+  assert.equal(read([trigger([{ text: "GPT-6 Astra" }, { text: "Light" }])],
+    root([record("GPT-6-Astra", "gpt-6-astra")]), visible)?.modelId, "gpt-6-astra",
+    "current Codex GPT-prefixed visible names match their catalog entry");
+
   assert.equal(read([trigger([])], goodRoot(), visible), undefined, "zero visible labels are unavailable");
   assert.deepEqual(read([trigger([{ text: "5.6 Sol" }, { text: "5.6 Pro" }])], goodRoot(), visible), {
     currentEffort: "high",
@@ -1082,8 +1086,8 @@ test("visible reasoning model labels and catalog records fail closed on ambiguit
       supportedReasoningEfforts: ["low", "high", "ultra"]
     }]
   }, "normalization permits case and space-hyphen equivalence");
-  assert.equal(read([trigger([{ text: "GPT-5.6-Sol" }])], goodRoot(), visible), undefined,
-    "the optional GPT brand token applies only to catalog display names");
+  assert.equal(read([trigger([{ text: "GPT-5.6-Sol" }])], goodRoot(), visible)?.modelId, "gpt-5.6-sol",
+    "the optional GPT brand token also applies to current visible model names");
   assert.equal(read([trigger([{ text: "5.6 Sol Plus" }])], goodRoot(), visible), undefined,
     "substring matches are not accepted");
   assert.equal(read([trigger([{ text: "5.6 Sol" }])], root([record("GPT-5.7-Sol")]), visible), undefined,
