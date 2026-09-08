@@ -2,6 +2,7 @@ import type { AgentVisualStatus, HostHealthState, ThemeMode, UsageWindow, UsageW
 import { clampPercent, usageLabel } from "./usage.js";
 
 export type BuiltinIconName = "back" | "forward" | "sidebar" | "home" | "navigation";
+type ToggleState = boolean | undefined;
 
 export const SIGNAL_COLORS: Record<ThemeMode, Record<AgentVisualStatus, string>> = {
   light: {
@@ -89,7 +90,7 @@ export function toDataUrl(svg: string): string {
   return `data:image/svg+xml;charset=utf8,${encodeURIComponent(svg)}`;
 }
 
-export function renderImportedKeycap(svg: string, theme: ThemeMode = "light"): string {
+export function renderImportedKeycap(svg: string, theme: ThemeMode = "light", toggleState?: ToggleState): string {
   const viewBox = svg.match(/viewBox=["']([^"']+)["']/i)?.[1];
   const rootAttributes = svg.match(/<svg\b([^>]*)>/i)?.[1] ?? "";
   const body = svg.match(/<svg\b[^>]*>([\s\S]*?)<\/svg>/i)?.[1];
@@ -100,7 +101,11 @@ export function renderImportedKeycap(svg: string, theme: ThemeMode = "light"): s
   if (![minX, minY, width, height].every(Number.isFinite) || width <= 0 || height <= 0) throw new Error("The imported SVG dimensions are invalid.");
 
   const surface = SURFACES[theme];
-  const glyphColor = theme === "dark" ? "#F2F2EE" : "#24292D";
+  const glyphColor = toggleState == null ? (theme === "dark" ? "#F2F2EE" : "#24292D") : "#171C20";
+  const toggleSemantic = toggleState == null ? "unknown" : toggleState ? "on" : "off";
+  const toggleBackground = toggleState == null
+    ? undefined
+    : SIGNAL_COLORS[theme][toggleState ? "complete" : "error"];
   const size = 90;
   const scale = Math.min(size / width, size / height);
   const x = 27 + (size - width * scale) / 2 - minX * scale;
@@ -113,10 +118,11 @@ export function renderImportedKeycap(svg: string, theme: ThemeMode = "light"): s
 
   return toDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
     <defs><linearGradient id="keycap" x1="0" y1="0" x2="0" y2="1"><stop stop-color="${surface.keyTop}"/><stop offset=".52" stop-color="${surface.keyMiddle}"/><stop offset="1" stop-color="${surface.keyBottom}"/></linearGradient></defs>
-    <rect data-theme="${theme}" x="4" y="4" width="136" height="136" rx="18" fill="url(#keycap)" stroke="${surface.border}" stroke-width="2" stroke-opacity="${theme === "dark" ? ".88" : ".34"}"/>
+    <rect data-theme="${theme}" data-toggle-state="${toggleSemantic}" x="4" y="4" width="136" height="136" rx="18" fill="url(#keycap)" stroke="${surface.border}" stroke-width="2" stroke-opacity="${theme === "dark" ? ".88" : ".34"}"/>
+    ${toggleBackground ? `<rect data-toggle-background="${toggleBackground}" x="7.5" y="7.5" width="129" height="129" rx="15" fill="${toggleBackground}"/>` : ""}
     <rect x="7.5" y="7.5" width="129" height="129" rx="15" fill="none" stroke="${surface.innerBorder}" stroke-width="1"/>
     <path d="M16 18C45 8 101 8 128 20" fill="none" stroke="${surface.sheen}" stroke-width="6" stroke-linecap="round" opacity="${theme === "dark" ? "0" : ".72"}"/>
-    <g data-icon-source="local-user-file" transform="translate(${x.toFixed(3)} ${y.toFixed(3)}) scale(${scale.toFixed(5)})" fill="${inheritedFill}" color="${glyphColor}">${glyph}</g>
+    <g data-icon-source="local-user-file" data-toggle-glyph="${glyphColor}" transform="translate(${x.toFixed(3)} ${y.toFixed(3)}) scale(${scale.toFixed(5)})" fill="${inheritedFill}" color="${glyphColor}">${glyph}</g>
   </svg>`);
 }
 
@@ -139,15 +145,21 @@ export function renderBuiltinKeycap(name: BuiltinIconName, theme: ThemeMode = "l
   </svg>`);
 }
 
-export function renderFallbackKeycap(keycapId: string, theme: ThemeMode = "light"): string {
+export function renderFallbackKeycap(keycapId: string, theme: ThemeMode = "light", toggleState?: ToggleState): string {
   const surface = SURFACES[theme];
   const label = escapeXml(keycapId);
   const fontSize = keycapId.length > 5 ? 17 : 21;
+  const glyphColor = toggleState == null ? surface.title : "#171C20";
+  const toggleSemantic = toggleState == null ? "unknown" : toggleState ? "on" : "off";
+  const toggleBackground = toggleState == null
+    ? undefined
+    : SIGNAL_COLORS[theme][toggleState ? "complete" : "error"];
   return toDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
     <defs><linearGradient id="keycap" x1="0" y1="0" x2="0" y2="1"><stop stop-color="${surface.keyTop}"/><stop offset=".52" stop-color="${surface.keyMiddle}"/><stop offset="1" stop-color="${surface.keyBottom}"/></linearGradient></defs>
-    <rect data-theme="${theme}" x="4" y="4" width="136" height="136" rx="18" fill="url(#keycap)" stroke="${surface.border}" stroke-width="2" stroke-opacity="${theme === "dark" ? ".88" : ".34"}"/>
+    <rect data-theme="${theme}" data-toggle-state="${toggleSemantic}" x="4" y="4" width="136" height="136" rx="18" fill="url(#keycap)" stroke="${surface.border}" stroke-width="2" stroke-opacity="${theme === "dark" ? ".88" : ".34"}"/>
+    ${toggleBackground ? `<rect data-toggle-background="${toggleBackground}" x="7.5" y="7.5" width="129" height="129" rx="15" fill="${toggleBackground}"/>` : ""}
     <rect x="7.5" y="7.5" width="129" height="129" rx="15" fill="none" stroke="${surface.innerBorder}" stroke-width="1"/>
-    <text data-icon-source="fallback-label" x="72" y="78" text-anchor="middle" font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="${fontSize}" font-weight="650" letter-spacing="1.1" fill="${surface.title}">${label}</text>
+    <text data-icon-source="fallback-label" data-toggle-glyph="${glyphColor}" x="72" y="78" text-anchor="middle" font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="${fontSize}" font-weight="650" letter-spacing="1.1" fill="${glyphColor}">${label}</text>
   </svg>`);
 }
 

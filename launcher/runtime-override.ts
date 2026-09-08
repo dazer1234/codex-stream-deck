@@ -11,10 +11,7 @@ export function buildRuntimeOverrideExpression(gateName = MICRO_GATE): string {
   return `(async () => {
     const gateName = ${JSON.stringify(gateName)};
     const statsig = globalThis.__STATSIG__;
-    if (!statsig) return { ready: false, reason: 'statsig-unavailable' };
-
-    const clients = [...new Set([statsig.firstInstance, ...Object.values(statsig.instances ?? {})].filter(Boolean))];
-    if (clients.length === 0) return { ready: false, reason: 'statsig-client-unavailable' };
+    const clients = [...new Set([statsig?.firstInstance, ...Object.values(statsig?.instances ?? {})].filter(Boolean))];
 
     for (const client of clients) {
       if (client.overrideAdapter?.__codexDeckGate !== gateName) {
@@ -91,8 +88,9 @@ export function buildRuntimeOverrideExpression(gateName = MICRO_GATE): string {
     }
 
     const enabled = clients.map((client) => Boolean(client.checkGate?.(gateName)));
+    const gateReady = clients.length === 0 || enabled.every(Boolean);
     return {
-      ready: enabled.every(Boolean) && (detected === true || deviceEventDispatched),
+      ready: gateReady && (detected === true || deviceEventDispatched),
       enabled,
       detected,
       detectionMethod,
@@ -128,8 +126,9 @@ export function buildRuntimeVerificationExpression(): string {
     const statsig = globalThis.__STATSIG__;
     const clients = [...new Set([statsig?.firstInstance, ...Object.values(statsig?.instances ?? {})].filter(Boolean))];
     const menuEnabled = settingsLink || (clients.length > 0 && clients.every((client) => Boolean(client.checkGate?.(${JSON.stringify(MICRO_GATE)}))));
+    const handlersReady = Boolean(bus) && hidHandlers > 0 && joystickHandlers > 0;
     return {
-      ready: menuEnabled && Boolean(bus) && hidHandlers > 0 && joystickHandlers > 0,
+      ready: handlersReady && (menuEnabled || clients.length === 0),
       menuEnabled,
       nativeEventBus: Boolean(bus),
       hidHandlers,

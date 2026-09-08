@@ -54,13 +54,18 @@ The same plugin runs on Windows and macOS. It discovers the local loopback port 
 4. dispatch Micro HID and joystick events;
 5. emulate native encoder-rotation HID events for reasoning-effort changes;
 6. resolve standalone keycap actions from Codex's live Micro keycap registry and current official command runner;
-7. read Codex's renderer-owned `rate-limit-status` query and normalize its current 5-hour, weekly, and reset-credit state.
+7. read Codex's renderer-owned `rate-limit-status` query and normalize its current 5-hour, weekly, and reset-credit state;
+8. best-effort read the active visible composer's optional reasoning effort for honest Encoder feedback.
 
 The bridge does not emulate a USB HID device and installs no driver.
 
 Usage data remains part of the same typed host snapshot, but usage and reset credits are account-scoped and therefore do not follow the Mac/Windows function-key target. The controller prefers a healthy local account snapshot and falls back to the paired host only when local usage is unavailable. Window identity is derived from the duration returned by Codex rather than from primary/secondary ordering. A missing 5-hour window is represented as unavailable, and Automatic mode falls back to weekly. The bridge refreshes a stale renderer-owned usage query at most once every 15 seconds, so background-window values do not depend on Codex receiving focus.
 
 Reset consumption is the only mutating usage operation. It is a narrow typed relay command and calls Codex's current native reset-credit client only after the Stream Deck key has been held for 1.2 seconds. The bridge verifies both availability and applicability, selects an available plan-supported credit, uses a unique redemption request ID, and then refreshes the renderer query. No credential, raw endpoint access, or arbitrary request surface is exposed to the relay.
+
+`Codex Dial` is one Encoder-only Stream Deck action with versioned, per-instance settings. Its pure dial domain normalizes preset and custom settings against allow-listed bindings, expands each paired-rotation detent into an ordered command, reconciles selector identity, and derives the five stable feedback fields. The action adapter forwards Encoder rotate, down, up, and touch events to the controller; it does not add a second command surface. Rotation can dispatch paired controls immediately or update a selector preview, while press and touch remain independent.
+
+An explicit usage refresh is a typed operation. Locally, one renderer evaluation requests a fresh `rate-limit-status` query and rejects rather than replacing last-known usage when the forced refresh cannot return valid data. Remotely, the relay advertises `usage-refresh`, binds capability and snapshot state to the current authenticated connection generation, publishes a fresh post-command snapshot, and only then acknowledges success. Older peers may omit the optional capability and reasoning field.
 
 ### Optional multi-host relay
 
@@ -146,6 +151,14 @@ Official Codex Micro keycap SVG contents are not part of the source or release. 
 The controller uses non-overlapping self-scheduled refreshes and caches the last
 image sent to each action instance. Unchanged keys therefore produce no repeated
 USB image writes. Animated frames are limited to working and approval states.
+
+Encoder feedback uses a custom 200 x 100 layout with keyed title, value, detail,
+indicator, and accent fields. The controller keeps selector and overview state,
+an async command queue, and the last normalized feedback signature per visible
+dial action. `setFeedback` is skipped when that signature is unchanged. Dial
+registration, settings replacement, disappearance, and in-flight render work
+are generation-aware so an obsolete action instance cannot overwrite its
+replacement. See the [Stream Deck + guide](STREAM_DECK_PLUS.md) for the user-facing behavior.
 
 ## Trust boundary
 

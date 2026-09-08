@@ -1,6 +1,8 @@
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
+import { isSafeReasoningIdentifier } from "./types.js";
 import type {
-  CodexHost, HostSessionPresence, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment, RoutedAgentSlot
+  CodexHost, HostSessionPresence, MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment,
+  ReasoningAdjustmentResult, RoutedAgentSlot
 } from "./types.js";
 
 export const RELAY_PROTOCOL_VERSION = 1;
@@ -10,13 +12,31 @@ export type RelayCommand =
   | { kind: "action"; slot: MicroActionSlot; act: 0 | 1 }
   | { kind: "joystick"; direction: MicroDirection; distance: 0 | 1 }
   | { kind: "encoder"; act: 0 | 1 }
-  | { kind: "reasoning"; direction: ReasoningAdjustment }
+  | {
+      kind: "reasoning";
+      direction: ReasoningAdjustment;
+      includeUltra: boolean;
+      includeReasoningFeedback?: true;
+    }
+  | {
+      kind: "model-preset";
+      modelId: string;
+      reasoningEffort: string;
+      includeUltra: boolean;
+      includeModelPresetFeedback: true;
+    }
+  | { kind: "usage-refresh" }
   | { kind: "rate-limit-reset" }
   | { kind: "keycap"; keycapId: OfficialKeycapId };
 
 export type RelayAuthMessage = { type: "auth"; protocol: 1; token: string };
+export const RELAY_REASONING_POLICY_CAPABILITY = "reasoning-policy";
+export const RELAY_REASONING_FEEDBACK_CAPABILITY = "reasoning-feedback";
+export const RELAY_MODEL_PRESETS_CAPABILITY = "model-presets";
 export const RELAY_CAPABILITIES = [
-  "agent", "action", "joystick", "encoder", "reasoning", "keycap", "usage", "rate-limit-reset"
+  "agent", "action", "joystick", "encoder", "reasoning", RELAY_REASONING_POLICY_CAPABILITY,
+  RELAY_REASONING_FEEDBACK_CAPABILITY, RELAY_MODEL_PRESETS_CAPABILITY,
+  "keycap", "usage", "usage-refresh", "rate-limit-reset"
 ] as const;
 export type RelayReadyMessage = {
   type: "ready";
@@ -41,7 +61,24 @@ export type RelayHealthMessage = {
   observedAt: number;
 };
 export type RelayCommandMessage = { type: "command"; protocol: 1; requestId: string; command: RelayCommand };
-export type RelayResultMessage = { type: "result"; protocol: 1; requestId: string; ok: boolean; error?: string };
+export type RelayResultMessage =
+  | {
+      type: "result";
+      protocol: 1;
+      requestId: string;
+      ok: true;
+      outcome?: ReasoningAdjustmentResult;
+      reasoningEffort?: string;
+    }
+  | {
+      type: "result";
+      protocol: 1;
+      requestId: string;
+      ok: true;
+      modelId: string;
+      reasoningEffort: string;
+    }
+  | { type: "result"; protocol: 1; requestId: string; ok: false; error?: string };
 export type RelayServerMessage = RelayReadyMessage | RelaySnapshotMessage | RelayHealthMessage | RelayResultMessage;
 
 export type HostSnapshot = { host: CodexHost; snapshot: MicroSnapshot; observedAt: number };
@@ -235,71 +272,314 @@ function emptyRoutedPosition(input: HostSnapshot, id: number): RoutedAgentSlot {
 }
 
 export function parseRelayServerMessage(value: unknown): RelayServerMessage | null {
-  if (!isRecord(value) || value.protocol !== RELAY_PROTOCOL_VERSION || typeof value.type !== "string") return null;
-  if (value.type === "ready" && isHost(value.host)) return value as RelayReadyMessage;
-  if (value.type === "snapshot" && isHost(value.host) && Number.isFinite(value.observedAt) && isSnapshot(value.snapshot)) {
-    return value as RelaySnapshotMessage;
+  try { return parseRelayServerMessageUnchecked(value); }
+  catch { return null; }
+}
+
+function parseRelayServerMessageUnchecked(value: unknown): RelayServerMessage | null {
+  const message = snapshotOwnDataRecord(value);
+  if (!message || message.protocol !== RELAY_PROTOCOL_VERSION || typeof message.type !== "string") return null;
+  const hasCapabilities = Object.prototype.hasOwnProperty.call(message, "capabilities");
+  const hasBridge = Object.prototype.hasOwnProperty.call(message, "bridge");
+  const capabilities = hasCapabilities ? snapshotOwnDataArray(message.capabilities, 32) : undefined;
+  if (message.type === "ready" &&
+      exactOwnDataKeys(message, [
+        "type", "protocol", "host", ...(hasCapabilities ? ["capabilities"] : []),
+        ...(hasBridge ? ["bridge"] : [])
+      ]) && isHost(message.host) &&
+      (message.bridge === undefined || message.bridge === "native-codex-micro") &&
+      (capabilities === undefined || (capabilities !== null &&
+        capabilities.every((item) => boundedNonblankString(item, 64))))) {
+    return message as RelayReadyMessage;
   }
-  if (value.type === "health" && isHost(value.host) && value.state === "degraded" &&
-      value.reason === "native-signals-unavailable" && Number.isFinite(value.observedAt)) {
-    return value as RelayHealthMessage;
+  if (message.type === "snapshot" &&
+      exactOwnDataKeys(message, ["type", "protocol", "host", "observedAt", "snapshot"]) &&
+      isHost(message.host) && validProtocolTimestamp(message.observedAt) != null && isSnapshot(message.snapshot)) {
+    return message as RelaySnapshotMessage;
   }
-  if (value.type === "result" && typeof value.requestId === "string" && typeof value.ok === "boolean") {
-    return value as RelayResultMessage;
+  if (message.type === "health" &&
+      exactOwnDataKeys(message, ["type", "protocol", "host", "state", "reason", "observedAt"]) &&
+      isHost(message.host) && message.state === "degraded" &&
+      message.reason === "native-signals-unavailable" && validProtocolTimestamp(message.observedAt) != null) {
+    return message as RelayHealthMessage;
+  }
+  if (message.type === "result" && boundedNonblankString(message.requestId, 128)) {
+    const hasOutcome = message.outcome !== undefined;
+    const hasReasoningEffort = message.reasoningEffort !== undefined;
+    const hasModelId = message.modelId !== undefined;
+    if (message.ok === true && hasModelId && hasReasoningEffort && !hasOutcome &&
+        isSafeReasoningIdentifier(message.modelId, 128) &&
+        isSafeReasoningIdentifier(message.reasoningEffort) &&
+        exactOwnDataKeys(message, [
+          "type", "protocol", "requestId", "ok", "modelId", "reasoningEffort"
+        ])) {
+      return message as RelayResultMessage;
+    }
+    if (message.ok === true &&
+        !hasModelId &&
+        (!hasOutcome || message.outcome === "applied" || message.outcome === "blocked-ultra") &&
+        (!hasReasoningEffort || (hasOutcome && isSafeReasoningIdentifier(message.reasoningEffort))) &&
+        exactOwnDataKeys(message, [
+          "type", "protocol", "requestId", "ok",
+          ...(hasOutcome ? ["outcome"] : []),
+          ...(hasReasoningEffort ? ["reasoningEffort"] : [])
+        ])) {
+      return message as RelayResultMessage;
+    }
+    if (message.ok === false &&
+        (message.error === undefined || (typeof message.error === "string" && message.error.length <= 512)) &&
+        exactOwnDataKeys(message, Object.prototype.hasOwnProperty.call(message, "error")
+          ? ["type", "protocol", "requestId", "ok", "error"]
+          : ["type", "protocol", "requestId", "ok"])) {
+      return message as RelayResultMessage;
+    }
   }
   return null;
 }
 
 export function parseRelayCommand(value: unknown): RelayCommand | null {
-  if (!isRecord(value) || typeof value.kind !== "string") return null;
-  if (value.kind === "agent" && integerIn(value.slot, 0, 5) && isThreadKey(value.threadKey) && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "action" && ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"].includes(String(value.slot)) && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "joystick" && ["up", "right", "down", "left"].includes(String(value.direction)) && binary(value.distance)) return value as RelayCommand;
-  if (value.kind === "encoder" && binary(value.act)) return value as RelayCommand;
-  if (value.kind === "reasoning" && ["decrease", "increase"].includes(String(value.direction))) return value as RelayCommand;
-  if (value.kind === "rate-limit-reset") return value as RelayCommand;
-  if (value.kind === "keycap" && typeof value.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(value.keycapId as OfficialKeycapId)) return value as RelayCommand;
+  const command = snapshotOwnDataRecord(value);
+  if (!command || typeof command.kind !== "string") return null;
+  if (command.kind === "agent" && integerIn(command.slot, 0, 5) && isThreadKey(command.threadKey) && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "action" && typeof command.slot === "string" &&
+      ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"].includes(command.slot) && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "joystick" && typeof command.direction === "string" &&
+      ["up", "right", "down", "left"].includes(command.direction) && binary(command.distance)) return command as RelayCommand;
+  if (command.kind === "encoder" && binary(command.act)) return command as RelayCommand;
+  if (command.kind === "reasoning" && (command.direction === "decrease" || command.direction === "increase") &&
+      typeof command.includeUltra === "boolean" &&
+      (command.includeReasoningFeedback === undefined || command.includeReasoningFeedback === true) &&
+      exactOwnDataKeys(command, ["kind", "direction", "includeUltra",
+        ...(command.includeReasoningFeedback === true ? ["includeReasoningFeedback"] : [])])) {
+    return command as RelayCommand;
+  }
+  if (command.kind === "model-preset" &&
+      isSafeReasoningIdentifier(command.modelId, 128) &&
+      isSafeReasoningIdentifier(command.reasoningEffort) &&
+      typeof command.includeUltra === "boolean" &&
+      command.includeModelPresetFeedback === true &&
+      exactOwnDataKeys(command, [
+        "kind", "modelId", "reasoningEffort", "includeUltra", "includeModelPresetFeedback"
+      ])) {
+    return command as RelayCommand;
+  }
+  if (command.kind === "usage-refresh" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
+  if (command.kind === "rate-limit-reset" && exactOwnDataKeys(command, ["kind"])) return command as RelayCommand;
+  if (command.kind === "keycap" && typeof command.keycapId === "string" && OFFICIAL_KEYCAP_IDS.includes(command.keycapId as OfficialKeycapId)) return command as RelayCommand;
   return null;
 }
 
+export function parseRelayCommandMessage(value: unknown): RelayCommandMessage | null {
+  const message = snapshotOwnDataRecord(value);
+  if (!message || !exactOwnDataKeys(message, ["type", "protocol", "requestId", "command"]) ||
+      message.type !== "command" || message.protocol !== RELAY_PROTOCOL_VERSION ||
+      !boundedNonblankString(message.requestId, 128)) return null;
+  const command = parseRelayCommand(message.command);
+  return command ? {
+    type: "command", protocol: RELAY_PROTOCOL_VERSION,
+    requestId: message.requestId, command
+  } : null;
+}
+
 function isSnapshot(value: unknown): value is MicroSnapshot {
-  if (!isRecord(value) || !Array.isArray(value.slots) || value.slots.length !== 6 || !isRecord(value.layout)) return false;
-  if (!value.slots.every((slot, index) => isRecord(slot) && slot.id === index && typeof slot.status === "string" &&
-    (slot.contextUsedPercent == null || finitePercent(slot.contextUsedPercent)))) return false;
-  if (value.activeThreadKey != null && !isThreadKey(value.activeThreadKey)) return false;
-  if (value.activeThreadTitle != null && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
-  if (value.usage != null && !isUsageSnapshot(value.usage)) return false;
-  if (value.hostSessions == null) return true;
-  return Array.isArray(value.hostSessions) && value.hostSessions.length <= 128 && value.hostSessions.every((session) =>
-    isRecord(session) && isThreadKey(session.threadId) && validTimestamp(session.activityAt) != null &&
-    ["idle", "working", "complete"].includes(String(session.status)) &&
-    (session.completionRevision == null || integerIn(session.completionRevision, 0, Number.MAX_SAFE_INTEGER)) &&
-    (session.contextUsedPercent == null || finitePercent(session.contextUsedPercent))
-  );
+  const snapshot = snapshotOwnDataRecord(value);
+  if (!snapshot || !onlyAllowedOwnKeys(snapshot, [
+    "slots", "reasoningEffort", "activeModelId", "activeModelDisplayName", "modelCatalog",
+    "fastModeEnabled", "activeThreadKey", "activeThreadTitle", "layout", "agentSource",
+    "lightingAutoOff", "theme", "usage", "hostSessions", "transport"
+  ])) return false;
+  if (snapshot.transport !== undefined && snapshot.transport !== "desktop-ipc") return false;
+  if (snapshot.transport === "desktop-ipc" && ["reasoningEffort", "activeModelId", "activeModelDisplayName",
+    "modelCatalog", "fastModeEnabled", "activeThreadKey", "activeThreadTitle", "usage"].some(key => snapshot[key] !== undefined)) return false;
+  const slots = snapshotOwnDataArray(snapshot.slots, 6);
+  if (!slots || slots.length !== 6 || !isLayout(snapshot.layout, snapshot.transport === "desktop-ipc")) return false;
+  if (!slots.every((rawSlot, index) => {
+    const slot = snapshotOwnDataRecord(rawSlot);
+    return slot && onlyAllowedOwnKeys(slot, [
+      "id", "threadKey", "title", "status", "selected", "activityAt", "ownedByHost", "contextUsedPercent"
+    ]) && slot.id === index &&
+    (slot.threadKey === null || isThreadKey(slot.threadKey)) &&
+    (slot.title === null || (typeof slot.title === "string" && slot.title.length <= 240)) &&
+    boundedNonblankString(slot.status, 64) && typeof slot.selected === "boolean" &&
+    (slot.activityAt === undefined || validProtocolTimestamp(slot.activityAt) != null) &&
+    (slot.ownedByHost === undefined || typeof slot.ownedByHost === "boolean") &&
+    (slot.contextUsedPercent === undefined || finitePercent(slot.contextUsedPercent));
+  })) return false;
+  if (!(["pinned", "recent", "priority", "custom"] as const).includes(snapshot.agentSource as never)) return false;
+  if (!boundedNonblankString(snapshot.lightingAutoOff, 64) || !(["light", "dark"] as const).includes(snapshot.theme as never)) return false;
+  if (snapshot.activeThreadKey !== undefined && !isThreadKey(snapshot.activeThreadKey)) return false;
+  if (snapshot.activeThreadTitle !== undefined && (typeof snapshot.activeThreadTitle !== "string" || snapshot.activeThreadTitle.length > 240)) return false;
+  if (snapshot.reasoningEffort !== undefined && !isSafeReasoningIdentifier(snapshot.reasoningEffort)) return false;
+  if (snapshot.fastModeEnabled !== undefined && typeof snapshot.fastModeEnabled !== "boolean") return false;
+  const hasActiveModelId = Object.prototype.hasOwnProperty.call(snapshot, "activeModelId");
+  const hasActiveModelDisplayName = Object.prototype.hasOwnProperty.call(snapshot, "activeModelDisplayName");
+  const hasModelCatalog = Object.prototype.hasOwnProperty.call(snapshot, "modelCatalog");
+  if (!(hasActiveModelId === hasActiveModelDisplayName && hasActiveModelId === hasModelCatalog)) return false;
+  if (hasModelCatalog && snapshot.reasoningEffort === undefined) return false;
+  if (hasModelCatalog && !isActiveModelCatalog(
+    snapshot.activeModelId, snapshot.activeModelDisplayName, snapshot.reasoningEffort, snapshot.modelCatalog
+  )) return false;
+  if (snapshot.usage !== undefined && !isUsageSnapshot(snapshot.usage)) return false;
+  if (snapshot.hostSessions === undefined) return true;
+  const sessions = snapshotOwnDataArray(snapshot.hostSessions, 128);
+  return sessions != null && sessions.every((rawSession) => {
+    const session = snapshotOwnDataRecord(rawSession);
+    return session && onlyAllowedOwnKeys(session, [
+      "threadId", "activityAt", "status", "completionRevision", "contextUsedPercent"
+    ]) && isThreadKey(session.threadId) && validProtocolTimestamp(session.activityAt) != null &&
+    typeof session.status === "string" && ["idle", "working", "complete"].includes(session.status) &&
+    (session.completionRevision === undefined || integerIn(session.completionRevision, 0, Number.MAX_SAFE_INTEGER)) &&
+    (session.contextUsedPercent === undefined || finitePercent(session.contextUsedPercent));
+  });
+}
+
+function isActiveModelCatalog(
+  activeModelId: unknown,
+  activeDisplayName: unknown,
+  activeReasoningEffort: unknown,
+  value: unknown
+): boolean {
+  if (!isSafeReasoningIdentifier(activeModelId, 128) || !boundedNonblankString(activeDisplayName, 80) ||
+      !isSafeReasoningIdentifier(activeReasoningEffort)) return false;
+  const catalog = snapshotOwnDataArray(value, 32);
+  if (!catalog || catalog.length === 0) return false;
+  const seenModels = new Set<string>();
+  let activeMatch = false;
+  for (const rawEntry of catalog) {
+    const entry = snapshotOwnDataRecord(rawEntry);
+    if (!entry || !exactOwnDataKeys(entry, ["modelId", "displayName", "supportedReasoningEfforts"]) ||
+        !isSafeReasoningIdentifier(entry.modelId, 128) || !boundedNonblankString(entry.displayName, 80) ||
+        seenModels.has(entry.modelId)) return false;
+    const efforts = snapshotOwnDataArray(entry.supportedReasoningEfforts, 16);
+    if (!efforts || efforts.length === 0) return false;
+    const seenEfforts = new Set<string>();
+    for (const effort of efforts) {
+      if (!isSafeReasoningIdentifier(effort) || seenEfforts.has(effort)) return false;
+      seenEfforts.add(effort);
+    }
+    seenModels.add(entry.modelId);
+    if (entry.modelId === activeModelId) {
+      if (entry.displayName !== activeDisplayName || !seenEfforts.has(activeReasoningEffort)) return false;
+      activeMatch = true;
+    }
+  }
+  return activeMatch;
+}
+
+function isLayout(value: unknown, desktopIpc = false): value is MicroSnapshot["layout"] {
+  const layout = snapshotOwnDataRecord(value);
+  if (!layout || !exactOwnDataKeys(layout, ["version", "slots", "analogStick"]) || layout.version !== 1) return false;
+  const slots = snapshotOwnDataRecord(layout.slots);
+  const analogStick = snapshotOwnDataRecord(layout.analogStick);
+  if (!slots || !analogStick || !exactOwnDataKeys(analogStick, ["up", "right", "down", "left"])) return false;
+  const actionSlots: readonly MicroActionSlot[] = ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10_ACT11", "ACT12"];
+  if (!exactOwnDataKeys(slots, actionSlots)) return false;
+  if (!actionSlots.every((key) => {
+    const slot = snapshotOwnDataRecord(slots[key]);
+    if (desktopIpc) return slot && exactOwnDataKeys(slot, ["keycapId"]) && slot.keycapId === "UNAVAILABLE";
+    return slot && onlyAllowedOwnKeys(slot, ["keycapId", "commandId"]) && typeof slot.keycapId === "string" &&
+      OFFICIAL_KEYCAP_IDS.includes(slot.keycapId as OfficialKeycapId) &&
+      (slot.commandId === undefined || (typeof slot.commandId === "string" && slot.commandId.length <= 128));
+  })) return false;
+  return !desktopIpc || Object.values(analogStick).every(value => value === null);
 }
 
 function isUsageSnapshot(value: unknown): boolean {
-  if (!isRecord(value) || !Array.isArray(value.windows) || value.windows.length > 8 || validTimestamp(value.observedAt) == null) return false;
-  if (value.resetCreditsAvailable != null && !integerIn(value.resetCreditsAvailable, 0, Number.MAX_SAFE_INTEGER)) return false;
-  if (value.resetCreditsApplicable != null && !integerIn(value.resetCreditsApplicable, 0, Number.MAX_SAFE_INTEGER)) return false;
-  return value.windows.every((window) => isRecord(window) && typeof window.id === "string" && window.id.length <= 64 &&
-    ["five-hour", "weekly", "other"].includes(String(window.kind)) &&
+  const usage = snapshotOwnDataRecord(value);
+  if (!usage || !exactOwnDataKeys(usage, ["windows", "observedAt", "resetCreditsAvailable", "resetCreditsApplicable"]) ||
+      validProtocolTimestamp(usage.observedAt) == null) return false;
+  const windows = snapshotOwnDataArray(usage.windows, 8);
+  if (!windows) return false;
+  if (usage.resetCreditsAvailable !== null && !integerIn(usage.resetCreditsAvailable, 0, Number.MAX_SAFE_INTEGER)) return false;
+  if (usage.resetCreditsApplicable !== null && !integerIn(usage.resetCreditsApplicable, 0, Number.MAX_SAFE_INTEGER)) return false;
+  return windows.every((rawWindow) => {
+    const window = snapshotOwnDataRecord(rawWindow);
+    return window && exactOwnDataKeys(window, [
+      "id", "kind", "usedPercent", "remainingPercent", "windowDurationMins", "resetsAt"
+    ]) && boundedNonblankString(window.id, 64) &&
+    typeof window.kind === "string" && ["five-hour", "weekly", "other"].includes(window.kind) &&
     finitePercent(window.usedPercent) && finitePercent(window.remainingPercent) &&
-    (window.windowDurationMins == null || (typeof window.windowDurationMins === "number" && Number.isFinite(window.windowDurationMins) && window.windowDurationMins > 0)) &&
-    (window.resetsAt == null || validTimestamp(window.resetsAt) != null));
+    (window.windowDurationMins === null || positiveBoundedNumber(window.windowDurationMins)) &&
+    (window.resetsAt === null || validProtocolTimestamp(window.resetsAt) != null);
+  });
 }
 
 function isHost(value: unknown): value is CodexHost {
-  return isRecord(value) && typeof value.hostId === "string" && typeof value.hostName === "string" &&
-    ["win32", "darwin"].includes(String(value.platform)) &&
-    (value.codexVersion == null || (typeof value.codexVersion === "string" && value.codexVersion.length <= 64));
+  const host = snapshotOwnDataRecord(value);
+  return host != null && onlyAllowedOwnKeys(host, ["hostId", "hostName", "platform", "codexVersion"]) &&
+    boundedNonblankString(host.hostId, 128) && boundedNonblankString(host.hostName, 128) &&
+    typeof host.platform === "string" && ["win32", "darwin"].includes(host.platform) &&
+    (host.codexVersion === undefined || boundedNonblankString(host.codexVersion, 64));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+function snapshotOwnDataRecord(value: unknown): Record<string, unknown> | null {
+  try {
+    if (!isRecord(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    const snapshot: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (typeof key !== "string") return null;
+      const descriptor = descriptors[key];
+      if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return null;
+      Object.defineProperty(snapshot, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotOwnDataArray(value: unknown, maximum: number): unknown[] | null {
+  try {
+    if (!Array.isArray(value)) return null;
+    if (Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
+    const lengthDescriptor = descriptors.length;
+    const arrayLength: unknown = lengthDescriptor?.value;
+    if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, "value") ||
+        !Number.isSafeInteger(arrayLength) || Number(arrayLength) < 0 || Number(arrayLength) > maximum) return null;
+    const result: unknown[] = [];
+    for (let index = 0; index < Number(arrayLength); index++) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || descriptor.enumerable !== true ||
+          !Object.prototype.hasOwnProperty.call(descriptor, "value")) return null;
+      result.push(descriptor.value);
+    }
+    const expectedKeys = new Set(["length", ...result.map((_, index) => String(index))]);
+    if (Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !expectedKeys.has(key))) return null;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function exactOwnDataKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Reflect.ownKeys(value);
+  return keys.length === expected.length && keys.every((key) =>
+    typeof key === "string" && expected.includes(key));
+}
+
+function onlyAllowedOwnKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Reflect.ownKeys(value);
+  return keys.every((key) => typeof key === "string" && allowed.includes(key));
+}
+
 function binary(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }
+function boundedNonblankString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
+}
 function finitePercent(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
 }
@@ -308,6 +588,12 @@ function integerIn(value: unknown, minimum: number, maximum: number): value is n
 }
 function validTimestamp(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+function validProtocolTimestamp(value: unknown): number | null {
+  return positiveBoundedNumber(value) ? value : null;
+}
+function positiveBoundedNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER;
 }
 
 function compareOwnership(left: RoutedAgentSlot, right: RoutedAgentSlot): number {

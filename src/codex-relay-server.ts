@@ -7,11 +7,14 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { OfficialKeycapId } from "./keycaps.js";
 import type { CodexMicroRendererBridge } from "./codex-micro-renderer-bridge.js";
 import {
-  RELAY_CAPABILITIES, RELAY_PROTOCOL_VERSION, parseRelayCommand,
+  RELAY_CAPABILITIES, RELAY_PROTOCOL_VERSION, parseRelayCommandMessage,
   type RelayAuthMessage, type RelayCommand, type RelayCommandMessage, type RelayHealthMessage,
   type RelayResultMessage, type RelaySnapshotMessage
 } from "./relay-protocol.js";
-import type { CodexHost } from "./types.js";
+import {
+  isSafeReasoningIdentifier,
+  type CodexHost, type ModelPresetExecution, type ReasoningAdjustmentExecution
+} from "./types.js";
 
 export type RelayServerConfig = {
   enabled: boolean;
@@ -27,8 +30,27 @@ export type RelayServerConfig = {
   discovery?: { enabled: boolean };
 };
 
+const RELAY_MAX_PAYLOAD_BYTES = 64 * 1024;
+
+export function encodeRelaySnapshotMessage(message: RelaySnapshotMessage): string {
+  const encoded = JSON.stringify(message);
+  if (Buffer.byteLength(encoded, "utf8") < RELAY_MAX_PAYLOAD_BYTES) return encoded;
+  const {
+    activeModelId: _activeModelId,
+    activeModelDisplayName: _activeModelDisplayName,
+    modelCatalog: _modelCatalog,
+    ...snapshot
+  } = message.snapshot;
+  const bounded = JSON.stringify({ ...message, snapshot });
+  if (Buffer.byteLength(bounded, "utf8") >= RELAY_MAX_PAYLOAD_BYTES) {
+    throw new Error("Relay snapshot exceeds the 64 KiB transport limit without its optional model catalog.");
+  }
+  return bounded;
+}
+
 type RelayControl = Pick<CodexMicroRendererBridge,
-  "refresh" | "sendAgent" | "sendAction" | "sendJoystick" | "sendEncoder" | "adjustReasoning" | "runKeycap" | "consumeRateLimitReset">;
+  "refresh" | "sendAgent" | "sendAction" | "sendJoystick" | "sendEncoder" | "adjustReasoning" | "runKeycap" |
+  "refreshUsage" | "consumeRateLimitReset"> & Pick<Partial<CodexMicroRendererBridge>, "applyModelPreset">;
 
 export class CodexRelayServer {
   private server?: WebSocketServer;
@@ -177,7 +199,10 @@ export class CodexRelayServer {
       this.authenticated.add(socket);
       socket.send(JSON.stringify({
         type: "ready", protocol: RELAY_PROTOCOL_VERSION, host: this.host,
-        capabilities: RELAY_CAPABILITIES, bridge: "native-codex-micro"
+        capabilities: this.control.applyModelPreset
+          ? RELAY_CAPABILITIES
+          : RELAY_CAPABILITIES.filter((capability) => capability !== "model-presets"),
+        bridge: "native-codex-micro"
       }));
       socket.on("message", (message) => {
         void this.handleMessage(socket, message.toString()).catch((error) => this.reportSnapshotError(error));
@@ -190,23 +215,34 @@ export class CodexRelayServer {
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
-    const message = safeJson(raw) as Partial<RelayCommandMessage> | null;
-    if (!message || message.type !== "command" || message.protocol !== RELAY_PROTOCOL_VERSION || typeof message.requestId !== "string") return;
-    const command = parseRelayCommand(message.command);
-    if (!command) {
-      this.sendResult(socket, message.requestId, false, "Invalid relay command.");
-      return;
-    }
+    const message = parseRelayCommandMessage(safeJson(raw));
+    if (!message) return;
+    const command = message.command;
     const startedAt = Date.now();
     const commandLabel = command.kind === "agent"
       ? `agent:${command.slot + 1}:${command.act === 1 ? "down" : "up"}`
       : command.kind;
     this.log(`Relay command ${commandLabel} received.`);
     try {
-      await executeRelayCommand(this.control, command);
-      this.sendResult(socket, message.requestId, true);
+      const execution = validatedRelayExecution(command, await executeRelayCommand(this.control, command));
+      if (command.kind === "usage-refresh") await this.publishSnapshot(undefined, true);
+      if (command.kind === "reasoning" && command.includeReasoningFeedback === true) {
+        await this.publishSnapshot(undefined, true);
+      }
+      if (command.kind === "model-preset") {
+        try { await this.publishSnapshot(undefined, true); }
+        catch (error) {
+          this.handleSnapshotFailure(error, undefined, true);
+          throw error;
+        }
+      }
+      this.sendResult(socket, message.requestId, true, undefined, execution);
       this.log(`Relay command ${commandLabel} completed in ${Date.now() - startedAt} ms.`);
-      await this.publishSnapshot();
+      if (command.kind !== "usage-refresh" &&
+          !(command.kind === "reasoning" && command.includeReasoningFeedback === true) &&
+          command.kind !== "model-preset") {
+        await this.publishSnapshot();
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.log(`Relay command ${commandLabel} failed in ${Date.now() - startedAt} ms: ${errorMessage}`);
@@ -214,9 +250,27 @@ export class CodexRelayServer {
     }
   }
 
-  private sendResult(socket: WebSocket, requestId: string, ok: boolean, error?: string): void {
+  private sendResult(
+    socket: WebSocket,
+    requestId: string,
+    ok: boolean,
+    error?: string,
+    execution?: ReasoningAdjustmentExecution | ModelPresetExecution
+  ): void {
     if (socket.readyState !== WebSocket.OPEN) return;
-    const result: RelayResultMessage = { type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok, ...(error ? { error } : {}) };
+    const result: RelayResultMessage = ok
+      ? {
+          type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: true,
+          ...(!execution || !("outcome" in execution) ? {} : { outcome: execution.outcome }),
+          ...(!execution || !("reasoningEffort" in execution) ? {} : {
+            reasoningEffort: execution.reasoningEffort
+          }),
+          ...(!execution || !("modelId" in execution) ? {} : { modelId: execution.modelId })
+        }
+      : {
+          type: "result", protocol: RELAY_PROTOCOL_VERSION, requestId, ok: false,
+          ...(error ? { error: error.slice(0, 512) } : {})
+        };
     socket.send(JSON.stringify(result));
   }
 
@@ -238,10 +292,10 @@ export class CodexRelayServer {
     this.log(`Relay snapshot unavailable: ${message}`);
   }
 
-  private handleSnapshotFailure(error: unknown, only?: WebSocket): void {
+  private handleSnapshotFailure(error: unknown, only?: WebSocket, forceDegraded = false): void {
     this.reportSnapshotError(error);
     this.consecutiveSnapshotFailures += 1;
-    if (!relaySnapshotFailureShouldDegrade(
+    if (!forceDegraded && !relaySnapshotFailureShouldDegrade(
       this.hasPublishedSnapshot, this.consecutiveSnapshotFailures
     )) return;
     const health: RelayHealthMessage = {
@@ -260,8 +314,12 @@ export class CodexRelayServer {
     }
   }
 
-  private async publishSnapshot(only?: WebSocket): Promise<void> {
-    const message = await this.currentSnapshotMessage();
+  private async publishSnapshot(only?: WebSocket, forceFresh = false): Promise<void> {
+    const message = await this.currentSnapshotMessage(forceFresh);
+    const encoded = encodeRelaySnapshotMessage(message);
+    for (const socket of only ? [only] : this.authenticated) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
+    }
     if (this.consecutiveSnapshotFailures > 0) {
       this.log(`Relay snapshot recovered after ${this.consecutiveSnapshotFailures} transient failure${this.consecutiveSnapshotFailures === 1 ? "" : "s"}.`);
     }
@@ -270,21 +328,24 @@ export class CodexRelayServer {
     this.degraded = false;
     this.lastSnapshotError = "";
     this.lastSnapshotErrorAt = 0;
-    const encoded = JSON.stringify(message);
-    for (const socket of only ? [only] : this.authenticated) {
-      if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
-    }
   }
 
-  private async currentSnapshotMessage(): Promise<RelaySnapshotMessage> {
-    if (this.snapshotInFlight) return this.snapshotInFlight;
-    const pending = this.control.refresh().then((snapshot): RelaySnapshotMessage => ({
-      type: "snapshot",
-      protocol: RELAY_PROTOCOL_VERSION,
-      host: this.host,
-      observedAt: Date.now(),
-      snapshot
-    }));
+  private async currentSnapshotMessage(forceFresh = false): Promise<RelaySnapshotMessage> {
+    const previous = this.snapshotInFlight;
+    if (previous && !forceFresh) return previous;
+    const pending = (async (): Promise<RelaySnapshotMessage> => {
+      if (previous) {
+        try { await previous; } catch {}
+      }
+      const snapshot = await this.control.refresh();
+      return {
+        type: "snapshot",
+        protocol: RELAY_PROTOCOL_VERSION,
+        host: this.host,
+        observedAt: Date.now(),
+        snapshot
+      };
+    })();
     this.snapshotInFlight = pending;
     try { return await pending; }
     finally { if (this.snapshotInFlight === pending) this.snapshotInFlight = undefined; }
@@ -347,14 +408,129 @@ export function relayDiscoveryTxt(
   };
 }
 
-async function executeRelayCommand(control: RelayControl, command: RelayCommand): Promise<void> {
-  if (command.kind === "agent") return control.sendAgent(command.slot, command.act, command.threadKey);
-  if (command.kind === "action") return control.sendAction(command.slot, command.act);
-  if (command.kind === "joystick") return control.sendJoystick(command.direction, command.distance);
-  if (command.kind === "encoder") return control.sendEncoder(command.act);
-  if (command.kind === "reasoning") return control.adjustReasoning(command.direction);
-  if (command.kind === "rate-limit-reset") return control.consumeRateLimitReset();
-  return control.runKeycap(command.keycapId as OfficialKeycapId);
+async function executeRelayCommand(
+  control: RelayControl,
+  command: RelayCommand
+): Promise<unknown> {
+  if (command.kind === "agent") {
+    await control.sendAgent(command.slot, command.act, command.threadKey);
+    return undefined;
+  }
+  if (command.kind === "action") {
+    await control.sendAction(command.slot, command.act);
+    return undefined;
+  }
+  if (command.kind === "joystick") {
+    await control.sendJoystick(command.direction, command.distance);
+    return undefined;
+  }
+  if (command.kind === "encoder") {
+    await control.sendEncoder(command.act);
+    return undefined;
+  }
+  if (command.kind === "reasoning") {
+    return control.adjustReasoning(command.direction, { includeUltra: command.includeUltra });
+  }
+  if (command.kind === "model-preset") {
+    if (!control.applyModelPreset) throw new Error("Model preset controls are unavailable.");
+    return control.applyModelPreset({
+      modelId: command.modelId,
+      reasoningEffort: command.reasoningEffort,
+      includeUltra: command.includeUltra
+    });
+  }
+  if (command.kind === "usage-refresh") {
+    await control.refreshUsage();
+    return undefined;
+  }
+  if (command.kind === "rate-limit-reset") {
+    await control.consumeRateLimitReset();
+    return undefined;
+  }
+  await control.runKeycap(command.keycapId as OfficialKeycapId);
+  return undefined;
+}
+
+function validatedRelayExecution(
+  command: RelayCommand,
+  value: unknown
+): ReasoningAdjustmentExecution | ModelPresetExecution | undefined {
+  if (command.kind === "reasoning") {
+    let outcome: unknown;
+    let reasoningEffort: unknown;
+    try {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      const expectedKeys = ["outcome", ...(Object.prototype.hasOwnProperty.call(descriptors, "reasoningEffort")
+        ? ["reasoningEffort"] : [])];
+      if (keys.length !== expectedKeys.length || keys.some((key) =>
+        typeof key !== "string" || !expectedKeys.includes(key))) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      const outcomeProperty = descriptors.outcome;
+      const effortProperty = descriptors.reasoningEffort;
+      if (!outcomeProperty || outcomeProperty.enumerable !== true || !("value" in outcomeProperty) ||
+          (effortProperty && (effortProperty.enumerable !== true || !("value" in effortProperty)))) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      outcome = outcomeProperty.value;
+      reasoningEffort = effortProperty?.value;
+    } catch {
+      throw new Error("Invalid reasoning adjustment result.");
+    }
+    if (outcome === "applied" || outcome === "blocked-ultra") {
+      if (command.includeReasoningFeedback === true && reasoningEffort === undefined) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      if (reasoningEffort !== undefined && !isSafeReasoningIdentifier(reasoningEffort)) {
+        throw new Error("Invalid reasoning adjustment result.");
+      }
+      return {
+        outcome,
+        ...(command.includeReasoningFeedback === true && reasoningEffort !== undefined
+          ? { reasoningEffort } : {})
+      };
+    }
+  }
+  if (command.kind === "model-preset") {
+    const record = exactExecutionRecord(value, ["modelId", "reasoningEffort"]);
+    if (record && isSafeReasoningIdentifier(record.modelId, 128) &&
+        isSafeReasoningIdentifier(record.reasoningEffort) &&
+        record.modelId === command.modelId &&
+        record.reasoningEffort === command.reasoningEffort) {
+      return { modelId: record.modelId, reasoningEffort: record.reasoningEffort };
+    }
+    throw new Error("Invalid model preset result.");
+  }
+  if (command.kind !== "reasoning" && value === undefined) return undefined;
+  throw new Error("Invalid reasoning adjustment result.");
+}
+
+function exactExecutionRecord(
+  value: unknown,
+  expectedKeys: readonly string[]
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length !== expectedKeys.length || keys.some((key) =>
+    typeof key !== "string" || !expectedKeys.includes(key))) return undefined;
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of expectedKeys) {
+    const descriptor = descriptors[key];
+    if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return undefined;
+    result[key] = descriptor.value;
+  }
+  return result;
 }
 
 function secureEqual(left: unknown, right: string): boolean {

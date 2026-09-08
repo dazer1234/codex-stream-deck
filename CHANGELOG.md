@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added a per-knob Stream Deck + Model Presets dial that immediately and continuously wraps through configurable model/reasoning pairs using Codex's native paired selection path.
+- Added live model and reasoning dropdowns with add, remove, drag, accessible reorder controls, preserved unavailable entries, and an opt-in Ultra policy.
+- Added `SWITCHING…` as non-optimistic pre-confirmation feedback, plus active-position and `UNLISTED` feedback derived only from confirmed state, along with empty, unavailable, and health feedback without keyboard or focus navigation.
+- Added capability-gated Model Presets support for authenticated Mac/Windows relays; older peers fail closed without partial switching.
+- Fixed standalone command keycaps such as Terminal after current Codex builds moved their guarded runner behind the live Micro bridge import.
+
 ## 0.7.0.2 - 2026-07-22
 
 - Normalize remote snapshot timestamps to local receipt time so ordinary Mac/Windows clock differences cannot hide working, selected, approval, or usage state.

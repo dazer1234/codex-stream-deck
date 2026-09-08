@@ -1,0 +1,1007 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Dial</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --background: #202124;
+      --panel: #292b30;
+      --field: #35383f;
+      --field-hover: #3c4048;
+      --border: #484c55;
+      --text: #f3f4f7;
+      --muted: #aeb3bf;
+      --accent: #7f8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 250px;
+      padding: 14px;
+      color: var(--text);
+      background: var(--background);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    header { margin-bottom: 14px; }
+    h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+    header p, .hint { margin: 4px 0 0; color: var(--muted); }
+    .stack { display: grid; gap: 12px; }
+    .panel {
+      display: grid;
+      gap: 10px;
+      padding: 11px;
+      border: 1px solid #353840;
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .panel-title {
+      margin: 0;
+      color: #cfd3ff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    label.field { display: grid; gap: 5px; }
+    label.field > span { color: #d7dae1; }
+    select, input[type="text"] {
+      width: 100%;
+      min-height: 30px;
+      padding: 5px 8px;
+      color: var(--text);
+      background: var(--field);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      outline: none;
+    }
+    select:hover, input[type="text"]:hover { background: var(--field-hover); }
+    select:focus, input[type="text"]:focus { border-color: var(--accent); }
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 28px;
+    }
+    input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
+    #selector-items {
+      display: grid;
+      max-height: 286px;
+      overflow: auto;
+      border: 1px solid #3d4149;
+      border-radius: 6px;
+      background: #24262b;
+    }
+    .action-row {
+      display: grid;
+      grid-template-columns: 19px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 5px 7px;
+      border-bottom: 1px solid #34373d;
+    }
+    .action-row:last-child { border-bottom: 0; }
+    .model-preset-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) minmax(0, .8fr) auto;
+      gap: 5px;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #34373d;
+    }
+    .model-preset-row:last-child { border-bottom: 0; }
+    .model-preset-field { display: grid; gap: 3px; min-width: 0; }
+    .model-preset-field > span { color: var(--muted); font-size: 10px; }
+    .drag-handle { width: 28px; padding: 0; cursor: grab; }
+    button {
+      min-height: 28px; color: var(--text); background: var(--field);
+      border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
+    }
+    .action-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .move-buttons { display: flex; gap: 3px; }
+    .move-buttons button {
+      width: 26px;
+      height: 24px;
+      padding: 0;
+      color: #d9dce4;
+      background: #34373e;
+      border: 1px solid #4b4f58;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .move-buttons button:hover:not(:disabled) { background: #454a54; border-color: #606672; }
+    .move-buttons button:disabled { opacity: .35; cursor: default; }
+    [hidden] { display: none !important; }
+    @media (max-width: 300px) {
+      body { padding: 10px; }
+      .panel { padding: 9px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Codex Dial</h1>
+    <p>Configure this knob's rotation, press, touch, and live feedback independently.</p>
+  </header>
+
+  <main class="stack">
+    <section class="panel">
+      <h2 class="panel-title">Preset</h2>
+      <label class="field">
+        <span>Starting point</span>
+        <select id="preset">
+          <option value="reasoning">Reasoning</option>
+          <option value="model-presets">Model Presets</option>
+          <option value="agents">Agents</option>
+          <option value="actions">Actions</option>
+          <option value="navigation">Navigation</option>
+          <option value="usage">Usage</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="model-presets-panel" class="panel" hidden>
+      <h2 class="panel-title">Model Presets</h2>
+      <p id="model-catalog-status" class="hint" role="status" aria-live="polite">Live model catalog unavailable.</p>
+      <p id="model-editor-status" class="hint" role="status" aria-live="polite"></p>
+      <p class="hint">Each detent immediately applies the next model and reasoning pair. Drag rows or use the accessible arrows to reorder.</p>
+      <div id="model-preset-items"></div>
+      <button id="add-model-preset" type="button">Add preset</button>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Rotation</h2>
+      <label class="field">
+        <span>Mode</span>
+        <select id="rotation-kind">
+          <option value="paired">Paired controls</option>
+          <option value="selector">Rotate to select</option>
+        </select>
+      </label>
+
+      <div id="paired-controls" class="stack">
+        <label class="field">
+          <span>Counter-clockwise</span>
+          <select id="counter-clockwise"></select>
+        </label>
+        <label class="field">
+          <span>Clockwise</span>
+          <select id="clockwise"></select>
+        </label>
+      </div>
+
+      <div id="include-ultra-row" class="stack" hidden>
+        <label class="toggle">
+          <span>Include Ultra</span>
+          <input id="include-ultra" type="checkbox">
+        </label>
+        <p class="hint">When off, clockwise reasoning stops below Ultra. Manual Codex selection is unchanged.</p>
+      </div>
+
+      <div id="selector-controls" class="stack" hidden>
+        <label class="field">
+          <span>Selector source</span>
+          <select id="selector-source">
+            <option value="agents">Occupied agents</option>
+            <option value="actions">Configured actions</option>
+            <option value="usage">Usage windows</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <span>Wrap at ends</span>
+          <input id="wrap" type="checkbox">
+        </label>
+        <div id="selector-items-row" class="stack" hidden>
+          <div>
+            <div>Action order</div>
+            <p class="hint">Check actions to include, then use the arrows to set dial order.</p>
+            <p id="selector-items-status" class="hint" role="status" aria-live="polite"></p>
+          </div>
+          <div id="selector-items"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Independent gestures</h2>
+      <label class="field">
+        <span>Dial press</span>
+        <select id="press"></select>
+      </label>
+      <label class="field">
+        <span>Touch tap</span>
+        <select id="touch-tap"></select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Touch-strip feedback</h2>
+      <label class="field">
+        <span>Display</span>
+        <select id="feedback">
+          <option value="auto">Automatic</option>
+          <option value="reasoning">Current reasoning</option>
+          <option value="agent">Selected agent</option>
+          <option value="action">Selected action</option>
+          <option value="navigation">Navigation pair</option>
+          <option value="usage">Usage window / overview</option>
+          <option value="static">Static label</option>
+        </select>
+      </label>
+      <label id="static-label-row" class="field" hidden>
+        <span>Label</span>
+        <input id="static-label" type="text" maxlength="40" placeholder="CODEX DIAL">
+      </label>
+    </section>
+  </main>
+
+  <script>
+    let websocket;
+    let context;
+    let actionUuid;
+    let connectionGeneration = 0;
+
+    const CODEX_DIAL_ACTION_UUID = "com.simeo.codex-deck.codex-dial";
+
+    const PRESETS = {
+      reasoning: {
+        version: 2,
+        preset: "reasoning",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "paired", counterClockwise: "reasoning.decrease", clockwise: "reasoning.increase" },
+        press: "none",
+        touchTap: "keycap.FAST",
+        feedback: "reasoning"
+      },
+      agents: {
+        version: 2,
+        preset: "agents",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "selector", source: "agents", wrap: true, items: [] },
+        press: "selector.activate",
+        touchTap: "keycap.TIME",
+        feedback: "agent"
+      },
+      actions: {
+        version: 2,
+        preset: "actions",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: {
+          kind: "selector",
+          source: "actions",
+          wrap: true,
+          items: ["micro.ACT06", "micro.ACT07", "micro.ACT08", "micro.ACT09", "micro.ACT10_ACT11", "micro.ACT12"]
+        },
+        press: "selector.activate",
+        touchTap: "keycap.SETUP",
+        feedback: "action"
+      },
+      navigation: {
+        version: 2,
+        preset: "navigation",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "paired", counterClockwise: "joystick.left", clockwise: "joystick.right" },
+        press: "joystick.up",
+        touchTap: "joystick.down",
+        feedback: "navigation"
+      },
+      usage: {
+        version: 2,
+        preset: "usage",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "selector", source: "usage", wrap: true, items: [] },
+        press: "usage.toggle-overview",
+        touchTap: "usage.refresh",
+        feedback: "usage"
+      },
+      custom: {
+        version: 2,
+        preset: "custom",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "paired", counterClockwise: "none", clockwise: "none" },
+        press: "none",
+        touchTap: "none",
+        feedback: "static"
+      },
+      "model-presets": {
+        version: 2,
+        preset: "model-presets",
+        customized: false,
+        includeUltraReasoning: false,
+        rotation: { kind: "model-presets" },
+        press: "none",
+        touchTap: "keycap.FAST",
+        feedback: "model-presets",
+        modelPresets: []
+      }
+    };
+
+    const BINDING_GROUPS = [
+      { label: "None", values: [["none", "No action"]] },
+      { label: "Selector", values: [["selector.activate", "Activate highlighted item"]] },
+      { label: "Reasoning", values: [
+        ["reasoning.decrease", "Decrease reasoning"],
+        ["reasoning.increase", "Increase reasoning"]
+      ] },
+      { label: "Agents / actions", values: [
+        ["new-task", "New task"],
+        ["micro.ACT06", "Fast"],
+        ["micro.ACT07", "Approve"],
+        ["micro.ACT08", "Reject"],
+        ["micro.ACT09", "Fork"],
+        ["micro.ACT10_ACT11", "Dictation"],
+        ["micro.ACT12", "Send"]
+      ] },
+      { label: "Navigation", values: [
+        ["joystick.up", "Plan"],
+        ["joystick.right", "Forward"],
+        ["joystick.down", "Sidebar"],
+        ["joystick.left", "Back"]
+      ] },
+      { label: "Codex keycaps", values: [
+        ["keycap.FAST", "Fast mode"], ["keycap.APPR", "Approve"], ["keycap.REJ", "Reject"],
+        ["keycap.SPLIT", "Fork chat"], ["keycap.MIC", "Dictation"], ["keycap.CODEX", "Codex / submit"],
+        ["keycap.BUG", "Bug / feedback"], ["keycap.OAI", "OpenAI docs"], ["keycap.TERM", "Terminal"],
+        ["keycap.DWN", "Copy chat Markdown"], ["keycap.DEL", "Archive chat"], ["keycap.NEW", "New task"],
+        ["keycap.NAV", "Browser"], ["keycap.MAGIC", "Pin / unpin"], ["keycap.DIFF", "Review"],
+        ["keycap.PLAY", "Run environment action"], ["keycap.GIT", "Git commit"], ["keycap.BRCH", "Branch review"],
+        ["keycap.MRG", "Merge review"], ["keycap.PR", "Create pull request"], ["keycap.PAINT", "Add photos"],
+        ["keycap.LAB", "Lab / settings"], ["keycap.PARTY", "Side chat"], ["keycap.TIME", "Manage tasks"],
+        ["keycap.MIND+", "Reasoning up"], ["keycap.MIND-", "Reasoning down"], ["keycap.SETUP", "Settings"],
+        ["keycap.FOLD", "Open folder"], ["keycap.UPL", "Add files"], ["keycap.APPS", "Skills"]
+      ] },
+      { label: "Usage", values: [
+        ["usage.refresh", "Refresh usage"],
+        ["usage.toggle-overview", "Toggle usage overview"],
+        ["usage.rate-limit-reset", "Reset rate-limit credit (hold)"]
+      ] },
+      { label: "Host", values: [["host.toggle", "Toggle host"]] }
+    ];
+
+    const PRESET_IDS = Object.keys(PRESETS);
+    const SELECTOR_SOURCES = ["agents", "actions", "usage"];
+    const FEEDBACK_MODES = ["auto", "reasoning", "agent", "action", "navigation", "usage", "static"];
+    const ALL_BINDINGS = BINDING_GROUPS.flatMap((group) => group.values.map(([value]) => value));
+    const ACTION_BINDINGS = ALL_BINDINGS.filter((value) => bindingAllowed(value, "selector"));
+    const ACTION_LABELS = new Map(BINDING_GROUPS.flatMap((group) => group.values));
+
+    let settings = { ...PRESETS.reasoning, customized: true };
+    let actionOrder = [...ACTION_BINDINGS];
+    let selectedActionItems = new Set();
+    let hasPendingSettings = false;
+    let modelCatalog;
+    let catalogRevision = -1;
+    let catalogRequestGeneration = 0;
+    let modelPresetRows = [];
+    let seededModelPresets = false;
+    let draggedModelPreset = -1;
+
+    const element = (id) => document.getElementById(id);
+
+    function bindingAllowed(value, gesture) {
+      if (!ALL_BINDINGS.includes(value)) return false;
+      if (value === "usage.rate-limit-reset") return gesture === "press";
+      if (value === "selector.activate") return gesture === "press";
+      return true;
+    }
+
+    function populateBindingSelect(id, gesture, preferredValue) {
+      const select = element(id);
+      const selected = preferredValue ?? select.value;
+      select.replaceChildren();
+      for (const group of BINDING_GROUPS) {
+        const values = group.values.filter(([value]) => bindingAllowed(value, gesture) &&
+          !(id === "press" && value === "selector.activate" &&
+            element("rotation-kind").value !== "selector"));
+        if (values.length === 0) continue;
+        const optionGroup = document.createElement("optgroup");
+        optionGroup.label = group.label;
+        for (const [value, label] of values) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          optionGroup.appendChild(option);
+        }
+        select.appendChild(optionGroup);
+      }
+      const available = Array.from(select.options, ({ value }) => value);
+      select.value = available.includes(selected) ? selected : "none";
+    }
+
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function record(value) {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+
+    function hasOwn(value, key) {
+      return Object.hasOwn(value, key);
+    }
+
+    function safeIdentifier(value, maxLength = 64) {
+      return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+    }
+
+    function normalizeModelPresetRows(value) {
+      if (!Array.isArray(value) || value.length > 12) return [];
+      const rows = [];
+      const seen = new Set();
+      for (const entry of value) {
+        if (!record(entry) || !hasOwn(entry, "modelId") || !hasOwn(entry, "reasoningEffort") ||
+            !safeIdentifier(entry.modelId, 128) || !safeIdentifier(entry.reasoningEffort)) return [];
+        const key = `${entry.modelId}\n${entry.reasoningEffort}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        rows.push({ modelId: entry.modelId, reasoningEffort: entry.reasoningEffort });
+      }
+      return rows;
+    }
+
+    function normalizedSettings(input) {
+      if (!record(input) || !hasOwn(input, "version") || ![1, 2].includes(input.version) ||
+          !hasOwn(input, "preset") || !PRESET_IDS.includes(input.preset)) {
+        return clone(PRESETS.reasoning);
+      }
+      const fallback = clone(PRESETS[input.preset]);
+      if (input.preset === "model-presets") {
+        if (input.version !== 2 || !hasOwn(input, "modelPresets") || !Array.isArray(input.modelPresets)) {
+          return fallback;
+        }
+        return {
+          version: 2,
+          preset: "model-presets",
+          customized: hasOwn(input, "customized") && input.customized === true,
+          includeUltraReasoning: hasOwn(input, "includeUltraReasoning") && input.includeUltraReasoning === true,
+          rotation: { kind: "model-presets" },
+          press: hasOwn(input, "press") && input.press !== "selector.activate" && bindingAllowed(input.press, "press")
+            ? input.press : fallback.press,
+          touchTap: hasOwn(input, "touchTap") && bindingAllowed(input.touchTap, "touch")
+            ? input.touchTap : fallback.touchTap,
+          feedback: "model-presets",
+          modelPresets: normalizeModelPresetRows(input.modelPresets)
+        };
+      }
+      const staticLabel = hasOwn(input, "staticLabel") && typeof input.staticLabel === "string"
+        ? input.staticLabel.trim().slice(0, 40)
+        : "";
+      return {
+        version: 2,
+        preset: input.preset,
+        customized: hasOwn(input, "customized") && input.customized === true,
+        includeUltraReasoning: hasOwn(input, "includeUltraReasoning") &&
+          input.includeUltraReasoning === true,
+        rotation: normalizeRotation(hasOwn(input, "rotation") ? input.rotation : undefined, fallback.rotation),
+        press: hasOwn(input, "press") && bindingAllowed(input.press, "press")
+          ? input.press : fallback.press,
+        touchTap: hasOwn(input, "touchTap") && bindingAllowed(input.touchTap, "touch")
+          ? input.touchTap : "none",
+        feedback: hasOwn(input, "feedback") && FEEDBACK_MODES.includes(input.feedback)
+          ? input.feedback : fallback.feedback,
+        ...(staticLabel ? { staticLabel } : {})
+      };
+    }
+
+    function normalizeRotation(value, fallback) {
+      if (!record(value) || !hasOwn(value, "kind")) return clone(fallback);
+      if (value.kind === "paired") {
+        return {
+          kind: "paired",
+          counterClockwise: hasOwn(value, "counterClockwise") &&
+            bindingAllowed(value.counterClockwise, "rotation") ? value.counterClockwise : "none",
+          clockwise: hasOwn(value, "clockwise") && bindingAllowed(value.clockwise, "rotation")
+            ? value.clockwise : "none"
+        };
+      }
+      if (value.kind === "selector" && hasOwn(value, "source") &&
+          SELECTOR_SOURCES.includes(value.source) && hasOwn(value, "wrap") &&
+          typeof value.wrap === "boolean" && hasOwn(value, "items") && Array.isArray(value.items)) {
+        return {
+          kind: "selector",
+          source: value.source,
+          wrap: value.wrap,
+          items: value.source === "actions"
+            ? value.items.filter((item) => bindingAllowed(item, "selector"))
+              .filter((item, index, items) => items.indexOf(item) === index)
+              .slice(0, 30)
+            : []
+        };
+      }
+      return clone(fallback);
+    }
+
+    function applySettings(input) {
+      settings = normalizedSettings(input);
+      modelPresetRows = settings.preset === "model-presets" ? clone(settings.modelPresets) : [];
+      seededModelPresets = modelPresetRows.length > 0 || settings.customized === true;
+      const configuredItems = settings.rotation.kind === "selector" && settings.rotation.source === "actions"
+        ? settings.rotation.items
+        : [];
+      selectedActionItems = new Set(configuredItems);
+      actionOrder = [...configuredItems, ...ACTION_BINDINGS.filter((value) => !selectedActionItems.has(value))];
+
+      element("preset").value = settings.preset;
+      element("rotation-kind").value = settings.rotation.kind === "model-presets" ? "paired" : settings.rotation.kind;
+      element("include-ultra").checked = settings.includeUltraReasoning;
+      if (settings.rotation.kind === "paired") {
+        element("counter-clockwise").value = settings.rotation.counterClockwise;
+        element("clockwise").value = settings.rotation.clockwise;
+      } else if (settings.rotation.kind === "selector") {
+        element("selector-source").value = settings.rotation.source;
+        element("wrap").checked = settings.rotation.wrap;
+      }
+      populateBindingSelect("press", "press", settings.press);
+      settings.press = element("press").value || "none";
+      element("touch-tap").value = settings.touchTap;
+      element("feedback").value = settings.feedback;
+      element("static-label").value = settings.staticLabel ?? "";
+      updateConditionalViews();
+      renderActionItems();
+      renderModelPresetItems();
+    }
+
+    function updateConditionalViews() {
+      const modelPresets = element("preset").value === "model-presets";
+      const selector = element("rotation-kind").value === "selector";
+      element("model-presets-panel").hidden = !modelPresets;
+      element("paired-controls").hidden = selector || modelPresets;
+      element("selector-controls").hidden = !selector || modelPresets;
+      element("selector-items-row").hidden = !selector || element("selector-source").value !== "actions";
+      element("include-ultra-row").hidden = modelPresets ? false : selector ||
+        (element("counter-clockwise").value !== "reasoning.increase" &&
+          element("clockwise").value !== "reasoning.increase");
+      element("static-label-row").hidden = element("feedback").value !== "static";
+    }
+
+    function catalogEntry(modelId) {
+      return modelCatalog?.find((entry) => entry.modelId === modelId);
+    }
+
+    function availablePairs() {
+      if (!modelCatalog) return [];
+      const includeUltra = element("include-ultra").checked;
+      return modelCatalog.flatMap((model) => model.supportedReasoningEfforts
+        .filter((effort) => includeUltra || effort.toLowerCase() !== "ultra")
+        .map((reasoningEffort) => ({ modelId: model.modelId, reasoningEffort })));
+    }
+
+    function nextUnusedPair() {
+      const used = new Set(modelPresetRows.map((entry) => `${entry.modelId}\n${entry.reasoningEffort}`));
+      return availablePairs().find((entry) => !used.has(`${entry.modelId}\n${entry.reasoningEffort}`));
+    }
+
+    function renderModelPresetItems() {
+      const container = element("model-preset-items");
+      container.replaceChildren();
+      modelPresetRows.forEach((entry, index) => {
+        const row = document.createElement("div");
+        row.className = "model-preset-row";
+        row.draggable = false;
+        row.dataset.index = String(index);
+        row.addEventListener("dragover", (event) => event.preventDefault());
+        row.addEventListener("drop", (event) => {
+          event.preventDefault();
+          if (draggedModelPreset < 0 || draggedModelPreset === index) return;
+          const [moved] = modelPresetRows.splice(draggedModelPreset, 1);
+          if (moved) modelPresetRows.splice(index, 0, moved);
+          draggedModelPreset = -1;
+          renderModelPresetItems();
+          persistAndQueue(true);
+        });
+        const handle = document.createElement("button");
+        handle.type = "button";
+        handle.className = "drag-handle";
+        handle.dataset.action = "drag-handle";
+        handle.textContent = "⋮⋮";
+        handle.draggable = true;
+        handle.setAttribute("aria-label", `Drag preset ${index + 1}: ${entry.modelId} ${entry.reasoningEffort}`);
+        handle.addEventListener("dragstart", () => { draggedModelPreset = index; });
+        const model = document.createElement("select");
+        model.dataset.field = "model";
+        model.id = `model-preset-model-${index}`;
+        const models = modelCatalog ? [...modelCatalog] : [];
+        if (!models.some((item) => item.modelId === entry.modelId)) {
+          models.unshift({
+            modelId: entry.modelId,
+            displayName: `${entry.modelId} (${modelCatalog ? "unavailable" : "availability unknown offline"})`,
+            supportedReasoningEfforts: [entry.reasoningEffort]
+          });
+        }
+        for (const item of models) {
+          const option = document.createElement("option");
+          option.value = item.modelId;
+          option.textContent = item.displayName;
+          model.appendChild(option);
+        }
+        model.value = entry.modelId;
+        model.disabled = modelCatalog == null;
+        const effort = document.createElement("select");
+        effort.dataset.field = "effort";
+        effort.id = `model-preset-effort-${index}`;
+        const authoritativeModel = catalogEntry(entry.modelId);
+        const supported = authoritativeModel?.supportedReasoningEfforts ?? [];
+        const efforts = supported
+          .filter((value) => element("include-ultra").checked || value.toLowerCase() !== "ultra" || value === entry.reasoningEffort);
+        if (!efforts.includes(entry.reasoningEffort)) efforts.unshift(entry.reasoningEffort);
+        if (efforts.length === 0) efforts.push(entry.reasoningEffort);
+        for (const value of efforts) {
+          const option = document.createElement("option");
+          option.value = value;
+          const availability = modelCatalog == null
+            ? " (availability unknown offline)"
+            : !authoritativeModel || !supported.includes(value)
+              ? " (unavailable)"
+              : !element("include-ultra").checked && value.toLowerCase() === "ultra"
+                ? " (disabled)"
+                : "";
+          option.textContent = value.toUpperCase() + availability;
+          effort.appendChild(option);
+        }
+        effort.value = entry.reasoningEffort;
+        effort.disabled = modelCatalog == null;
+        const modelLabel = document.createElement("label");
+        modelLabel.className = "model-preset-field";
+        modelLabel.htmlFor = model.id;
+        const modelLabelText = document.createElement("span");
+        modelLabelText.textContent = `Model ${index + 1}`;
+        modelLabel.append(modelLabelText, model);
+        const effortLabel = document.createElement("label");
+        effortLabel.className = "model-preset-field";
+        effortLabel.htmlFor = effort.id;
+        const effortLabelText = document.createElement("span");
+        effortLabelText.textContent = `Reasoning ${index + 1}`;
+        effortLabel.append(effortLabelText, effort);
+        model.addEventListener("change", () => {
+          const target = catalogEntry(model.value);
+          const candidate = target?.supportedReasoningEfforts.find((value) =>
+            (element("include-ultra").checked || value.toLowerCase() !== "ultra") &&
+            !modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
+              rowEntry.modelId === model.value && rowEntry.reasoningEffort === value));
+          if (!candidate) {
+            element("model-editor-status").textContent = "That model's available pairs are already configured; duplicate preset refused.";
+            renderModelPresetItems();
+            return;
+          }
+          modelPresetRows[index] = { modelId: model.value, reasoningEffort: candidate };
+          element("model-editor-status").textContent = "";
+          renderModelPresetItems(); persistAndQueue(true);
+        });
+        effort.addEventListener("change", () => {
+          const candidate = { modelId: entry.modelId, reasoningEffort: effort.value };
+          if (modelPresetRows.some((rowEntry, rowIndex) => rowIndex !== index &&
+              rowEntry.modelId === candidate.modelId && rowEntry.reasoningEffort === candidate.reasoningEffort)) {
+            element("model-editor-status").textContent = "That model and reasoning pair is already configured; duplicate preset refused.";
+            renderModelPresetItems(); return;
+          }
+          modelPresetRows[index] = candidate;
+          element("model-editor-status").textContent = "";
+          persistAndQueue(true);
+        });
+        const buttons = document.createElement("span");
+        buttons.className = "move-buttons";
+        for (const [direction, label, disabled] of [["up", "↑", index === 0], ["down", "↓", index === modelPresetRows.length - 1]]) {
+          const button = document.createElement("button");
+          button.type = "button"; button.dataset.direction = direction; button.textContent = label; button.disabled = disabled;
+          button.setAttribute("aria-label", `Move ${entry.modelId} ${entry.reasoningEffort} ${direction}`);
+          button.addEventListener("click", (event) => {
+            event.preventDefault(); if (button.disabled) return;
+            const next = direction === "up" ? index - 1 : index + 1;
+            [modelPresetRows[index], modelPresetRows[next]] = [modelPresetRows[next], modelPresetRows[index]];
+            renderModelPresetItems(); persistAndQueue(true);
+          });
+          buttons.appendChild(button);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.dataset.action = "remove"; remove.textContent = "×";
+        remove.setAttribute("aria-label", `Remove ${entry.modelId} ${entry.reasoningEffort}`);
+        remove.addEventListener("click", (event) => {
+          event.preventDefault(); modelPresetRows.splice(index, 1); renderModelPresetItems(); persistAndQueue(true);
+        });
+        buttons.appendChild(remove);
+        row.append(handle, modelLabel, effortLabel, buttons);
+        container.appendChild(row);
+      });
+      element("add-model-preset").disabled = modelPresetRows.length >= 12 || nextUnusedPair() == null;
+    }
+
+    function renderActionItems() {
+      const container = element("selector-items");
+      container.replaceChildren();
+      const atLimit = selectedActionItems.size >= 30;
+      element("selector-items-status").textContent = atLimit
+        ? "30 of 30 selected. Uncheck an action to choose another."
+        : `${selectedActionItems.size} of 30 selected.`;
+      actionOrder.forEach((binding, index) => {
+        const row = document.createElement("div");
+        row.className = "action-row";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.id = `selector-action-${index}`;
+        checkbox.dataset.binding = binding;
+        checkbox.checked = selectedActionItems.has(binding);
+        checkbox.disabled = atLimit && !checkbox.checked;
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked && !selectedActionItems.has(binding) && selectedActionItems.size >= 30) {
+            checkbox.checked = false;
+            renderActionItems();
+            return;
+          }
+          if (checkbox.checked) selectedActionItems.add(binding);
+          else selectedActionItems.delete(binding);
+          renderActionItems();
+          persistAndQueue(true);
+        });
+        const label = document.createElement("label");
+        label.className = "action-label";
+        label.htmlFor = checkbox.id;
+        label.textContent = ACTION_LABELS.get(binding) ?? binding;
+        const buttons = document.createElement("span");
+        buttons.className = "move-buttons";
+        const actionLabel = ACTION_LABELS.get(binding) ?? binding;
+        const up = moveButton(binding, actionLabel, "up", "↑", index === 0);
+        const down = moveButton(binding, actionLabel, "down", "↓", index === actionOrder.length - 1);
+        buttons.append(up, down);
+        row.append(checkbox, label, buttons);
+        container.appendChild(row);
+      });
+    }
+
+    function moveButton(binding, actionLabel, direction, label, disabled) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.direction = direction;
+      button.textContent = label;
+      button.disabled = disabled;
+      button.setAttribute("aria-label", `Move ${actionLabel} ${direction}`);
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (button.disabled) return;
+        const index = actionOrder.indexOf(binding);
+        const next = direction === "up" ? index - 1 : index + 1;
+        [actionOrder[index], actionOrder[next]] = [actionOrder[next], actionOrder[index]];
+        renderActionItems();
+        persistAndQueue(true);
+      });
+      return button;
+    }
+
+    function readForm() {
+      if (element("preset").value === "model-presets") {
+        return {
+          version: 2,
+          preset: "model-presets",
+          customized: true,
+          includeUltraReasoning: element("include-ultra").checked,
+          rotation: { kind: "model-presets" },
+          press: element("press").value,
+          touchTap: element("touch-tap").value,
+          feedback: "model-presets",
+          modelPresets: clone(modelPresetRows).slice(0, 12)
+        };
+      }
+      const rotation = element("rotation-kind").value === "selector"
+        ? {
+            kind: "selector",
+            source: element("selector-source").value,
+            wrap: element("wrap").checked,
+            items: element("selector-source").value === "actions"
+              ? actionOrder.filter((value) => selectedActionItems.has(value)).slice(0, 30)
+              : []
+          }
+        : {
+            kind: "paired",
+            counterClockwise: element("counter-clockwise").value,
+            clockwise: element("clockwise").value
+          };
+      const staticLabel = element("static-label").value.trim().slice(0, 40);
+      element("static-label").value = staticLabel;
+      return {
+        version: 2,
+        preset: element("preset").value,
+        customized: true,
+        includeUltraReasoning: element("include-ultra").checked,
+        rotation,
+        press: element("press").value,
+        touchTap: element("touch-tap").value,
+        feedback: element("feedback").value,
+        ...(staticLabel ? { staticLabel } : {})
+      };
+    }
+
+    function persist(customized = true) {
+      const payload = readForm();
+      payload.version = 2;
+      payload.customized = customized;
+      settings = payload;
+      if (websocket?.readyState !== WebSocket.OPEN || actionUuid !== CODEX_DIAL_ACTION_UUID) return false;
+      websocket.send(JSON.stringify({ event: "setSettings", action: actionUuid, context, payload }));
+      return true;
+    }
+
+    function persistAndQueue(customized = true) {
+      if (!persist(customized)) hasPendingSettings = true;
+    }
+
+    function bindControls() {
+      element("preset").addEventListener("change", () => {
+        applySettings(PRESETS[element("preset").value] ?? PRESETS.reasoning);
+        if (element("preset").value === "model-presets") requestModelCatalog();
+        persistAndQueue(false);
+      });
+      element("rotation-kind").addEventListener("change", () => {
+        if (element("rotation-kind").value === "paired") {
+          element("counter-clockwise").value = "none";
+          element("clockwise").value = "none";
+        }
+        populateBindingSelect("press", "press");
+        updateConditionalViews();
+        persistAndQueue(true);
+      });
+      for (const id of ["selector-source", "feedback"]) {
+        element(id).addEventListener("change", () => {
+          updateConditionalViews();
+          persistAndQueue(true);
+        });
+      }
+      for (const id of ["counter-clockwise", "clockwise"]) {
+        element(id).addEventListener("change", () => {
+          updateConditionalViews();
+          persistAndQueue(true);
+        });
+      }
+      for (const id of ["press", "touch-tap", "wrap"]) {
+        element(id).addEventListener("change", () => persistAndQueue(true));
+      }
+      element("include-ultra").addEventListener("change", () => {
+        renderModelPresetItems(); persistAndQueue(true);
+      });
+      element("add-model-preset").addEventListener("click", (event) => {
+        event.preventDefault();
+        const entry = nextUnusedPair();
+        if (!entry || modelPresetRows.length >= 12) return;
+        modelPresetRows.push(entry); renderModelPresetItems(); persistAndQueue(true);
+      });
+      element("static-label").addEventListener("input", () => persistAndQueue(true));
+    }
+
+    function requestModelCatalog() {
+      if (websocket?.readyState !== WebSocket.OPEN || actionUuid !== CODEX_DIAL_ACTION_UUID) return;
+      catalogRequestGeneration += 1;
+      websocket.send(JSON.stringify({
+        event: "sendToPlugin",
+        action: actionUuid,
+        context,
+        payload: { kind: "request-model-catalog", requestGeneration: catalogRequestGeneration }
+      }));
+    }
+
+    function validCatalogMessage(payload) {
+      if (!record(payload) || payload.kind !== "model-catalog" || !Number.isSafeInteger(payload.catalogRevision) ||
+          payload.catalogRevision < 0 || typeof payload.available !== "boolean") return false;
+      const keys = Object.keys(payload).sort().join(",");
+      if (!payload.available) {
+        return keys === "available,catalogRevision,kind,requestGeneration" &&
+          Number.isSafeInteger(payload.requestGeneration) && payload.requestGeneration >= 0;
+      }
+      if (keys !== "activeModelDisplayName,activeModelId,available,catalogRevision,hostId,kind,modelCatalog,platform,reasoningEffort,requestGeneration,snapshotGeneration" ||
+          !Number.isSafeInteger(payload.requestGeneration) || payload.requestGeneration < 0) return false;
+      const modelIds = new Set();
+      return typeof payload.hostId === "string" && ["darwin", "win32"].includes(payload.platform) &&
+        Number.isSafeInteger(payload.snapshotGeneration) && safeIdentifier(payload.activeModelId, 128) &&
+        typeof payload.activeModelDisplayName === "string" && safeIdentifier(payload.reasoningEffort) &&
+        Array.isArray(payload.modelCatalog) && payload.modelCatalog.length <= 32 && payload.modelCatalog.every((entry) => {
+          if (!record(entry) || Object.keys(entry).sort().join(",") !== "displayName,modelId,supportedReasoningEfforts" ||
+              !safeIdentifier(entry.modelId, 128) || modelIds.has(entry.modelId) ||
+              typeof entry.displayName !== "string" || entry.displayName.length === 0 || entry.displayName.length > 80 ||
+              !Array.isArray(entry.supportedReasoningEfforts) || entry.supportedReasoningEfforts.length > 16) return false;
+          modelIds.add(entry.modelId);
+          return new Set(entry.supportedReasoningEfforts).size === entry.supportedReasoningEfforts.length &&
+            entry.supportedReasoningEfforts.every((effort) => safeIdentifier(effort));
+        }) && modelIds.has(payload.activeModelId);
+    }
+
+    function acceptModelCatalog(payload) {
+      if (!validCatalogMessage(payload) || payload.catalogRevision <= catalogRevision) return;
+      catalogRevision = payload.catalogRevision;
+      if (!payload.available) {
+        modelCatalog = undefined;
+        element("model-catalog-status").textContent = "Live model catalog unavailable; saved presets are preserved offline.";
+        renderModelPresetItems();
+        return;
+      }
+      modelCatalog = clone(payload.modelCatalog);
+      element("model-catalog-status").textContent = `Connected to ${payload.hostId} (${payload.platform})`;
+      if (!seededModelPresets && modelPresetRows.length === 0) {
+        const preferred = [
+          { modelId: "gpt-5.6-sol", reasoningEffort: "high" },
+          { modelId: "gpt-5.6-sol", reasoningEffort: "medium" },
+          { modelId: "gpt-5.6-terra", reasoningEffort: "medium" }
+        ];
+        modelPresetRows = preferred.filter((entry) => catalogEntry(entry.modelId)?.supportedReasoningEfforts.includes(entry.reasoningEffort));
+        if (modelPresetRows.length === 0) {
+          const activeModel = catalogEntry(payload.activeModelId);
+          const activeAllowed = activeModel?.supportedReasoningEfforts.includes(payload.reasoningEffort) &&
+            (element("include-ultra").checked || payload.reasoningEffort.toLowerCase() !== "ultra");
+          if (activeAllowed) {
+            modelPresetRows = [{ modelId: payload.activeModelId, reasoningEffort: payload.reasoningEffort }];
+          }
+        }
+        seededModelPresets = true;
+        if (modelPresetRows.length > 0) persistAndQueue(false);
+      }
+      renderModelPresetItems();
+    }
+
+    window.connectElgatoStreamDeckSocket = (port, uuid, registerEvent, info, actionInfo) => {
+      actionUuid = undefined;
+      const replacedSocket = websocket;
+      if (replacedSocket && typeof replacedSocket.close === "function") {
+        try { replacedSocket.close(); } catch {}
+      }
+      const generation = ++connectionGeneration;
+      catalogRevision = -1;
+      modelCatalog = undefined;
+      element("model-catalog-status").textContent = "Live model catalog unavailable; waiting for Codex.";
+      let action = {};
+      try {
+        const parsed = JSON.parse(actionInfo || "{}");
+        action = record(parsed) ? parsed : {};
+      } catch { action = {}; }
+      const actionDescriptor = Object.getOwnPropertyDescriptor(action, "action");
+      if (actionDescriptor && hasOwn(actionDescriptor, "value") &&
+          actionDescriptor.value === CODEX_DIAL_ACTION_UUID && Object.getOwnPropertySymbols(action).length === 0) {
+        actionUuid = CODEX_DIAL_ACTION_UUID;
+      }
+      context = uuid;
+      const initialSettings = hasOwn(action, "payload") && record(action.payload) &&
+        hasOwn(action.payload, "settings") ? action.payload.settings : PRESETS.reasoning;
+      applySettings(initialSettings);
+      hasPendingSettings = false;
+      const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+      websocket = socket;
+      socket.addEventListener("open", () => {
+        if (generation !== connectionGeneration) return;
+        socket.send(JSON.stringify({ event: registerEvent, uuid }));
+        requestModelCatalog();
+        if (hasPendingSettings && actionUuid === CODEX_DIAL_ACTION_UUID) {
+          socket.send(JSON.stringify({ event: "setSettings", action: actionUuid, context, payload: settings }));
+          hasPendingSettings = false;
+        }
+      });
+      socket.addEventListener("message", (message) => {
+        if (generation !== connectionGeneration) return;
+        let event;
+        try { event = JSON.parse(message.data); } catch { return; }
+        if (record(event) && event.event === "didReceiveSettings" && hasOwn(event, "payload") &&
+            record(event.payload) && hasOwn(event.payload, "settings")) {
+          applySettings(event.payload.settings);
+        } else if (record(event) && event.event === "sendToPropertyInspector" && hasOwn(event, "payload")) {
+          acceptModelCatalog(event.payload);
+        }
+      });
+    };
+
+    populateBindingSelect("counter-clockwise", "rotation");
+    populateBindingSelect("clockwise", "rotation");
+    populateBindingSelect("press", "press");
+    populateBindingSelect("touch-tap", "touch");
+    bindControls();
+    applySettings(PRESETS.reasoning);
+  </script>
+</body>
+</html>

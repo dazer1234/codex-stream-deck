@@ -26,6 +26,26 @@ export type MicroAgentSlot = {
 export type MicroActionSlot = "ACT06" | "ACT07" | "ACT08" | "ACT09" | "ACT10_ACT11" | "ACT12";
 export type MicroDirection = "up" | "right" | "down" | "left";
 export type ReasoningAdjustment = "decrease" | "increase";
+export type ReasoningAdjustmentPolicy = { includeUltra: boolean };
+export type ReasoningAdjustmentResult = "applied" | "blocked-ultra";
+export type ReasoningAdjustmentExecution = {
+  outcome: ReasoningAdjustmentResult;
+  reasoningEffort?: string;
+};
+export type ModelPresetRequest = {
+  modelId: string;
+  reasoningEffort: string;
+  includeUltra: boolean;
+};
+export type ModelPresetExecution = {
+  modelId: string;
+  reasoningEffort: string;
+};
+
+export function isSafeReasoningIdentifier(value: unknown, maxLength = 64): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
 
 export type MicroLayout = {
   version: 1;
@@ -59,8 +79,26 @@ export type UsageSnapshot = {
   resetCreditsApplicable: number | null;
 };
 
+export type CodexModelCatalogEntry = {
+  modelId: string;
+  displayName: string;
+  supportedReasoningEfforts: string[];
+};
+
 export type MicroSnapshot = {
+  /** IPC supplies task status/navigation, not active composer or native action authority. */
+  transport?: "desktop-ipc";
   slots: MicroAgentSlot[];
+  /** Current reasoning effort selected in the active renderer composer. */
+  reasoningEffort?: string;
+  /** Authoritative active model identity from the visible composer model picker. */
+  activeModelId?: string;
+  /** User-facing name for the authoritative active model. */
+  activeModelDisplayName?: string;
+  /** Complete bounded model catalog associated with the active model authority. */
+  modelCatalog?: CodexModelCatalogEntry[];
+  /** Whether the active visible Codex reasoning trigger authoritatively reports Fast mode. */
+  fastModeEnabled?: boolean;
   /** Task currently open in the Codex renderer, even when it is outside the six native Micro slots. */
   activeThreadKey?: string;
   /** User-visible title for the active task, including tasks outside the six Micro slots. */

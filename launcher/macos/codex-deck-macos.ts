@@ -460,12 +460,6 @@ async function runWatcher(): Promise<number> {
         } else {
           enabledSignature = "";
           await removeStaleBridgeState(null, log);
-          if (decision.action.type === "restart-for-recovery" && main) {
-            await log(`Recovering Codex bridge once for generation ${main.generation} (${decision.action.reason}).`);
-            await terminateCodex(main);
-            const refreshed = await discoverCodexInstallation();
-            await launchCodex(refreshed, await chooseLoopbackPort());
-          }
         }
       } catch (error) {
         await log(`Watcher iteration failed: ${String(error)}`);
@@ -484,21 +478,91 @@ set -u
 
 runtime=${shellQuote(runtimePath)}
 typeset -a candidates
-candidates=(/opt/homebrew/bin/node /usr/local/bin/node)
+candidates=(
+  /opt/homebrew/bin/node
+  /usr/local/bin/node
+  /Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+)
 for node_candidate in "$HOME"/.nvm/versions/node/*/bin/node(N); do
   candidates+=("$node_candidate")
 done
-for app_candidate in \${(f)"$(/usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' 2>/dev/null)"}; do
-  candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
-done
+
+launch_with_node() {
+  local node_candidate="$1"
+  local node_version node_major
+  [[ -x "$node_candidate" ]] || return 0
+  node_version=$("$node_candidate" --version 2>/dev/null) || return 0
+  node_major=\${\${node_version#v}%%.*}
+  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || return 0
+  exec "$node_candidate" "$runtime" watch
+}
 
 for node_candidate in "\${candidates[@]}"; do
-  [[ -x "$node_candidate" ]] || continue
-  node_version=$("$node_candidate" --version 2>/dev/null) || continue
-  node_major=\${\${node_version#v}%%.*}
-  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || continue
-  exec "$node_candidate" "$runtime" watch
+  launch_with_node "$node_candidate"
 done
+
+spotlight_pid=""
+spotlight_results=""
+cleanup_spotlight() {
+  trap - TERM INT HUP EXIT
+  if [[ -n "$spotlight_pid" ]] && /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  if [[ -n "$spotlight_pid" ]]; then
+    wait "$spotlight_pid" 2>/dev/null
+    spotlight_pid=""
+  fi
+  if [[ -n "$spotlight_results" ]]; then
+    /bin/rm -f "$spotlight_results"
+    spotlight_results=""
+  fi
+}
+trap 'cleanup_spotlight; exit 143' TERM
+trap 'cleanup_spotlight; exit 130' INT
+trap 'cleanup_spotlight; exit 129' HUP
+trap cleanup_spotlight EXIT
+
+spotlight_results=$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/codex-deck-mdfind.XXXXXX" 2>/dev/null) || spotlight_results=""
+if [[ -n "$spotlight_results" ]]; then
+  /usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' > "$spotlight_results" 2>/dev/null &
+  spotlight_pid=$!
+  typeset -i spotlight_checks=0
+  while /bin/kill -0 "$spotlight_pid" 2>/dev/null && (( spotlight_checks < 20 )); do
+    /bin/sleep 0.1
+    (( spotlight_checks += 1 ))
+  done
+  if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  wait "$spotlight_pid" 2>/dev/null
+  spotlight_status=$?
+  spotlight_pid=""
+  typeset -a spotlight_candidates
+  spotlight_candidates=()
+  if [[ "$spotlight_status" -eq 0 ]]; then
+    while IFS= read -r app_candidate; do
+      [[ -n "$app_candidate" ]] || continue
+      spotlight_candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
+    done < "$spotlight_results"
+  fi
+  /bin/rm -f "$spotlight_results"
+  spotlight_results=""
+  for node_candidate in "\${spotlight_candidates[@]}"; do
+    launch_with_node "$node_candidate"
+  done
+fi
+trap - TERM INT HUP EXIT
 
 print -r -- "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) [launcher] Node.js 20 or newer was not found; watcher did not start." >> ${shellQuote(WATCHER_LOG_PATH)}
 exit 78
@@ -672,10 +736,10 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a new process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_001, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a stable new process can be recovered once");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a stable new process remains degraded without a restart");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 61_000, generation: "C", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "the global circuit breaker blocks a new-generation restart loop");
+  assert.equal(result.action.type, "wait", "a new generation also remains untouched");
 
   state = createWatcherPolicyState(0);
   result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
@@ -690,7 +754,7 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a replacement process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_000, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a previous healthy bridge recovers after a stable replacement");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a previous healthy bridge never authorizes background restart");
 
   state = createWatcherPolicyState(0);
   result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
@@ -716,7 +780,7 @@ async function selfTest(): Promise<void> {
 
   assert.equal(isBridgeStateStale(70_000, null), true, "stale/invalid port state is rejected");
   assert.equal(isBridgeStateStale(43123, 43123), false, "the active bridge state is retained");
-  console.log("macOS self-test passed: safe recovery, circuit-breaker, race, stale-state, and single-instance scenarios.");
+  console.log("macOS self-test passed: non-destructive degradation, race, stale-state, and single-instance scenarios.");
 }
 
 async function main(): Promise<number> {

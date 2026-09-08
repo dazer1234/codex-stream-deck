@@ -1,5 +1,6 @@
 import streamDeck from "@elgato/streamdeck";
 import { DeckController } from "./controller.js";
+import { CodexDialAction } from "./dial-action.js";
 import {
   Agent1, Agent2, Agent3, Agent4, Agent5, Agent6,
   Approve, Back, Decline, Dictation, Fast, Fork, Forward, NewTask,
@@ -20,6 +21,7 @@ streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean }>((
 });
 
 for (const pluginAction of [
+  new CodexDialAction(controller),
   new Agent1(controller), new Agent2(controller), new Agent3(controller),
   new Agent4(controller), new Agent5(controller), new Agent6(controller),
   new Fast(controller), new Approve(controller), new Decline(controller),

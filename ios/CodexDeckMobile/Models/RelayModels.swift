@@ -275,6 +275,7 @@ enum RelayCommand: Encodable, Sendable {
     case .reasoning(let direction):
       try values.encode("reasoning", forKey: .kind)
       try values.encode(direction, forKey: .direction)
+      try values.encode(true, forKey: .includeUltra)
     case .rateLimitReset:
       try values.encode("rate-limit-reset", forKey: .kind)
     case .keycap(let id):
@@ -284,7 +285,7 @@ enum RelayCommand: Encodable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
-    case kind, slot, threadKey, act, direction, distance, keycapId
+    case kind, slot, threadKey, act, direction, distance, includeUltra, keycapId
   }
 }
 

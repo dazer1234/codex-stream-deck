@@ -28,6 +28,7 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 - Native key-down/key-up handling for Micro slots `ACT06` through `ACT12`.
 - Native joystick up, right, down, left, and encoder click.
 - Dedicated reasoning-effort up/down buttons with press-and-hold repeat.
+- Configurable Stream Deck + knobs with independent rotate, press, touch, and live feedback controls, including per-knob Model Presets that immediately switch among ordered model/reasoning pairs; see the [Stream Deck + guide](docs/STREAM_DECK_PLUS.md).
 - Live usage controls: a configurable circular 5-hour/weekly limit key and a two-window overview.
 - A centered reset-credit counter with a deliberate 1.2-second hold before an applicable credit can be consumed.
 - A local `codex://threads/new` action for a new task.
@@ -43,9 +44,10 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 - Elgato Stream Deck 6.6 or newer on the computer connected to the Stream Deck.
 - Node.js 20 or newer for the platform launcher.
 - Windows 10+ or macOS 13+.
-- Tested hardware: standard 15-key Stream Deck MK.2.
+- Tested keypad hardware: standard 15-key Stream Deck MK.2.
+- Stream Deck + is required for the Encoder-only **Codex Dial** action.
 
-Other Stream Deck models may work, but the included layout and physical-device testing target the normal 5×3 MK.2.
+Other keypad models may work, but the included 15-key layout and its existing physical-device testing target the normal 5×3 MK.2. Stream Deck + dial setup and its separate verification boundary are documented in the [Stream Deck + guide](docs/STREAM_DECK_PLUS.md).
 
 ## Quick install
 
@@ -56,6 +58,7 @@ Other Stream Deck models may work, but the included layout and physical-device t
 3. Follow [Windows](docs/WINDOWS.md), [macOS](docs/MACOS.md), or [Windows + Mac](docs/MULTI_HOST.md).
 4. In **Codex Settings > Codex Micro**, choose the agent source, action assignments, joystick actions, and encoder behavior.
 5. Build the two Stream Deck pages below.
+6. On Stream Deck +, add the optional four-knob [Status-focused Codex Dial layout](docs/STREAM_DECK_PLUS.md#status-focused-four-knob-defaults). Its Model Presets knob uses live Codex model/reasoning choices, continuous wrap, Press None, and Fast Mode on touch by default.
 
 The iPhone companion is currently source-only: **a Mac with Xcode is required
 to build, sign, and install it**, even when the phone will control only a
@@ -161,9 +164,11 @@ The current build was locally validated against:
 
 The Windows physical-device path and the Windows+Mac relay were exercised on the real setup. The macOS launcher, watcher, native bridge, and plugin package are validated; a Stream Deck physically attached to the Mac has not yet been hardware-tested. These are tested versions, not strict maximums.
 
+Normal macOS launches also support an [IPC task-status and navigation fallback](docs/DESKTOP_IPC.md), without debug flags or a Codex restart. Composer/native action controls still require the renderer bridge; the fallback does not claim full control parity.
+
 ## Troubleshooting
 
-Start with [Troubleshooting](docs/TROUBLESHOOTING.md). The important rule is: restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches a closed Codex app; after a manual app start it permits at most one guarded recovery restart and opens a global cooldown before any later recovery.
+Start with [Troubleshooting](docs/TROUBLESHOOTING.md). Restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches a closed Codex app or automatically restarts an active session. After a normal launch, the plugin can recover task status through desktop IPC; native renderer controls require an explicitly requested bridge-enabled restart.
 
 ## Build and release validation
 

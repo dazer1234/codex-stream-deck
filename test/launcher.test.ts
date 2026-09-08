@@ -4,9 +4,48 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { buildRuntimeOverrideExpression, buildRuntimeVerificationExpression, selectRuntimeTarget } from "../launcher/runtime-override.js";
 
 const execFileAsync = promisify(execFile);
+
+async function evaluateRuntimeExpression(
+  expression: string,
+  options: { statsig?: unknown; settingsLink?: boolean; inputHandlers?: boolean } = {}
+): Promise<{ result: Record<string, unknown>; messages: unknown[] }> {
+  const messages: unknown[] = [];
+  const handlers = new Map<string, Set<unknown>>([
+    ["codex-micro-device-state-changed", new Set([{}])],
+    ["codex-micro-hid-event", new Set(options.inputHandlers === false ? [] : [{}])],
+    ["codex-micro-joystick-event", new Set(options.inputHandlers === false ? [] : [{}])]
+  ]);
+  const bus = {
+    handlers,
+    dispatchHostMessage(message: unknown) { messages.push(message); }
+  };
+  const executable = expression
+    .replaceAll("await import(persistedUrl)", "await globalThis.__codexDeckImport(persistedUrl)")
+    .replaceAll("await import(url)", "await globalThis.__codexDeckImport(url)");
+  const result = await runInNewContext(executable, {
+    __STATSIG__: options.statsig,
+    __codexDeckImport: async () => ({ bus }),
+    document: {
+      querySelector(selector: string) {
+        return selector === '[href*="/settings/codex-micro"]' && options.settingsLink ? {} : null;
+      },
+      querySelectorAll(selector: string) {
+        if (selector === "[href*=\"/settings/codex-micro\"]") return options.settingsLink ? [{}] : [];
+        return [{ href: "app://-/assets/codex-micro-current.js", src: "" }];
+      }
+    },
+    performance: { getEntriesByType: () => [] },
+    setTimeout,
+    URL,
+    Map,
+    Set
+  }) as Record<string, unknown>;
+  return { result, messages };
+}
 
 test("launcher discovers the persisted-signal module without a build hash", () => {
   const expression = buildRuntimeOverrideExpression();
@@ -79,6 +118,47 @@ test("launcher supports the current shared-chunk native detection path", () => {
   assert.match(expression, /dispatchHostMessage/);
   assert.match(expression, /deviceEventDispatched/);
   assert.match(expression, /3207467860/);
+});
+
+test("runtime activation uses native Micro handlers when legacy Statsig is unavailable", async () => {
+  const activation = await evaluateRuntimeExpression(buildRuntimeOverrideExpression());
+  assert.equal(activation.result.ready, true);
+  assert.equal(activation.result.clients, 0);
+  assert.equal(activation.result.deviceEventDispatched, true);
+  assert.equal(activation.messages.length, 1);
+
+  const verification = await evaluateRuntimeExpression(buildRuntimeVerificationExpression());
+  assert.equal(verification.result.ready, true);
+  assert.equal(verification.result.nativeEventBus, true);
+  assert.equal(verification.result.hidHandlers, 1);
+  assert.equal(verification.result.joystickHandlers, 1);
+});
+
+test("runtime activation retains the legacy Statsig gate path", async () => {
+  const client = {
+    overrideAdapter: { getGateOverride: (gate: { name: string; value: boolean }) => gate },
+    _memoCache: { stale: true },
+    checkGate(name: string) {
+      return Boolean(this.overrideAdapter.getGateOverride({ name, value: false }).value);
+    },
+    $emt() {}
+  };
+  const activation = await evaluateRuntimeExpression(buildRuntimeOverrideExpression(), {
+    statsig: { firstInstance: client, instances: {} }
+  });
+  assert.equal(activation.result.ready, true);
+  assert.equal((activation.result.enabled as unknown[]).length, 1);
+  assert.equal((activation.result.enabled as unknown[])[0], true);
+  assert.equal(Object.keys(client._memoCache).length, 0);
+});
+
+test("runtime verification fails closed without native input handlers", async () => {
+  const verification = await evaluateRuntimeExpression(buildRuntimeVerificationExpression(), {
+    inputHandlers: false
+  });
+  assert.equal(verification.result.ready, false);
+  assert.equal(verification.result.hidHandlers, 0);
+  assert.equal(verification.result.joystickHandlers, 0);
 });
 
 test("launcher verifies the settings gate and native Micro handlers", () => {
