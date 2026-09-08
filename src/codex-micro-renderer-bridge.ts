@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import WebSocket from "ws";
 import { codexDeckStateRoot } from "./codex-deck-paths.js";
+import { CodexDesktopIpcBridge } from "./codex-desktop-ipc.js";
+import { openCodexThread } from "./codex-open.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import { isSafeReasoningIdentifier } from "./types.js";
@@ -1292,7 +1294,9 @@ export class CodexMicroRendererBridge {
   private readonly sessionOwnership = new CodexSessionOwnershipIndex();
   private evaluationNamespace = randomUUID();
 
-  constructor(private readonly log: (message: string) => void) {}
+  constructor(private readonly log: (message: string) => void,
+    private readonly desktopBridge: Pick<CodexDesktopIpcBridge, "refresh" | "close"> | undefined =
+      process.platform === "darwin" ? new CodexDesktopIpcBridge(log) : undefined) {}
 
   async refresh(): Promise<MicroSnapshot> {
     try {
@@ -1317,12 +1321,20 @@ export class CodexMicroRendererBridge {
   }
 
   private async readSnapshot(forceUsageRefresh: boolean): Promise<MicroSnapshot> {
-    await this.ensureConnected();
+    try { await this.ensureConnected(); }
+    catch (error) {
+      if (!this.desktopBridge) throw error;
+      if (forceUsageRefresh) throw new Error("Usage refresh requires the Codex renderer connection; task status is still available.");
+      const snapshot = await this.desktopBridge.refresh();
+      this.lastSnapshot = snapshot;
+      return snapshot;
+    }
     const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION(forceUsageRefresh));
     if (forceUsageRefresh && !hasValidNormalizedUsage(nativeSnapshot.usage)) {
       throw new Error("Codex usage refresh returned no valid rate-limit usage.");
     }
     const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
+    this.desktopBridge?.close();
     this.lastSnapshot = snapshot;
     return snapshot;
   }
@@ -1331,6 +1343,10 @@ export class CodexMicroRendererBridge {
     if (!Number.isInteger(slot) || slot < 0 || slot > 5) throw new Error(`Ungültiger Micro-Agent-Slot: ${slot}`);
     const snapshot = act === 1 ? await this.refresh() : this.lastSnapshot ?? await this.refresh();
     const plan = resolveAgentDispatch(snapshot, slot, expectedThreadKey);
+    if (snapshot.transport === "desktop-ipc") {
+      if (act === 1) await openCodexThread(plan.threadKey);
+      return;
+    }
     if (plan.kind === "native") {
       if (plan.slot !== slot) {
         this.log(`Agent slot ${slot + 1} changed before dispatch; using current native slot ${plan.slot + 1}.`);
@@ -1823,6 +1839,7 @@ export class CodexMicroRendererBridge {
   }
 
   close(): void {
+    this.desktopBridge?.close();
     this.disconnect();
   }
 
@@ -1964,7 +1981,7 @@ async function discoverDebugPort(): Promise<number> {
       const port = Number.parseInt(line.match(/--remote-debugging-port(?:=|\s+)(\d+)/)?.[1] ?? "", 10);
       if (Number.isInteger(port) && await isDebugPort(port)) return port;
     }
-    throw new Error("Codex wurde nicht über den macOS-Micro-Aktivierungsstarter geöffnet.");
+    throw new DebugBridgeUnavailableError("Codex renderer connection is unavailable after a normal launch.");
   }
   if (process.platform !== "win32") throw new Error("Die native Codex-Micro-Brücke wird auf dieser Plattform nicht unterstützt.");
 
@@ -1976,6 +1993,8 @@ async function discoverDebugPort(): Promise<number> {
   }
   throw new Error("Codex wurde nicht über den Micro-Aktivierungsstarter geöffnet.");
 }
+
+export class DebugBridgeUnavailableError extends Error {}
 
 async function readPortFile(): Promise<number | null> {
   try {

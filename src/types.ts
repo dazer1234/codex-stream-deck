@@ -86,6 +86,8 @@ export type CodexModelCatalogEntry = {
 };
 
 export type MicroSnapshot = {
+  /** IPC supplies task status/navigation, not active composer or native action authority. */
+  transport?: "desktop-ipc";
   slots: MicroAgentSlot[];
   /** Current reasoning effort selected in the active renderer composer. */
   reasoningEffort?: string;

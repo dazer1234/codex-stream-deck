@@ -386,10 +386,13 @@ function isSnapshot(value: unknown): value is MicroSnapshot {
   if (!snapshot || !onlyAllowedOwnKeys(snapshot, [
     "slots", "reasoningEffort", "activeModelId", "activeModelDisplayName", "modelCatalog",
     "fastModeEnabled", "activeThreadKey", "activeThreadTitle", "layout", "agentSource",
-    "lightingAutoOff", "theme", "usage", "hostSessions"
+    "lightingAutoOff", "theme", "usage", "hostSessions", "transport"
   ])) return false;
+  if (snapshot.transport !== undefined && snapshot.transport !== "desktop-ipc") return false;
+  if (snapshot.transport === "desktop-ipc" && ["reasoningEffort", "activeModelId", "activeModelDisplayName",
+    "modelCatalog", "fastModeEnabled", "activeThreadKey", "activeThreadTitle", "usage"].some(key => snapshot[key] !== undefined)) return false;
   const slots = snapshotOwnDataArray(snapshot.slots, 6);
-  if (!slots || slots.length !== 6 || !isLayout(snapshot.layout)) return false;
+  if (!slots || slots.length !== 6 || !isLayout(snapshot.layout, snapshot.transport === "desktop-ipc")) return false;
   if (!slots.every((rawSlot, index) => {
     const slot = snapshotOwnDataRecord(rawSlot);
     return slot && onlyAllowedOwnKeys(slot, [
@@ -463,7 +466,7 @@ function isActiveModelCatalog(
   return activeMatch;
 }
 
-function isLayout(value: unknown): value is MicroSnapshot["layout"] {
+function isLayout(value: unknown, desktopIpc = false): value is MicroSnapshot["layout"] {
   const layout = snapshotOwnDataRecord(value);
   if (!layout || !exactOwnDataKeys(layout, ["version", "slots", "analogStick"]) || layout.version !== 1) return false;
   const slots = snapshotOwnDataRecord(layout.slots);
@@ -473,11 +476,12 @@ function isLayout(value: unknown): value is MicroSnapshot["layout"] {
   if (!exactOwnDataKeys(slots, actionSlots)) return false;
   if (!actionSlots.every((key) => {
     const slot = snapshotOwnDataRecord(slots[key]);
+    if (desktopIpc) return slot && exactOwnDataKeys(slot, ["keycapId"]) && slot.keycapId === "UNAVAILABLE";
     return slot && onlyAllowedOwnKeys(slot, ["keycapId", "commandId"]) && typeof slot.keycapId === "string" &&
       OFFICIAL_KEYCAP_IDS.includes(slot.keycapId as OfficialKeycapId) &&
       (slot.commandId === undefined || (typeof slot.commandId === "string" && slot.commandId.length <= 128));
   })) return false;
-  return true;
+  return !desktopIpc || Object.values(analogStick).every(value => value === null);
 }
 
 function isUsageSnapshot(value: unknown): boolean {

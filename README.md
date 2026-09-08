@@ -164,9 +164,11 @@ The current build was locally validated against:
 
 The Windows physical-device path and the Windows+Mac relay were exercised on the real setup. The macOS launcher, watcher, native bridge, and plugin package are validated; a Stream Deck physically attached to the Mac has not yet been hardware-tested. These are tested versions, not strict maximums.
 
+Normal macOS launches also support an [IPC task-status and navigation fallback](docs/DESKTOP_IPC.md), without debug flags or a Codex restart. Composer/native action controls still require the renderer bridge; the fallback does not claim full control parity.
+
 ## Troubleshooting
 
-Start with [Troubleshooting](docs/TROUBLESHOOTING.md). The important rule is: restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches a closed Codex app; after a manual app start it permits at most one guarded recovery restart and opens a global cooldown before any later recovery.
+Start with [Troubleshooting](docs/TROUBLESHOOTING.md). Restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches a closed Codex app or automatically restarts an active session. After a normal launch, the plugin can recover task status through desktop IPC; native renderer controls require an explicitly requested bridge-enabled restart.
 
 ## Build and release validation
 
