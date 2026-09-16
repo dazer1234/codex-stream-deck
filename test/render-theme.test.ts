@@ -36,6 +36,21 @@ test("agent context ring is bounded and can be hidden globally", () => {
   assert.doesNotMatch(empty, /data-context-used=/);
 });
 
+test("agent project labels sit beside the context ring and remain compact", () => {
+  const svg = renderAgentSvg(0, "Context test", "thinking", false, 0, "dark", undefined, "ready", 84, true, "SEW-360");
+  assert.match(svg, /data-agent-project="SEW-360" x="38" y="29" text-anchor="start"[^>]*font-size="16.5"/);
+  assert.match(svg, />SEW-360<\/text>/);
+
+  const longName = renderAgentSvg(0, "Context test", "thinking", false, 0, "dark", undefined, "ready", 84, true, "codex-stream-deck");
+  assert.match(longName, />codex-st…<\/text>/);
+
+  const withoutRing = renderAgentSvg(0, "Context test", "thinking", false, 0, "dark", undefined, "ready", 84, false, "SEW-360");
+  assert.match(withoutRing, /data-agent-project="SEW-360" x="72" y="29" text-anchor="middle"[^>]*font-size="16.5"/);
+
+  const withoutProject = renderAgentSvg(0, "Context test", "thinking", false, 0, "dark", "M", "ready", 84, true);
+  assert.doesNotMatch(withoutProject, /data-agent-project=/);
+});
+
 test("user-local monochrome SVGs normalize to an off-white dark glyph", () => {
   const input = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M2 2h20v20H2z" stroke="#000"/></svg>';
   const output = decodeURIComponent(renderImportedKeycap(input, "dark").replace(/^data:image\/svg\+xml;charset=utf8,/, ""));

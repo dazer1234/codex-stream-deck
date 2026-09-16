@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { codexOpenSpec, codexThreadUrl } from "../src/codex-open.js";
+import { codexFocusSpec } from "../src/codex-focus.js";
 
 test("Codex task deep links only accept task UUIDs or new", () => {
   assert.equal(codexThreadUrl("new"), "codex://threads/new");
@@ -15,4 +16,12 @@ test("Codex links use native launchers on Windows and macOS", () => {
   const mac = codexOpenSpec("new", "darwin");
   assert.deepEqual(mac, { executable: "/usr/bin/open", args: ["codex://threads/new"], windowsHide: false });
   assert.throws(() => codexOpenSpec("new", "linux"), /unsupported/);
+});
+
+test("agent presses can opt into focusing the local macOS Codex app", () => {
+  assert.deepEqual(codexFocusSpec("darwin"), {
+    executable: "/usr/bin/open",
+    args: ["-b", "com.openai.codex"]
+  });
+  assert.equal(codexFocusSpec("win32"), null);
 });

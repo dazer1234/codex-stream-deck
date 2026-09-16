@@ -23,6 +23,7 @@ Windows-only and Mac-only mode have no relay, no second computer dependency, and
 ## Features
 
 - Six dynamic agent keys using the source and assignments selected in **Codex Settings > Codex Micro**.
+- Optional macOS focus on local agent presses, so Codex receives subsequent keyboard shortcuts even when another app was active.
 - Live idle, working, unread completion, approval/input, error, and empty states.
 - Codex-aligned light and dark rendering with restrained status animation.
 - Native key-down/key-up handling for Micro slots `ACT06` through `ACT12`.
@@ -94,6 +95,10 @@ The action names describe the default Codex Micro setup. The keys always follow 
 
 The page-navigation and profile-switch keys are built-in Stream Deck actions. All other named controls come from Codex Deck. Every official Codex Micro keycap is also exposed as a standalone action, so extra pages can be customized without changing the six synchronized Micro action slots.
 
+### Optional macOS app focus
+
+The **Agent Display** inspector includes global **Context ring** and **Folder name** visibility settings for the six agent keys; both default to on and Stream Deck persists them for the plugin. It also includes **Focus Codex**, which defaults to off. On a local Mac, enabling it activates Codex before the agent action, so keyboard shortcuts such as approval target Codex rather than the previously active app. It never focuses the local app for an agent routed to a remote host.
+
 ### Usage and reset controls
 
 ![Usage limit, overview, and reset-credit controls](docs/assets/usage-controls-preview.svg)
@@ -140,7 +145,7 @@ No virtual HID driver is installed and no Codex application file is patched. See
 - The Codex debug endpoint remains loopback-only and is never the multi-host relay endpoint.
 - CDP is privileged: another untrusted process running as the same local user could try to access it.
 - Codex Deck has no telemetry, cloud service, or update service.
-- Codex Deck reads exact local rollout filenames for ownership and a bounded recent tail for structural status tags plus numeric `token_count` fields. It does not parse or relay prompts, responses, project names, or other conversation content.
+- Codex Deck reads exact local rollout filenames for ownership and a bounded recent tail for structural status tags plus numeric `token_count` fields. It does not parse prompts or responses. For an owned local session, it reads the `cwd` from the initial metadata record only to derive the final folder name as the compact folder label; it never displays or relays the full path, and does not read project files.
 - Optional SVGs stay in the user-local icons directory and are never uploaded.
 - Multi-host mode accepts only authenticated, typed Codex Deck commands over SSH or Tailscale; wildcard and arbitrary public-IP listeners are rejected.
 - Private relay tokens, local host state, logs, and personal paths are excluded by the release audit.

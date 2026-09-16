@@ -1,6 +1,6 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { HostSessionPresence, MicroSnapshot } from "./types.js";
 
 const SESSION_FILENAME = /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
@@ -9,6 +9,7 @@ const COMPLETION_FRESHNESS_MS = 5 * 60_000;
 
 export class CodexSessionOwnershipIndex {
   private sessionIds = new Set<string>();
+  private projectNames = new Map<string, string>();
   private recentSessions: HostSessionPresence[] = [];
   private acknowledgedCompletions = new Map<string, number>();
   private contextParsedSessions = new Set<string>();
@@ -55,6 +56,9 @@ export class CodexSessionOwnershipIndex {
         const ownedByHost = sessionId != null && this.sessionIds.has(sessionId);
         return {
           ...slot,
+          ...(sessionId != null && this.projectNames.get(sessionId)
+            ? { projectName: this.projectNames.get(sessionId) }
+            : {}),
           ownedByHost,
           status: ownedByHost && session ? reconcileOwnedStatus(slot.status, session.status) : slot.status,
           ...(session?.contextUsedPercent != null
@@ -124,21 +128,47 @@ export class CodexSessionOwnershipIndex {
     }
     const recent = [...uniqueRecent.values()].slice(0, 128);
     const contextParsed = new Set<string>();
-    this.recentSessions = await Promise.all(recent.map(async ({ threadId, path, activityAt: fileActivityAt }) => {
+    const parsedSessions = await Promise.all(recent.map(async ({ threadId, path, activityAt: fileActivityAt }) => {
       const shouldRead = now - fileActivityAt <= 15 * 60_000 || trackedSessions.has(threadId);
-      const recentStatus = shouldRead
-        ? await readRecentSessionStatus(path)
-        : { status: "idle" as const };
+      const [recentStatus, projectName] = shouldRead
+        ? await Promise.all([readRecentSessionStatus(path), readSessionProjectName(path)])
+        : [{ status: "idle" as const }, undefined] as const;
       if (shouldRead) contextParsed.add(threadId);
       const { activityAt, ...status } = recentStatus;
-      return { threadId, activityAt: activityAt ?? fileActivityAt, ...status };
+      return { threadId, projectName, presence: { threadId, activityAt: activityAt ?? fileActivityAt, ...status } };
     }));
+    this.recentSessions = parsedSessions.map(({ presence }) => presence);
+    this.projectNames = new Map(parsedSessions.flatMap(({ threadId, projectName }) =>
+      projectName ? [[threadId, projectName] as const] : []));
     this.contextParsedSessions = contextParsed;
     const currentIds = new Set(this.recentSessions.map((session) => session.threadId));
     for (const threadId of this.acknowledgedCompletions.keys()) {
       if (!currentIds.has(threadId)) this.acknowledgedCompletions.delete(threadId);
     }
     this.refreshedAt = now;
+  }
+}
+
+async function readSessionProjectName(path: string): Promise<string | undefined> {
+  try {
+    const handle = await open(path, "r");
+    try {
+      const buffer = Buffer.alloc(256 * 1024);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const firstLineEnd = buffer.indexOf(0x0a, 0);
+      if (firstLineEnd < 0 || firstLineEnd > bytesRead) return undefined;
+      const event = JSON.parse(buffer.subarray(0, firstLineEnd).toString("utf8")) as {
+        type?: string;
+        payload?: { cwd?: unknown };
+      };
+      if (event.type !== "session_meta" || typeof event.payload?.cwd !== "string") return undefined;
+      const label = basename(event.payload.cwd.trim());
+      return label && label.length <= 80 ? label : undefined;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
   }
 }
 

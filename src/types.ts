@@ -14,6 +14,8 @@ export type MicroAgentSlot = {
   id: number;
   threadKey: string | null;
   title: string | null;
+  /** Compact project label supplied by Codex or derived locally from rollout metadata. */
+  projectName?: string;
   status: string;
   selected: boolean;
   activityAt?: number;

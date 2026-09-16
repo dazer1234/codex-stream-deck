@@ -265,6 +265,7 @@ export function parseRelayCommand(value: unknown): RelayCommand | null {
 function isSnapshot(value: unknown): value is MicroSnapshot {
   if (!isRecord(value) || !Array.isArray(value.slots) || value.slots.length !== 6 || !isRecord(value.layout)) return false;
   if (!value.slots.every((slot, index) => isRecord(slot) && slot.id === index && typeof slot.status === "string" &&
+    (slot.projectName == null || (typeof slot.projectName === "string" && slot.projectName.length <= 80)) &&
     (slot.contextUsedPercent == null || finitePercent(slot.contextUsedPercent)))) return false;
   if (value.activeThreadKey != null && !isThreadKey(value.activeThreadKey)) return false;
   if (value.activeThreadTitle != null && (typeof value.activeThreadTitle !== "string" || value.activeThreadTitle.length > 240)) return false;
