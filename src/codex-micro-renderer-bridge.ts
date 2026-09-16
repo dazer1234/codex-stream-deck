@@ -207,8 +207,49 @@ const SNAPSHOT_EXPRESSION = `(async () => {
     }
     return undefined;
   };
+  const projectName = (slot) => {
+    const clean = (value) => typeof value === 'string' && value.trim() && !/[\\/]/.test(value)
+      ? value.trim().replace(/\s+/g, ' ').slice(0, 80)
+      : undefined;
+    const metadataContainers = new Set(['thread', 'task', 'project', 'workspace', 'metadata', 'context', 'data', 'attributes']);
+    const labelFields = new Set(['name', 'title', 'label', 'displayname', 'projectname', 'projecttitle', 'workspacename', 'workspacetitle']);
+    const seen = new Set();
+    const inspect = (value, depth = 0) => {
+      if (!value || typeof value !== 'object' || depth > 4 || seen.has(value)) return undefined;
+      seen.add(value);
+      for (const [key, candidate] of Object.entries(value)) {
+        const normalizedKey = key.toLowerCase();
+        if (/^(project|workspace)(name|title|label)?$/.test(normalizedKey)) {
+          const direct = clean(candidate);
+          if (direct) return direct;
+          if (candidate && typeof candidate === 'object') {
+            for (const [nestedKey, nestedValue] of Object.entries(candidate)) {
+              if (labelFields.has(nestedKey.toLowerCase())) {
+                const nested = clean(nestedValue);
+                if (nested) return nested;
+              }
+            }
+          }
+        }
+        if (metadataContainers.has(normalizedKey) || /project|workspace/.test(normalizedKey)) {
+          const nested = inspect(candidate, depth + 1);
+          if (nested) return nested;
+        }
+      }
+      return undefined;
+    };
+    return inspect(slot);
+  };
+  // Keep this relay payload deliberately content-free. Codex's native slot can
+  // carry other implementation details, but the key only needs these display
+  // fields plus an optional project label.
   const slots = found.slots.map((slot) => ({
-    ...slot,
+    id: slot.id,
+    threadKey: typeof slot.threadKey === 'string' ? slot.threadKey : null,
+    title: typeof slot.title === 'string' ? slot.title : null,
+    projectName: projectName(slot),
+    status: typeof slot.status === 'string' ? slot.status : 'off',
+    selected: Boolean(slot.selected),
     activityAt: toEpoch(slot.activityAt) ?? toEpoch(slot.updatedAt) ?? toEpoch(slot.lastActivityAt) ??
       toEpoch(slot.thread?.updatedAt) ?? toEpoch(slot.task?.updatedAt)
   }));

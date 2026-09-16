@@ -19,6 +19,10 @@
     <input id="show-context-rings" type="checkbox" checked disabled>
   </label>
   <label>
+    <span>Folder name</span>
+    <input id="show-project-names" type="checkbox" checked disabled>
+  </label>
+  <label>
     <span>Focus Codex*</span>
     <input id="focus-codex-on-agent-press" type="checkbox" disabled>
   </label>
@@ -28,13 +32,16 @@
     let pluginContext;
     let globalSettings;
     const showContextRingsInput = document.getElementById("show-context-rings");
+    const showProjectNamesInput = document.getElementById("show-project-names");
     const focusCodexOnAgentPressInput = document.getElementById("focus-codex-on-agent-press");
 
     function renderGlobalSettings() {
       if (!globalSettings) return;
       showContextRingsInput.checked = globalSettings.showContextRings !== false;
+      showProjectNamesInput.checked = globalSettings.showProjectNames !== false;
       focusCodexOnAgentPressInput.checked = globalSettings.focusCodexOnAgentPress === true;
       showContextRingsInput.disabled = false;
+      showProjectNamesInput.disabled = false;
       focusCodexOnAgentPressInput.disabled = false;
     }
 
@@ -58,6 +65,7 @@
       });
       websocket.addEventListener("close", () => {
         showContextRingsInput.disabled = true;
+        showProjectNamesInput.disabled = true;
         focusCodexOnAgentPressInput.disabled = true;
       });
       websocket.addEventListener("message", (message) => {
@@ -70,6 +78,10 @@
 
     showContextRingsInput.addEventListener("change", (event) => {
       setGlobalSetting("showContextRings", event.target.checked);
+    });
+
+    showProjectNamesInput.addEventListener("change", (event) => {
+      setGlobalSetting("showProjectNames", event.target.checked);
     });
 
     focusCodexOnAgentPressInput.addEventListener("change", (event) => {

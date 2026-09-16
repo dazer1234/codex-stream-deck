@@ -75,8 +75,9 @@ renderer's mirrored recent list. This distinguishes a task's owning desktop
 from a stale cloud or remote-SSH mirror. A bounded rollout tail is searched only
 for structural activity/completion event tags and the latest numeric
 `token_count` record. The latter provides optional context-window percentage
-metadata for the small agent-key ring. Prompts, responses, project names, and
-other content are neither parsed nor relayed. The relay never reads or proxies
+metadata for the small agent-key ring. The initial session metadata record is
+read only to derive the final `cwd` folder name for an optional compact label;
+full paths, prompts, responses, and other content are neither parsed nor relayed. The relay never reads or proxies
 the remote CLI app-server stream.
 
 The relay protocol has no arbitrary-evaluation, filesystem, shell, or raw-CDP

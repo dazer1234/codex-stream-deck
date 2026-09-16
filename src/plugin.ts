@@ -15,8 +15,9 @@ import {
 
 const controller = new DeckController();
 
-streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean; focusCodexOnAgentPress?: boolean }>((event) => {
+streamDeck.settings.onDidReceiveGlobalSettings<{ showContextRings?: boolean; showProjectNames?: boolean; focusCodexOnAgentPress?: boolean }>((event) => {
   controller.setContextRingVisibility(event.settings.showContextRings !== false);
+  controller.setProjectNameVisibility(event.settings.showProjectNames !== false);
   controller.setFocusCodexOnAgentPress(event.settings.focusCodexOnAgentPress === true);
 });
 

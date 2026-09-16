@@ -24,6 +24,19 @@ test("session ownership is derived from exact rollout filenames, not message ref
   finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("owned rollout metadata supplies a compact project label", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codex-deck-project-label-"));
+  try {
+    await writeFile(join(root, `rollout-now-${owned}.jsonl`),
+      '{"type":"session_meta","payload":{"cwd":"/Users/example/Code/acme-project"}}\n');
+    const annotated = await new CodexSessionOwnershipIndex([root], 60_000).annotate(snapshot());
+    assert.equal(annotated.slots[0]!.projectName, "acme-project");
+    assert.equal(annotated.slots[1]!.projectName, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rollout and prefixed thread identities use the same UUID", () => {
   assert.equal(sessionIdFromRolloutFilename(`rollout-time-${owned}.jsonl`), owned);
   assert.equal(sessionIdFromThreadKey(`local:${owned}`), owned);

@@ -41,11 +41,11 @@ const SURFACES: Record<ThemeMode, SurfacePalette> = {
   }
 };
 
-export function renderAgentKey(slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true): string {
-  return toDataUrl(renderAgentSvg(slot, title, status, selected, phase, theme, hostBadge, hostHealth, contextUsedPercent, showContextRing));
+export function renderAgentKey(slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true, projectName?: string): string {
+  return toDataUrl(renderAgentSvg(slot, title, status, selected, phase, theme, hostBadge, hostHealth, contextUsedPercent, showContextRing, projectName));
 }
 
-export function renderAgentSvg(_slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true): string {
+export function renderAgentSvg(_slot: number, title: string, status: AgentVisualStatus, selected = false, phase = 0, theme: ThemeMode = "light", hostBadge?: string, hostHealth: HostHealthState = "ready", contextUsedPercent?: number, showContextRing = true, projectName?: string): string {
   const surface = SURFACES[theme];
   const color = SIGNAL_COLORS[theme][status];
   const [line1, line2] = splitTitle(title);
@@ -55,6 +55,13 @@ export function renderAgentSvg(_slot: number, title: string, status: AgentVisual
   const glowOpacity = Math.min(1, (status === "empty" ? .12 : status === "idle" ? .18 : status === "thinking" ? .50 + pulse * .16 : status === "input" ? .42 + pulse * .12 : .52) + themeBoost);
   const surfaceOpacity = (status === "empty" ? .04 : status === "idle" ? .06 : status === "thinking" ? .30 + pulse * .12 : status === "input" ? .24 + pulse * .08 : .28) + (theme === "dark" && status !== "empty" ? .06 : 0);
   const statusMark = renderAgentStatusMark(status, glowColor, phase, pulse);
+  const contextRingVisible = hostHealth === "ready" && status !== "empty" && showContextRing;
+  const compactProject = projectName ? compactProjectName(projectName) : "";
+  const projectMarkup = compactProject
+    ? contextRingVisible
+      ? `<text data-agent-project="${escapeXml(projectName!)}" x="38" y="29" text-anchor="start" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="16.5" font-weight="650" letter-spacing=".02" fill="${surface.title}" fill-opacity=".72">${escapeXml(compactProject)}</text>`
+      : `<text data-agent-project="${escapeXml(projectName!)}" x="72" y="29" text-anchor="middle" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="16.5" font-weight="650" letter-spacing=".02" fill="${surface.title}" fill-opacity=".72">${escapeXml(compactProject)}</text>`
+    : "";
   const titleMarkup = line2
     ? `<text x="72" y="55" text-anchor="middle" font-size="${fitTitleFont(line1, 16.5)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line1)}</text><text x="72" y="75" text-anchor="middle" font-size="${fitTitleFont(line2, 16.5)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line2)}</text>`
     : `<text x="72" y="66" text-anchor="middle" font-size="${fitTitleFont(line1, 18)}" font-weight="600" letter-spacing=".12" fill="${surface.title}">${escapeXml(line1)}</text>`;
@@ -78,8 +85,9 @@ export function renderAgentSvg(_slot: number, title: string, status: AgentVisual
     <rect x="12" y="12" width="120" height="120" rx="12" fill="url(#frost)" stroke="${surface.innerBorder}" stroke-width="1" opacity="${theme === "dark" ? ".86" : ".72"}"/>
     <path d="M18 21C46 12 99 12 126 23" fill="none" stroke="${surface.sheen}" stroke-width="6" stroke-linecap="round" opacity="${theme === "dark" ? "0" : ".68"}"/>
     ${renderHostHealthMark(hostHealth, theme)}
-    ${hostHealth === "ready" && status !== "empty" && showContextRing ? renderContextRing(contextUsedPercent, theme, surface) : ""}
+    ${contextRingVisible ? renderContextRing(contextUsedPercent, theme, surface) : ""}
     ${hostBadge ? `<g data-agent-host="${escapeXml(hostBadge)}"><rect x="108" y="16" width="20" height="18" rx="7" fill="${surface.title}" fill-opacity=".11"/><text x="118" y="29" text-anchor="middle" font-family="Bahnschrift, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" fill="${surface.title}" fill-opacity=".82">${escapeXml(hostBadge)}</text></g>` : ""}
+    ${projectMarkup}
     <g font-family="Bahnschrift, Segoe UI Variable Display, Segoe UI, Arial, sans-serif">${titleMarkup}</g>
     ${statusMark}
   </svg>`;
@@ -299,6 +307,11 @@ function fitTitleFont(value: string, maximum: number): string {
     else units += .54;
   }
   return Math.max(12.5, Math.min(maximum, 112 / Math.max(units, 1))).toFixed(2);
+}
+
+function compactProjectName(value: string): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length > 9 ? `${clean.slice(0, 8).replace(/[\s_-]+$/, "")}…` : clean;
 }
 
 function renderAgentStatusMark(status: AgentVisualStatus, color: string, phase: number, pulse: number): string {

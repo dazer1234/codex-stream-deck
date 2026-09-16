@@ -51,6 +51,7 @@ test("agent property inspector waits for and preserves complete global settings"
 
   const inputs = new Map([
     ["show-context-rings", new FakeInput()],
+    ["show-project-names", new FakeInput()],
     ["focus-codex-on-agent-press", new FakeInput()]
   ]);
   const window: Record<string, unknown> = {};
@@ -69,6 +70,7 @@ test("agent property inspector waits for and preserves complete global settings"
   assert.ok(socket);
   assert.equal(socket.url, "ws://127.0.0.1:1234");
   assert.equal(inputs.get("show-context-rings")?.disabled, true);
+  assert.equal(inputs.get("show-project-names")?.disabled, true);
   assert.equal(inputs.get("focus-codex-on-agent-press")?.disabled, true);
 
   socket.readyState = FakeWebSocket.OPEN;
@@ -86,6 +88,8 @@ test("agent property inspector waits for and preserves complete global settings"
     payload: { settings: { unrelatedSetting: "preserved" } }
   });
   assert.equal(inputs.get("show-context-rings")?.disabled, false);
+  assert.equal(inputs.get("show-project-names")?.disabled, false);
+  assert.equal(inputs.get("show-project-names")?.checked, true);
   assert.equal(inputs.get("focus-codex-on-agent-press")?.disabled, false);
   assert.equal(inputs.get("focus-codex-on-agent-press")?.checked, false);
 
@@ -94,6 +98,7 @@ test("agent property inspector waits for and preserves complete global settings"
     payload: {
       settings: {
         showContextRings: true,
+        showProjectNames: true,
         focusCodexOnAgentPress: true,
         unrelatedSetting: "preserved"
       }
@@ -110,6 +115,22 @@ test("agent property inspector waits for and preserves complete global settings"
     context: "plugin-context",
     payload: {
       showContextRings: false,
+      showProjectNames: true,
+      focusCodexOnAgentPress: true,
+      unrelatedSetting: "preserved"
+    }
+  });
+
+  const showProjectNames = inputs.get("show-project-names");
+  assert.ok(showProjectNames);
+  showProjectNames.checked = false;
+  showProjectNames.dispatchChange();
+  assert.deepEqual(JSON.parse(socket.sent.at(-1) ?? ""), {
+    event: "setGlobalSettings",
+    context: "plugin-context",
+    payload: {
+      showContextRings: false,
+      showProjectNames: false,
       focusCodexOnAgentPress: true,
       unrelatedSetting: "preserved"
     }
@@ -124,6 +145,7 @@ test("agent property inspector waits for and preserves complete global settings"
     context: "plugin-context",
     payload: {
       showContextRings: false,
+      showProjectNames: false,
       focusCodexOnAgentPress: false,
       unrelatedSetting: "preserved"
     }
@@ -131,5 +153,6 @@ test("agent property inspector waits for and preserves complete global settings"
 
   socket.emit("close");
   assert.equal(showContextRings.disabled, true);
+  assert.equal(showProjectNames.disabled, true);
   assert.equal(inputs.get("focus-codex-on-agent-press")?.disabled, true);
 });

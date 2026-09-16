@@ -36,6 +36,7 @@ type UsageLimitRegistration = { action: KeyAction; mode: UsageLimitMode };
 type ActionIdentity = { id: string };
 export type DeckSettings = {
   showContextRings?: boolean;
+  showProjectNames?: boolean;
   focusCodexOnAgentPress?: boolean;
 };
 
@@ -79,6 +80,7 @@ export class DeckController {
   private lastAgentSourceSignature = "";
   private lastHostHealthSignature = "";
   private showContextRings = true;
+  private showProjectNames = true;
   private focusCodexOnAgentPress = false;
 
   async start(): Promise<void> {
@@ -86,6 +88,7 @@ export class DeckController {
     try {
       const settings = await streamDeck.settings.getGlobalSettings<DeckSettings>();
       this.showContextRings = settings.showContextRings !== false;
+      this.showProjectNames = settings.showProjectNames !== false;
       this.focusCodexOnAgentPress = settings.focusCodexOnAgentPress === true;
     } catch (error) {
       streamDeck.logger.warn(`Global settings were unavailable; using defaults: ${String(error)}`);
@@ -192,6 +195,12 @@ export class DeckController {
   setContextRingVisibility(visible: boolean): void {
     if (this.showContextRings === visible) return;
     this.showContextRings = visible;
+    void Promise.all([...this.agents.values()].map((registration) => this.renderAgent(registration)));
+  }
+
+  setProjectNameVisibility(visible: boolean): void {
+    if (this.showProjectNames === visible) return;
+    this.showProjectNames = visible;
     void Promise.all([...this.agents.values()].map((registration) => this.renderAgent(registration)));
   }
 
@@ -441,7 +450,8 @@ export class DeckController {
     const hostBadge = agent && this.relayClient ? (agent.host.platform === "darwin" ? "M" : "W") : undefined;
     await this.setImage(action, renderAgentKey(
       slot, title, status, agent?.selected ?? false, this.animationFrame, theme, hostBadge,
-      health.state, agent?.contextUsedPercent, this.showContextRings));
+      health.state, agent?.contextUsedPercent, this.showContextRings,
+      this.showProjectNames ? agent?.projectName : undefined));
   }
 
   private async renderAnimatedAgents(): Promise<void> {
