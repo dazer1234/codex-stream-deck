@@ -130,7 +130,86 @@ function Get-CodexInstallation {
   $appRoot = Join-Path $package.InstallLocation 'app'
   $executable = Join-Path $appRoot 'ChatGPT.exe'
   if (-not (Test-Path -LiteralPath $executable)) { throw "Codex executable not found: $executable" }
-  [pscustomobject]@{ Root = [IO.Path]::GetFullPath($appRoot).TrimEnd('\'); Executable = $executable; Version = $package.Version.ToString() }
+
+  $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+  $application = @($manifest.Package.Applications.Application) | Select-Object -First 1
+  if ($null -eq $application -or [string]::IsNullOrWhiteSpace($application.Id)) {
+    throw 'The OpenAI Codex package does not expose an application ID.'
+  }
+  $aumid = "$($package.PackageFamilyName)!$($application.Id)"
+
+  [pscustomobject]@{
+    Root = [IO.Path]::GetFullPath($appRoot).TrimEnd('\')
+    Executable = $executable
+    Version = $package.Version.ToString()
+    Aumid = $aumid
+  }
+}
+
+function Start-CodexPackage([string]$Aumid, [int]$Port) {
+  if (-not ('CodexDeckActivation.Activator' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace CodexDeckActivation
+{
+    [Flags]
+    public enum ActivateOptions
+    {
+        None = 0,
+        DesignMode = 1,
+        NoErrorUI = 2,
+        NoSplashScreen = 4
+    }
+
+    [ComImport]
+    [Guid("2E941141-7F97-4756-BA1D-9DECDE894A3D")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IApplicationActivationManager
+    {
+        [PreserveSig]
+        int ActivateApplication(
+            [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+            ActivateOptions options,
+            out uint processId
+        );
+    }
+
+    [ComImport]
+    [Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+    public class ApplicationActivationManager
+    {
+    }
+
+    public static class Activator
+    {
+        public static uint Launch(string aumid, string arguments)
+        {
+            var manager =
+                (IApplicationActivationManager)new ApplicationActivationManager();
+
+            uint processId;
+            int hr = manager.ActivateApplication(
+                aumid,
+                arguments,
+                ActivateOptions.None,
+                out processId
+            );
+
+            if (hr < 0)
+                Marshal.ThrowExceptionForHR(hr);
+
+            return processId;
+        }
+    }
+}
+"@
+  }
+
+  $arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$Port"
+  [CodexDeckActivation.Activator]::Launch($Aumid, $arguments)
 }
 
 function Get-CodexProcesses([string]$AppRoot) {
@@ -167,6 +246,7 @@ $existingPort = Get-HealthyDebugPort $processes
 if ($DryRun) {
   Write-Host "Codex version: $($codex.Version)"
   Write-Host "Executable: $($codex.Executable)"
+  Write-Host "AUMID: $($codex.Aumid)"
   Write-Host "Node: $(& $node.Source --version)"
   if ($existingPort) { Write-Host "Reusable debug port: $existingPort" }
   elseif ($processes.Count -gt 0) { Write-Host 'Codex is running without a reusable debug bridge; a restart is required.' }
@@ -198,10 +278,8 @@ if ($existingPort -and -not $ForceRestart) {
 }
 else {
   Write-Host "Starting Codex $($codex.Version) with a loopback-only bridge on port $port..."
-  Start-Process -FilePath $codex.Executable -ArgumentList @(
-    '--remote-debugging-address=127.0.0.1',
-    "--remote-debugging-port=$port"
-  )
+  $launchedPid = Start-CodexPackage $codex.Aumid $port
+  Write-Host "Codex package activated as PID $launchedPid."
 }
 
 $stateRoot = Join-Path $env:LOCALAPPDATA 'CodexDeck'

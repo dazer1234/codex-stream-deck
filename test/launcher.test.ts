@@ -50,6 +50,11 @@ test("startup monitoring survives Codex updates without duplicate watchers", asy
   assert.match(launcher, /Get-InstalledLauncherRoot/);
   assert.match(launcher, /Install-WatcherBundle/);
   assert.match(launcher, /LocalAppData.*CodexDeck.*launcher/is);
+  assert.match(launcher, /IApplicationActivationManager/);
+  assert.match(launcher, /ActivateApplication/);
+  assert.match(launcher, /PackageFamilyName/);
+  assert.match(launcher, /CodexDeckActivation\.Activator/);
+  assert.doesNotMatch(launcher, /Start-Process -FilePath \$codex\.Executable -ArgumentList/);
   assert.match(build, /Watch-CodexDeck\.ps1/);
   assert.match(build, /Configure-CodexDeckRelay\.ps1/);
   assert.match(build, /Configure-CodexDeckMobile\.ps1/);
@@ -78,6 +83,7 @@ test("launcher supports the current shared-chunk native detection path", () => {
   assert.match(expression, /codex-micro-device-state-changed/);
   assert.match(expression, /dispatchHostMessage/);
   assert.match(expression, /deviceEventDispatched/);
+  assert.match(expression, /app-shared/);
   assert.match(expression, /3207467860/);
 });
 
@@ -86,5 +92,6 @@ test("launcher verifies the settings gate and native Micro handlers", () => {
   assert.match(expression, /settings\/codex-micro/);
   assert.match(expression, /codex-micro-hid-event/);
   assert.match(expression, /codex-micro-joystick-event/);
+  assert.match(expression, /app-shared/);
   assert.match(expression, /nativeEventBus/);
 });
