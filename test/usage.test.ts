@@ -121,6 +121,6 @@ test("usage actions and property inspector are packaged without official keycap 
 
 test("relay accepts only the typed reset command", () => {
   assert.deepEqual(parseRelayCommand({ kind: "rate-limit-reset" }), { kind: "rate-limit-reset" });
-  assert.equal(parseRelayCommand({ kind: "rate-limit-reset", arbitrary: "ignored" })?.kind, "rate-limit-reset");
+  assert.equal(parseRelayCommand({ kind: "rate-limit-reset", arbitrary: "ignored" }), null);
   assert.equal(parseRelayCommand({ kind: "rate-limit-reset-now" }), null);
 });

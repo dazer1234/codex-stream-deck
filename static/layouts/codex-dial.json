@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "com.simeo.codex-deck.codex-dial.layout",
+  "items": [
+    { "key": "accent", "type": "bar", "rect": [8, 88, 184, 6], "value": 100, "range": { "min": 0, "max": 100 }, "bar_bg_c": "#242838", "bar_fill_c": "#7F8CFF", "border_w": 0 },
+    { "key": "title", "type": "text", "rect": [10, 5, 180, 20], "value": "CODEX", "font": { "size": 12, "weight": 600 }, "color": "#AEB7FF", "alignment": "center" },
+    { "key": "value", "type": "text", "rect": [8, 25, 184, 34], "value": "READY", "font": { "size": 24, "weight": 700 }, "color": "#F4F6FF", "alignment": "center" },
+    { "key": "detail", "type": "text", "rect": [8, 61, 184, 20], "value": "TURN OR PRESS", "font": { "size": 11, "weight": 500 }, "color": "#AAB0C2", "alignment": "center" },
+    { "key": "indicator", "type": "bar", "rect": [8, 82, 184, 4], "value": 0, "range": { "min": 0, "max": 100 }, "bar_bg_c": "#242838", "bar_fill_c": "#7F8CFF", "border_w": 0 }
+  ]
+}

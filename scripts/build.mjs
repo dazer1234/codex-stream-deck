@@ -14,9 +14,11 @@ for (const entry of await readdir(output)) {
 }
 await mkdir(resolve(output, "bin"), { recursive: true });
 await mkdir(resolve(output, "static/imgs"), { recursive: true });
+await mkdir(resolve(output, "static/layouts"), { recursive: true });
 await mkdir(resolve(output, "static/property-inspector"), { recursive: true });
 for (const filename of [
   "category-icon.svg", "category-icon@2x.svg",
+  "dial.svg", "dial@2x.svg",
   "key.svg", "key@2x.svg",
   "plugin-icon.png", "plugin-icon@2x.png"
 ]) {
@@ -25,6 +27,8 @@ for (const filename of [
 await cp(resolve("static/manifest.json"), resolve(output, "manifest.json"));
 await cp(resolve("static/property-inspector/usage-limit.html"), resolve(output, "static/property-inspector/usage-limit.html"));
 await cp(resolve("static/property-inspector/agent.html"), resolve(output, "static/property-inspector/agent.html"));
+await cp(resolve("static/property-inspector/codex-dial.html"), resolve(output, "static/property-inspector/codex-dial.html"));
+await cp(resolve("static/layouts/codex-dial.json"), resolve(output, "static/layouts/codex-dial.json"));
 
 await build({
   entryPoints: [resolve("src/plugin.ts")],

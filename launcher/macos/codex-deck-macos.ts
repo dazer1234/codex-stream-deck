@@ -16,6 +16,7 @@ import {
 import { applyRuntimeOverride, verifyMicroRuntime } from "../runtime-override.js";
 import {
   createWatcherPolicyState,
+  DEFAULT_RECOVERY_COMPLETION_MS,
   evaluateWatcherPolicy,
   resumeWatcherPolicyState,
   type WatcherPolicyState
@@ -30,6 +31,8 @@ const WATCHER_STATE_PATH = join(STATE_ROOT, "watcher-state.json");
 const WATCHER_LOG_PATH = join(STATE_ROOT, "watcher.log");
 const WATCHER_STDERR_PATH = join(STATE_ROOT, "watcher.stderr.log");
 const WATCHER_LOCK_PATH = join(STATE_ROOT, "watcher.lock");
+const RESTART_HANDOFF_ROOT = join(STATE_ROOT, "restart-handoffs");
+const RESTART_HANDOFF_LOCK_PATH = join(RESTART_HANDOFF_ROOT, "active.lock");
 const RELAY_SERVER_CONFIG_PATH = join(STATE_ROOT, "relay-server.json");
 const MOBILE_LOCAL_CONFIG_PATH = join(STATE_ROOT, LOCAL_MOBILE_CONFIG);
 const INSTALLED_RUNTIME_PATH = join(STATE_ROOT, "codex-deck-macos.mjs");
@@ -37,6 +40,8 @@ const WATCHER_LAUNCHER_PATH = join(STATE_ROOT, "watcher-launch.sh");
 const LAUNCH_AGENT_PATH = join(homedir(), "Library", "LaunchAgents", `${AGENT_LABEL}.plist`);
 const POLL_MS = 1_000;
 const LOG_LIMIT_BYTES = 1_000_000;
+const CODEX_TERMINATION_TIMEOUT_MS = 15_000;
+const WATCHER_RECOVERY_LAUNCH_MARGIN_MS = 2_000;
 
 type CodexInstallation = {
   appPath: string;
@@ -64,6 +69,49 @@ type BridgeState = HostState & {
   codexVersion: string;
 };
 
+export type RestartHandoffRequest = {
+  operationId: string;
+  expectedPid: number;
+  expectedGeneration: string;
+  expectedAppPath: string;
+  expectedExecutablePath: string;
+  requestedAt: string;
+};
+
+type RestartAuthorization = Pick<
+  RestartHandoffRequest,
+  "expectedGeneration" | "expectedAppPath" | "expectedExecutablePath"
+> & { requireLiveProcess?: true; restartDeadline?: number };
+
+export function buildWatcherRecoveryAuthorization(
+  main: {
+    generation: string;
+    startedAt: string;
+    installation: Pick<CodexInstallation, "appPath" | "executablePath">;
+  } | null,
+  expectedGeneration: string
+): RestartAuthorization {
+  if (!main) throw new Error("Codex is no longer running; startup recovery was cancelled.");
+  if (main.generation !== expectedGeneration) {
+    throw new Error("Codex generation changed before startup recovery; the stale recovery was cancelled.");
+  }
+  const startedAt = parseProcessStartedAt(main.startedAt);
+  if (startedAt == null) throw new Error("Codex start time is invalid; startup recovery was cancelled.");
+  return {
+    expectedGeneration,
+    expectedAppPath: main.installation.appPath,
+    expectedExecutablePath: main.installation.executablePath,
+    requireLiveProcess: true,
+    restartDeadline: startedAt + DEFAULT_RECOVERY_COMPLETION_MS
+  };
+}
+
+type RestartHandoffStatus = RestartHandoffRequest & {
+  status: "accepted" | "running" | "completed" | "rejected" | "failed";
+  updatedAt: string;
+  detail?: string;
+};
+
 function run(command: string, args: string[], options: { allowFailure?: boolean } = {}): string {
   const result = spawnSync(command, args, { encoding: "utf8" });
   if (result.status !== 0 && !options.allowFailure) {
@@ -75,11 +123,6 @@ function run(command: string, args: string[], options: { allowFailure?: boolean 
 
 function plistValue(infoPath: string, key: string): string {
   return run("/usr/bin/plutil", ["-extract", key, "raw", "-o", "-", infoPath]);
-}
-
-async function isDirectory(path: string): Promise<boolean> {
-  try { return (await stat(path)).isDirectory(); }
-  catch { return false; }
 }
 
 function parseProcessRows(output: string): Array<{ pid: number; ppid: number; startedAt: string; command: string }> {
@@ -137,39 +180,61 @@ async function standardAppCandidates(): Promise<string[]> {
 
 export async function discoverCodexInstallation(): Promise<CodexInstallation> {
   if (platform() !== "darwin") throw new Error("The macOS launcher only runs on macOS.");
-  const candidates: string[] = [];
-  if (process.env.CODEX_DECK_APP_PATH) candidates.push(resolve(process.env.CODEX_DECK_APP_PATH));
-
-  for (const row of processRows()) {
-    if (row.ppid !== 1) continue;
-    const appPath = appPathFromExecutable(row.command);
-    if (appPath) candidates.push(appPath);
-  }
-
-  const spotlight = run("/usr/bin/mdfind", [`kMDItemCFBundleIdentifier == '${CODEX_BUNDLE_ID}'`], { allowFailure: true });
-  if (spotlight) candidates.push(...spotlight.split("\n").filter((path) => path.endsWith(".app")));
-  candidates.push(...await standardAppCandidates());
-
-  const installations: CodexInstallation[] = [];
-  for (const candidate of [...new Set(candidates)]) {
-    if (!await isDirectory(candidate)) continue;
-    const installation = await installationFromApp(candidate);
-    if (installation) installations.push(installation);
-  }
-  if (installations.length === 0) {
-    throw new Error(`No installed Codex app with bundle identifier ${CODEX_BUNDLE_ID} was found.`);
-  }
-
-  const runningPaths = new Set(processRows().filter((row) => row.ppid === 1).map((row) => appPathFromExecutable(row.command)));
-  installations.sort((left, right) => {
-    const running = Number(runningPaths.has(right.appPath)) - Number(runningPaths.has(left.appPath));
-    return running || right.version.localeCompare(left.version, undefined, { numeric: true });
+  const runningPaths = processRows().filter((row) => row.ppid === 1)
+    .map((row) => appPathFromExecutable(row.command)).filter((path): path is string => path != null);
+  return await selectCodexInstallation(runningPaths, installationFromApp, async () => {
+    const candidates: string[] = [];
+    if (process.env.CODEX_DECK_APP_PATH) candidates.push(resolve(process.env.CODEX_DECK_APP_PATH));
+    const spotlight = run("/usr/bin/mdfind", [`kMDItemCFBundleIdentifier == '${CODEX_BUNDLE_ID}'`], { allowFailure: true });
+    if (spotlight) candidates.push(...spotlight.split("\n").filter((path) => path.endsWith(".app")));
+    candidates.push(...await standardAppCandidates());
+    return candidates;
   });
-  return installations[0]!;
 }
 
-function findMainProcess(installation: CodexInstallation): MainProcess | null {
-  const row = processRows().find((candidate) =>
+export async function selectCodexInstallation(
+  runningAppPaths: string[],
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null>,
+  fallbackAppPaths: () => Promise<string[]>
+): Promise<CodexInstallation> {
+  const running = await selectNewestInstallation(runningAppPaths, readInstallation);
+  // A validated running installation already outranks every stopped app.
+  // Never spend a startup recovery window on Spotlight/all-app enumeration.
+  if (running) return running;
+  const visited = new Set(runningAppPaths);
+  const fallback = await selectNewestInstallation(
+    (await fallbackAppPaths()).filter((path) => !visited.has(path)), readInstallation
+  );
+  if (!fallback) throw new Error(`No installed Codex app with bundle identifier ${CODEX_BUNDLE_ID} was found.`);
+  return fallback;
+}
+
+async function selectNewestInstallation(
+  appPaths: string[],
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null>
+): Promise<CodexInstallation | null> {
+  const installations: CodexInstallation[] = [];
+  for (const candidate of new Set(appPaths)) {
+    const installation = await readInstallation(candidate);
+    if (installation) installations.push(installation);
+  }
+  installations.sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true }));
+  return installations[0] ?? null;
+}
+
+export async function observeRunningCodex(
+  rows = processRows(),
+  readInstallation: (appPath: string) => Promise<CodexInstallation | null> = installationFromApp
+): Promise<{ installation: CodexInstallation | null; main: MainProcess | null }> {
+  const runningPaths = rows.filter((row) => row.ppid === 1)
+    .map((row) => appPathFromExecutable(row.command)).filter((path): path is string => path != null);
+  const installation = await selectNewestInstallation(runningPaths, readInstallation);
+  const main = installation ? findMainProcessInRows(installation, rows) : null;
+  return main ? { installation, main } : { installation: null, main: null };
+}
+
+function findMainProcessInRows(installation: CodexInstallation, rows: ReturnType<typeof processRows>): MainProcess | null {
+  const row = rows.find((candidate) =>
     candidate.ppid === 1 &&
     (candidate.command === installation.executablePath || candidate.command.startsWith(`${installation.executablePath} `))
   );
@@ -179,6 +244,30 @@ function findMainProcess(installation: CodexInstallation): MainProcess | null {
     generation: `${row.pid}:${row.startedAt}:${installation.executablePath}`,
     installation
   };
+}
+
+function findMainProcess(installation: CodexInstallation): MainProcess | null {
+  return findMainProcessInRows(installation, processRows());
+}
+
+export function parseProcessStartedAt(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function runningCodexMains(): Promise<MainProcess[]> {
+  const rows = processRows();
+  const mains: MainProcess[] = [];
+  for (const row of rows) {
+    if (row.ppid !== 1) continue;
+    const appPath = appPathFromExecutable(row.command);
+    if (!appPath) continue;
+    const installation = await installationFromApp(appPath);
+    if (!installation) continue;
+    const main = findMainProcessInRows(installation, [row]);
+    if (main) mains.push(main);
+  }
+  return mains;
 }
 
 export function parseDebugPort(command: string): number | null {
@@ -298,6 +387,31 @@ export function buildCodexLaunchSpec(installation: Pick<CodexInstallation, "appP
   };
 }
 
+export function buildCodexRestartHandoffSpec(
+  runtimePath: string,
+  expectedPid: number,
+  executable = process.execPath,
+  operationId?: string
+): { command: string; args: string[]; options: { detached: true; stdio: "ignore" } } {
+  if (!Number.isSafeInteger(expectedPid) || expectedPid < 1) throw new Error(`Invalid Codex process ID: ${expectedPid}`);
+  return {
+    command: executable,
+    args: [runtimePath, "restart-handoff", String(expectedPid), ...(operationId ? [operationId] : [])],
+    options: { detached: true, stdio: "ignore" }
+  };
+}
+
+export async function spawnDetachedRestartHandoff(
+  spec: ReturnType<typeof buildCodexRestartHandoffSpec>
+): Promise<void> {
+  const child = spawn(spec.command, spec.args, spec.options);
+  await new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("spawn", resolveSpawn);
+    child.once("error", rejectSpawn);
+  });
+  child.unref();
+}
+
 async function launchCodex(installation: CodexInstallation, port: number): Promise<void> {
   // Launch through LaunchServices so macOS associates TCC/Input Monitoring
   // state with the signed app bundle, while still passing Electron's CDP flags.
@@ -308,13 +422,169 @@ async function launchCodex(installation: CodexInstallation, port: number): Promi
 
 async function terminateCodex(main: MainProcess): Promise<void> {
   process.kill(main.pid, "SIGTERM");
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + CODEX_TERMINATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try { process.kill(main.pid, 0); }
     catch { return; }
     await delay(250);
   }
   throw new Error(`Codex main process ${main.pid} did not exit after SIGTERM; it was not force-killed.`);
+}
+
+function restartHandoffStatusPath(operationId: string): string {
+  if (!/^[0-9a-f-]{36}$/i.test(operationId)) throw new Error("Invalid restart handoff operation ID.");
+  return join(RESTART_HANDOFF_ROOT, `${operationId}.json`);
+}
+
+async function writeRestartHandoffStatus(
+  statusPath: string,
+  request: RestartHandoffRequest,
+  status: RestartHandoffStatus["status"],
+  detail?: string
+): Promise<void> {
+  await atomicWriteJson(statusPath, {
+    ...request,
+    status,
+    updatedAt: new Date().toISOString(),
+    ...(detail ? { detail } : {})
+  } satisfies RestartHandoffStatus);
+}
+
+export async function runExclusiveRestartHandoff(
+  request: RestartHandoffRequest,
+  paths: { lockPath: string; statusPath: string },
+  execute: () => Promise<void>
+): Promise<number> {
+  const release = await acquirePidLock(paths.lockPath);
+  if (!release) {
+    await writeRestartHandoffStatus(paths.statusPath, request, "rejected", "Another explicit Codex restart is already running.");
+    return 3;
+  }
+  try {
+    await writeRestartHandoffStatus(paths.statusPath, request, "running");
+    await execute();
+    await writeRestartHandoffStatus(paths.statusPath, request, "completed");
+    return 0;
+  } catch (error) {
+    await writeRestartHandoffStatus(paths.statusPath, request, "failed", String(error));
+    throw error;
+  } finally {
+    await release();
+  }
+}
+
+export function assertAuthorizedRestartGeneration(
+  main: Pick<MainProcess, "generation"> | null,
+  expectedGeneration: string
+): void {
+  if (main && main.generation !== expectedGeneration) {
+    throw new Error("Codex changed before the explicit restart; the stale restart handoff was cancelled.");
+  }
+}
+
+export function assertAuthorizedRestartReady(
+  main: Pick<MainProcess, "generation"> | null,
+  authorization: Pick<RestartAuthorization, "expectedGeneration" | "requireLiveProcess" | "restartDeadline">,
+  now = Date.now()
+): void {
+  assertAuthorizedRestartGeneration(main, authorization.expectedGeneration);
+  if (authorization.requireLiveProcess && !main) {
+    throw new Error("Codex is no longer running; startup recovery was cancelled.");
+  }
+  if (authorization.restartDeadline != null && now > authorization.restartDeadline) {
+    throw new Error("Codex startup window expired; startup recovery was cancelled.");
+  }
+}
+
+function assertAuthorizedRestartDeadline(
+  authorization: Pick<RestartAuthorization, "restartDeadline">,
+  now: number
+): void {
+  if (authorization.restartDeadline != null && now > authorization.restartDeadline) {
+    throw new Error("Codex startup window expired; startup recovery was cancelled.");
+  }
+}
+
+export async function runGuardedWatcherRecovery(
+  main: Pick<MainProcess, "generation">,
+  authorization: RestartAuthorization,
+  operations: {
+    now: () => number;
+    terminate: () => Promise<void>;
+    confirmAbsent: () => Promise<void>;
+    launch: () => Promise<void>;
+  }
+): Promise<void> {
+  const startedAt = operations.now();
+  assertAuthorizedRestartReady(main, authorization, startedAt);
+  const minimumRemaining = CODEX_TERMINATION_TIMEOUT_MS + WATCHER_RECOVERY_LAUNCH_MARGIN_MS;
+  if (authorization.restartDeadline == null || authorization.restartDeadline - startedAt < minimumRemaining) {
+    throw new Error("Codex startup recovery has insufficient time remaining; recovery was cancelled.");
+  }
+  await operations.terminate();
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  await operations.confirmAbsent();
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  assertAuthorizedRestartDeadline(authorization, operations.now());
+  await operations.launch();
+}
+
+export function assertAuthorizedRestartInstallation(
+  installation: Pick<CodexInstallation, "appPath" | "executablePath">,
+  authorization: Pick<RestartAuthorization, "expectedAppPath" | "expectedExecutablePath">
+): void {
+  if (
+    installation.appPath !== authorization.expectedAppPath ||
+    installation.executablePath !== authorization.expectedExecutablePath
+  ) {
+    throw new Error("The Codex installation changed before the explicit restart; the stale restart handoff was cancelled.");
+  }
+}
+
+async function authorizedRestartInstallation(authorization: RestartAuthorization): Promise<CodexInstallation> {
+  const installation = await installationFromApp(authorization.expectedAppPath);
+  if (!installation) throw new Error("The authorized Codex installation is no longer available.");
+  assertAuthorizedRestartInstallation(installation, authorization);
+  return installation;
+}
+
+async function liveAuthorizedRestartMain(
+  authorization: RestartAuthorization,
+  allowMissingAfterTermination = false
+): Promise<{ installation: CodexInstallation; main: MainProcess | null }> {
+  const observedMains = await runningCodexMains();
+  if (observedMains.length > 1) {
+    throw new Error("Multiple Codex processes appeared before the explicit restart; the handoff was cancelled.");
+  }
+  const observedMain = observedMains[0];
+  if (observedMain) {
+    assertAuthorizedRestartInstallation(observedMain.installation, authorization);
+    assertAuthorizedRestartReady(observedMain, authorization);
+    return { installation: observedMain.installation, main: observedMain };
+  }
+  if (!allowMissingAfterTermination) assertAuthorizedRestartReady(null, authorization);
+  return { installation: await authorizedRestartInstallation(authorization), main: null };
+}
+
+async function handoffCodexRestart(main: MainProcess): Promise<{ operationId: string; statusPath: string }> {
+  const request: RestartHandoffRequest = {
+    operationId: randomUUID(),
+    expectedPid: main.pid,
+    expectedGeneration: main.generation,
+    expectedAppPath: main.installation.appPath,
+    expectedExecutablePath: main.installation.executablePath,
+    requestedAt: new Date().toISOString()
+  };
+  const statusPath = restartHandoffStatusPath(request.operationId);
+  await writeRestartHandoffStatus(statusPath, request, "accepted");
+  const spec = buildCodexRestartHandoffSpec(builtRuntimeSource(), main.pid, process.execPath, request.operationId);
+  try {
+    await spawnDetachedRestartHandoff(spec);
+  } catch (error) {
+    await writeRestartHandoffStatus(statusPath, request, "failed", `Restart helper did not start: ${String(error)}`);
+    throw error;
+  }
+  return { operationId: request.operationId, statusPath };
 }
 
 const delay = (milliseconds: number) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -396,17 +666,39 @@ async function runWatcher(): Promise<number> {
   await log("Watcher started.");
   let policy = resumeWatcherPolicyState(await readJson<WatcherPolicyState>(WATCHER_STATE_PATH));
   let enabledSignature = "";
+  let decisionSignature = "";
+  let previousObservationAt: number | null = null;
   try {
     while (true) {
       try {
-        const installation = await discoverCodexInstallation();
-        const main = findMainProcess(installation);
+        // Closed-app observations must not wait for Spotlight or stopped apps.
+        const { installation, main } = await observeRunningCodex();
         const port = await healthyDebugPort(main);
+        const now = Date.now();
+        const startedAt = main ? parseProcessStartedAt(main.startedAt) : null;
         const decision = evaluateWatcherPolicy(policy, {
-          now: Date.now(), generation: main?.generation ?? null, bridgeHealthy: port != null
+          now, generation: main?.generation ?? null, bridgeHealthy: port != null, startedAt
         });
+        const nextDecisionSignature = JSON.stringify([decision.action, main?.generation ?? null]);
+        if (nextDecisionSignature !== decisionSignature) {
+          await log(`Watcher decision: ${JSON.stringify({
+            ...decision.action, pid: main?.pid ?? null,
+            processAgeMs: startedAt == null ? null : now - startedAt,
+            observationIntervalMs: previousObservationAt == null ? null : now - previousObservationAt
+          })}`);
+          decisionSignature = nextDecisionSignature;
+        }
+        previousObservationAt = now;
         policy = decision.state;
         await atomicWriteJson(WATCHER_STATE_PATH, policy);
+
+        if (decision.action.type === "recover-bridge") {
+          const authorization = buildWatcherRecoveryAuthorization(main, decision.action.generation);
+          await log(`Recovering a newly opened Codex session without a loopback bridge (${decision.action.generation}).`);
+          await startOnce(true, authorization);
+          await log(`Startup bridge recovery completed for ${decision.action.generation}.`);
+          continue;
+        }
 
         const relayConfig = await readJson<RelayServerConfig>(RELAY_SERVER_CONFIG_PATH);
         const mobileLocalConfig = await readJson<RelayServerConfig>(MOBILE_LOCAL_CONFIG_PATH);
@@ -428,7 +720,7 @@ async function runWatcher(): Promise<number> {
             if (relayConfig?.enabled) {
               relayServer = new CodexRelayServer(
                 relayConfig,
-                { ...identity, platform: "darwin", codexVersion: installation.version },
+                { ...identity, platform: "darwin", codexVersion: installation?.version },
                 relayControl, safeLog
               );
               await relayServer.start();
@@ -436,7 +728,7 @@ async function runWatcher(): Promise<number> {
             if (mobileLocalConfig?.enabled) {
               mobileLocalRelayServer = new CodexRelayServer(
                 mobileLocalConfig,
-                { ...identity, platform: "darwin", codexVersion: installation.version }, relayControl,
+                { ...identity, platform: "darwin", codexVersion: installation?.version }, relayControl,
                 (message) => safeLog(`Nearby mobile relay: ${message}`)
               );
               await mobileLocalRelayServer.start();
@@ -445,7 +737,7 @@ async function runWatcher(): Promise<number> {
           relaySignature = nextRelaySignature;
         }
         const relayHost = {
-          ...await hostState(), platform: "darwin" as const, codexVersion: installation.version
+          ...await hostState(), platform: "darwin" as const, codexVersion: installation?.version
         };
         relayServer?.updateHost(relayHost);
         mobileLocalRelayServer?.updateHost(relayHost);
@@ -453,19 +745,13 @@ async function runWatcher(): Promise<number> {
         if (port != null) {
           const signature = `${main!.generation}:${port}`;
           if (signature !== enabledSignature) {
-            const result = await enableBridge(installation, port);
+            const result = await enableBridge(installation!, port);
             enabledSignature = signature;
             await log(`Reused healthy loopback bridge on port ${port}: ${JSON.stringify(result.verification)}`);
           }
         } else {
           enabledSignature = "";
           await removeStaleBridgeState(null, log);
-          if (decision.action.type === "restart-for-recovery" && main) {
-            await log(`Recovering Codex bridge once for generation ${main.generation} (${decision.action.reason}).`);
-            await terminateCodex(main);
-            const refreshed = await discoverCodexInstallation();
-            await launchCodex(refreshed, await chooseLoopbackPort());
-          }
         }
       } catch (error) {
         await log(`Watcher iteration failed: ${String(error)}`);
@@ -484,28 +770,101 @@ set -u
 
 runtime=${shellQuote(runtimePath)}
 typeset -a candidates
-candidates=(/opt/homebrew/bin/node /usr/local/bin/node)
+candidates=(
+  /opt/homebrew/bin/node
+  /usr/local/bin/node
+  /Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/Codex.app/Contents/Resources/cua_node/bin/node
+  "$HOME"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
+)
 for node_candidate in "$HOME"/.nvm/versions/node/*/bin/node(N); do
   candidates+=("$node_candidate")
 done
-for app_candidate in \${(f)"$(/usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' 2>/dev/null)"}; do
-  candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
-done
+
+launch_with_node() {
+  local node_candidate="$1"
+  local node_version node_major
+  [[ -x "$node_candidate" ]] || return 0
+  node_version=$("$node_candidate" --version 2>/dev/null) || return 0
+  node_major=\${\${node_version#v}%%.*}
+  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || return 0
+  exec "$node_candidate" "$runtime" watch
+}
 
 for node_candidate in "\${candidates[@]}"; do
-  [[ -x "$node_candidate" ]] || continue
-  node_version=$("$node_candidate" --version 2>/dev/null) || continue
-  node_major=\${\${node_version#v}%%.*}
-  [[ "$node_major" == <-> && "$node_major" -ge 20 ]] || continue
-  exec "$node_candidate" "$runtime" watch
+  launch_with_node "$node_candidate"
 done
+
+spotlight_pid=""
+spotlight_results=""
+cleanup_spotlight() {
+  trap - TERM INT HUP EXIT
+  if [[ -n "$spotlight_pid" ]] && /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  if [[ -n "$spotlight_pid" ]]; then
+    wait "$spotlight_pid" 2>/dev/null
+    spotlight_pid=""
+  fi
+  if [[ -n "$spotlight_results" ]]; then
+    /bin/rm -f "$spotlight_results"
+    spotlight_results=""
+  fi
+}
+trap 'cleanup_spotlight; exit 143' TERM
+trap 'cleanup_spotlight; exit 130' INT
+trap 'cleanup_spotlight; exit 129' HUP
+trap cleanup_spotlight EXIT
+
+spotlight_results=$(/usr/bin/mktemp "\${TMPDIR:-/tmp}/codex-deck-mdfind.XXXXXX" 2>/dev/null) || spotlight_results=""
+if [[ -n "$spotlight_results" ]]; then
+  /usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' > "$spotlight_results" 2>/dev/null &
+  spotlight_pid=$!
+  typeset -i spotlight_checks=0
+  while /bin/kill -0 "$spotlight_pid" 2>/dev/null && (( spotlight_checks < 20 )); do
+    /bin/sleep 0.1
+    (( spotlight_checks += 1 ))
+  done
+  if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+    /bin/kill -TERM "$spotlight_pid" 2>/dev/null
+    /bin/sleep 0.1
+    if /bin/kill -0 "$spotlight_pid" 2>/dev/null; then
+      /bin/kill -KILL "$spotlight_pid" 2>/dev/null
+    fi
+  fi
+  wait "$spotlight_pid" 2>/dev/null
+  spotlight_status=$?
+  spotlight_pid=""
+  typeset -a spotlight_candidates
+  spotlight_candidates=()
+  if [[ "$spotlight_status" -eq 0 ]]; then
+    while IFS= read -r app_candidate; do
+      [[ -n "$app_candidate" ]] || continue
+      spotlight_candidates+=("$app_candidate/Contents/Resources/cua_node/bin/node")
+    done < "$spotlight_results"
+  fi
+  /bin/rm -f "$spotlight_results"
+  spotlight_results=""
+  for node_candidate in "\${spotlight_candidates[@]}"; do
+    launch_with_node "$node_candidate"
+  done
+fi
+trap - TERM INT HUP EXIT
 
 print -r -- "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ) [launcher] Node.js 20 or newer was not found; watcher did not start." >> ${shellQuote(WATCHER_LOG_PATH)}
 exit 78
 `;
 }
 
-export function buildLaunchAgentPlist(watcherLauncherPath = WATCHER_LAUNCHER_PATH): string {
+export function buildLaunchAgentPlist(
+  runtimePath = INSTALLED_RUNTIME_PATH,
+  nodePath = selectLaunchAgentNodePath()
+): string {
   const xml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -515,15 +874,14 @@ export function buildLaunchAgentPlist(watcherLauncherPath = WATCHER_LAUNCHER_PAT
   <string>${AGENT_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>${xml(watcherLauncherPath)}</string>
+    <string>${xml(nodePath)}</string>
+    <string>${xml(runtimePath)}</string>
+    <string>watch</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
@@ -533,6 +891,31 @@ export function buildLaunchAgentPlist(watcherLauncherPath = WATCHER_LAUNCHER_PAT
 </dict>
 </plist>
 `;
+}
+
+type NodeVersionProbe = (candidate: string) => string | null;
+
+function probeNodeVersion(candidate: string): string | null {
+  const result = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 2_000 });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+export function selectLaunchAgentNodePath(
+  candidates = [
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+    "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+    process.execPath
+  ],
+  probe: NodeVersionProbe = probeNodeVersion
+): string {
+  for (const candidate of [...new Set(candidates)]) {
+    const version = probe(candidate);
+    const major = Number.parseInt(version?.match(/^v(\d+)\./)?.[1] ?? "", 10);
+    if (Number.isInteger(major) && major >= 20) return candidate;
+  }
+  throw new Error("Node.js 20 or newer was not found for the Codex Deck LaunchAgent.");
 }
 
 function builtRuntimeSource(): string {
@@ -557,8 +940,8 @@ async function installLaunchAgent(): Promise<void> {
   await copyFile(source, temporaryRuntime);
   await chmod(temporaryRuntime, 0o700);
   await rename(temporaryRuntime, INSTALLED_RUNTIME_PATH);
-  await atomicWrite(WATCHER_LAUNCHER_PATH, buildWatcherLaunchScript(), 0o700);
   await atomicWrite(LAUNCH_AGENT_PATH, buildLaunchAgentPlist(), 0o644);
+  await rm(WATCHER_LAUNCHER_PATH, { force: true });
   await hostState();
   run("/bin/launchctl", ["bootout", `gui/${currentUserId()}`, LAUNCH_AGENT_PATH], { allowFailure: true });
   run("/bin/launchctl", ["bootstrap", `gui/${currentUserId()}`, LAUNCH_AGENT_PATH]);
@@ -577,6 +960,7 @@ async function uninstallLaunchAgent(): Promise<void> {
     await rm(path, { force: true });
   }
   await rm(WATCHER_LOCK_PATH, { recursive: true, force: true });
+  await rm(RESTART_HANDOFF_ROOT, { recursive: true, force: true });
   console.log("Codex Deck LaunchAgent and Nearby credentials removed. host.json and the icons directory were preserved.");
 }
 
@@ -637,27 +1021,101 @@ async function disableMobileLocal(): Promise<void> {
   console.log("Nearby iPhone node disabled. The watcher will stop advertising it without restarting Codex.");
 }
 
-async function startOnce(allowRestart: boolean): Promise<number> {
-  let installation = await discoverCodexInstallation();
+async function startOnce(allowRestart: boolean, authorization?: RestartAuthorization): Promise<number> {
+  let installation = authorization
+    ? await authorizedRestartInstallation(authorization)
+    : await discoverCodexInstallation();
   const main = findMainProcess(installation);
+  if (authorization) assertAuthorizedRestartReady(main, authorization);
   let port = await healthyDebugPort(main);
   if (main && !port && !allowRestart) {
     console.error("Codex is already running without a reusable loopback bridge.");
     console.error("A restart requires explicit permission. Re-run with --restart only after saving unsent composer text.");
     return 2;
   }
+  if (main && !port && allowRestart && !authorization) {
+    const handoff = await handoffCodexRestart(main);
+    console.log(`Codex Deck restart accepted as ${handoff.operationId}; completion will be recorded in ${handoff.statusPath}.`);
+    return 0;
+  }
+  if (main && !port && authorization?.requireLiveProcess) {
+    port = await chooseLoopbackPort();
+    let recoveryInstallation = installation;
+    await runGuardedWatcherRecovery(main, authorization, {
+      now: Date.now,
+      terminate: async () => { await terminateCodex(main); },
+      confirmAbsent: async () => {
+        recoveryInstallation = await authorizedRestartInstallation(authorization);
+        const live = await liveAuthorizedRestartMain(authorization, true);
+        if (live.main) throw new Error("The authorized Codex process is still running; startup recovery was cancelled.");
+        const immediateMain = findMainProcess(recoveryInstallation);
+        assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+        if (immediateMain) throw new Error("The authorized Codex process reappeared; startup recovery was cancelled.");
+      },
+      launch: async () => { await launchCodex(recoveryInstallation, port!); }
+    });
+    const result = await enableBridge(recoveryInstallation, port);
+    console.log(`Codex Deck ready on 127.0.0.1:${port}.`);
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
   if (main && !port) {
-    await terminateCodex(main);
-    installation = await discoverCodexInstallation();
+    const live = authorization
+      ? await liveAuthorizedRestartMain(authorization)
+      : { installation, main };
+    const immediateMain = authorization ? findMainProcess(live.installation) : live.main;
+    if (authorization) assertAuthorizedRestartReady(immediateMain, authorization);
+    if (immediateMain) await terminateCodex(immediateMain);
+    installation = authorization
+      ? await authorizedRestartInstallation(authorization)
+      : await discoverCodexInstallation();
   }
   if (!port) {
     port = await chooseLoopbackPort();
+    if (authorization) {
+      installation = await authorizedRestartInstallation(authorization);
+      const live = await liveAuthorizedRestartMain(authorization, true);
+      if (live.main) throw new Error("The authorized Codex process is still running; a duplicate launch was cancelled.");
+      const immediateMain = findMainProcess(installation);
+      assertAuthorizedRestartGeneration(immediateMain, authorization.expectedGeneration);
+      if (immediateMain) throw new Error("The authorized Codex process reappeared; a duplicate launch was cancelled.");
+    }
     await launchCodex(installation, port);
   }
   const result = await enableBridge(installation, port);
   console.log(`Codex Deck ready on 127.0.0.1:${port}.`);
   console.log(JSON.stringify(result, null, 2));
   return 0;
+}
+
+async function resumeRestartHandoff(expectedPidValue: string | undefined, operationIdValue: string | undefined): Promise<number> {
+  const expectedPid = Number(expectedPidValue);
+  if (!Number.isSafeInteger(expectedPid) || expectedPid < 1) throw new Error(`Invalid Codex process ID: ${expectedPidValue ?? "missing"}`);
+  const operationId = operationIdValue ?? "";
+  const statusPath = restartHandoffStatusPath(operationId);
+  const request = await readJson<RestartHandoffRequest>(statusPath);
+  if (
+    !request || request.operationId !== operationId || request.expectedPid !== expectedPid ||
+    typeof request.expectedGeneration !== "string" || request.expectedGeneration.length === 0 ||
+    typeof request.expectedAppPath !== "string" || request.expectedAppPath.length === 0 ||
+    typeof request.expectedExecutablePath !== "string" || request.expectedExecutablePath.length === 0 ||
+    typeof request.requestedAt !== "string" || request.requestedAt.length === 0
+  ) {
+    throw new Error("Restart handoff request is missing or invalid.");
+  }
+  await log(`Explicit restart handoff ${operationId} accepted for Codex process ${expectedPid}.`);
+  try {
+    const code = await runExclusiveRestartHandoff(
+      request,
+      { lockPath: RESTART_HANDOFF_LOCK_PATH, statusPath },
+      async () => { await startOnce(true, request); }
+    );
+    await log(`Explicit restart handoff ${operationId} finished with exit code ${code}.`);
+    return code;
+  } catch (error) {
+    await log(`Explicit restart handoff ${operationId} failed: ${String(error)}`);
+    throw error;
+  }
 }
 
 async function selfTest(): Promise<void> {
@@ -672,10 +1130,10 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a new process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_001, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a stable new process can be recovered once");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a stable new process remains degraded without a restart");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 61_000, generation: "C", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "the global circuit breaker blocks a new-generation restart loop");
+  assert.equal(result.action.type, "wait", "a new generation also remains untouched");
 
   state = createWatcherPolicyState(0);
   result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
@@ -690,13 +1148,34 @@ async function selfTest(): Promise<void> {
   assert.equal(result.action.type, "wait", "a replacement process must remain stable before recovery");
   state = result.state;
   result = evaluateWatcherPolicy(state, { now: 30_000, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a previous healthy bridge recovers after a stable replacement");
+  assert.deepEqual(result.action, { type: "wait", reason: "bridge-unavailable-degraded" }, "a previous healthy bridge never authorizes background restart");
 
   state = createWatcherPolicyState(0);
-  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
+  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false, startedAt: null });
   state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 2_000, generation: "RACE", bridgeHealthy: false });
-  assert.equal(result.action.type, "preserve-initial-session", "LaunchAgent startup race preserves the first normal session");
+  result = evaluateWatcherPolicy(state, {
+    now: 2_000, generation: "RACE", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(result.action, { type: "wait", reason: "launch-agent-startup-grace" },
+    "a newly opened normal session waits for the stability window");
+  state = result.state;
+  result = evaluateWatcherPolicy(state, {
+    now: 12_000, generation: "RACE", bridgeHealthy: false, startedAt: 2_000
+  });
+  assert.deepEqual(result.action, { type: "recover-bridge", generation: "RACE" },
+    "a stable newly opened session receives one startup-only recovery");
+
+  const guardedRecovery: RestartAuthorization = {
+    expectedGeneration: "RACE",
+    expectedAppPath: "/Applications/Codex.app",
+    expectedExecutablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    requireLiveProcess: true,
+    restartDeadline: 30_000
+  };
+  assert.throws(() => assertAuthorizedRestartReady(null, guardedRecovery, 20_000),
+    /no longer running/, "startup recovery never reopens a session the user closed");
+  assert.throws(() => assertAuthorizedRestartReady({ generation: "RACE" }, guardedRecovery, 30_001),
+    /startup window expired/, "startup recovery never crosses its deadline");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-deck-self-test-"));
   const lockPath = join(temporaryRoot, "watcher.lock");
@@ -716,7 +1195,7 @@ async function selfTest(): Promise<void> {
 
   assert.equal(isBridgeStateStale(70_000, null), true, "stale/invalid port state is rejected");
   assert.equal(isBridgeStateStale(43123, 43123), false, "the active bridge state is retained");
-  console.log("macOS self-test passed: safe recovery, circuit-breaker, race, stale-state, and single-instance scenarios.");
+  console.log("macOS self-test passed: non-destructive degradation, race, stale-state, and single-instance scenarios.");
 }
 
 async function main(): Promise<number> {
@@ -736,6 +1215,7 @@ async function main(): Promise<number> {
   }
   if (command === "mobile-local-disable") { await disableMobileLocal(); return 0; }
   if (command === "watch") return await runWatcher();
+  if (command === "restart-handoff") return await resumeRestartHandoff(process.argv[3], process.argv[4]);
   if (command === "start") return await startOnce(process.argv.includes("--restart"));
   if (command === "--restart") return await startOnce(true);
   throw new Error("Usage: start-codex-deck.sh [start [--restart]|dry-run|self-test|install|uninstall|watch|relay-config <127.0.0.1-or-tailscale-ip> [port]|relay-disable|mobile-local-config [port] [--rotate]|mobile-local-disable|print-launch-agent]");

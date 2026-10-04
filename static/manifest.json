@@ -70,6 +70,25 @@
     { "UUID": "com.simeo.codex-deck.keycap-settings", "Name": "Keycap · Settings", "Tooltip": "Open Codex settings.", "Icon": "static/imgs/category-icon", "Controllers": ["Keypad"], "States": [{ "Image": "static/imgs/key", "Title": "" }] },
     { "UUID": "com.simeo.codex-deck.keycap-open-folder", "Name": "Keycap · Open Folder", "Tooltip": "Open a folder in Codex.", "Icon": "static/imgs/category-icon", "Controllers": ["Keypad"], "States": [{ "Image": "static/imgs/key", "Title": "" }] },
     { "UUID": "com.simeo.codex-deck.keycap-add-files", "Name": "Keycap · Add Files", "Tooltip": "Add files to the current composer.", "Icon": "static/imgs/category-icon", "Controllers": ["Keypad"], "States": [{ "Image": "static/imgs/key", "Title": "" }] },
-    { "UUID": "com.simeo.codex-deck.keycap-skills", "Name": "Keycap · Skills", "Tooltip": "Open Codex Skills.", "Icon": "static/imgs/category-icon", "Controllers": ["Keypad"], "States": [{ "Image": "static/imgs/key", "Title": "" }] }
+    { "UUID": "com.simeo.codex-deck.keycap-skills", "Name": "Keycap · Skills", "Tooltip": "Open Codex Skills.", "Icon": "static/imgs/category-icon", "Controllers": ["Keypad"], "States": [{ "Image": "static/imgs/key", "Title": "" }] },
+    {
+      "UUID": "com.simeo.codex-deck.codex-dial",
+      "Name": "Codex Dial",
+      "Tooltip": "Configurable Stream Deck + dial with independent rotation, press, touch, and live Codex feedback.",
+      "Icon": "static/imgs/category-icon",
+      "PropertyInspectorPath": "static/property-inspector/codex-dial.html",
+      "Controllers": ["Encoder"],
+      "Encoder": {
+        "Icon": "static/imgs/dial",
+        "layout": "static/layouts/codex-dial.json",
+        "StackColor": "#7F8CFF",
+        "TriggerDescription": {
+          "Rotate": "Adjust or select",
+          "Push": "Run the configured press action",
+          "Touch": "Run the configured touch action"
+        }
+      },
+      "States": [{ "Image": "static/imgs/key", "Title": "" }]
+    }
   ]
 }

@@ -39,6 +39,10 @@ Tailscale remote access remains a separate optional profile; see
    **Start Codex Deck.command** is the double-clickable equivalent of `start`.
 5. Open **Codex Settings > Codex Micro**, configure the native slots, and add the actions from the [recommended layout](../README.md#recommended-15-key-layout). Leave the Windows/Mac target position empty or replace it with another action.
 
+### Stream Deck + knobs
+
+On a Stream Deck +, drag one **Codex Dial** action onto each knob you want to use. The recommended Model Presets, Agents, Actions, and Usage presets, independent rotate/press/touch settings, and the macOS physical verification checklist are in the [Stream Deck + guide](STREAM_DECK_PLUS.md). The guide's checklist is the verification boundary; this setup page does not by itself claim that a specific build completed hardware QA.
+
 If an archive tool removed executable permissions, restore only the two launcher files:
 
 ```zsh
@@ -51,9 +55,13 @@ chmod +x start-codex-deck.sh "Start Codex Deck.command"
 ./start-codex-deck.sh install
 ```
 
-`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It does not restart a normal Codex session already open during first installation and never launches Codex while the app is closed. After you open Codex normally, a later unbridged process must remain stable before it may receive one graceful recovery restart. A global cooldown blocks further automatic recovery across replacement process IDs, preventing restart loops after crashes, power loss, or incomplete app startup.
+`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It leaves a normal Codex session already open during installation untouched and never launches Codex while the app is closed. After observing Codex closed, when the running watcher observes a newly opened normal Codex process, it waits ten seconds for that exact process to stabilize, then starts at most one bridge-enabled recovery while the process is still less than 30 seconds old. The guarded shutdown and relaunch must finish within 60 seconds of that process start. The recovery is pinned to that process generation, app, and executable; it is cancelled if the process closes, is replaced, or crosses the completion deadline. Established sessions and replacements without an observed closed interval are never restarted in the background. Task status and usage remain available through the normal-launch fallback whenever renderer-only controls are unavailable.
 
 Update by extracting the new launcher and running `install` again. The stable host identity, optional relay configuration, and user-owned icons are preserved.
+
+The watcher validates only running app bundles; it never delays a closed-app observation with Spotlight or installed-app scans. Explicit launcher commands retain fallback installation discovery. Restarting the watcher preserves any normal Codex session already present on its first observation, even a recently opened one. Stored recovery deadlines and cooldown remain in effect, but watcher startup does not add a new recovery delay. If macOS restores Codex before the watcher can observe it closed, renderer controls still require the explicit `start --restart` command below, after active work finishes.
+
+`watcher.log` records decision transitions, process age, and observation intervals. This distinguishes a preserved existing session from a missed startup window without logging thread contents or emitting a line every second.
 
 ## Commands
 
@@ -61,18 +69,18 @@ Update by extracting the new launcher and running `install` again. The stable ho
 ./start-codex-deck.sh dry-run
 ./start-codex-deck.sh self-test
 ./start-codex-deck.sh start
+./start-codex-deck.sh start --restart
 ./start-codex-deck.sh install
 ./start-codex-deck.sh uninstall
 ```
 
-`start` asks for an explicit `yes` before restarting an already-running normal Codex session. Codex launches through LaunchServices so Input Monitoring/TCC permissions remain attached to the signed app bundle.
+`start` reuses an existing renderer bridge and otherwise leaves a running normal Codex session untouched. `start --restart` is the explicit restart form. It reports the handoff as accepted, records the eventual completed, rejected, or failed result under `~/Library/Application Support/CodexDeck/restart-handoffs/`, and hands execution to a detached helper before Codex closes. That lets the relaunch finish even when invoked from Codex's integrated terminal. Concurrent requests are serialized, and a stale request cannot close a replacement Codex process. Codex launches through LaunchServices so Input Monitoring/TCC permissions remain attached to the signed app bundle.
 
 ## Files
 
 ```text
 ~/Library/Application Support/CodexDeck/
   codex-deck-macos.mjs
-  watcher-launch.sh
   codex-micro-bridge.json
   host.json
   watcher-state.json

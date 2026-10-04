@@ -28,9 +28,44 @@ Run these from the extracted matching launcher:
 tail -n 100 "$HOME/Library/Application Support/CodexDeck/watcher.log"
 ```
 
-Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existing normal session needs a restart, it waits for your explicit `yes`.
+Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existing normal session needs a restart, save active work and run `./start-codex-deck.sh start --restart`. The command reports when the restart is accepted; its detached helper records the eventual result under `~/Library/Application Support/CodexDeck/restart-handoffs/`. The relaunch can therefore finish even when the command was entered in Codex's integrated terminal.
 
-The installed watcher never launches Codex while it is closed. After you open Codex manually, one controlled recovery restart can occur if the new process lacks the loopback bridge. A global cooldown prevents further automatic restarts across replacement PIDs.
+The installed macOS watcher never launches a closed Codex app or restarts an
+established session. If it was already running when a new normal Codex process
+opened, it can begin one bridge-enabled recovery after a ten-second stability
+check and only while that exact process is less than 30 seconds old. Its guarded
+shutdown and relaunch must finish within 60 seconds of process start. The recovery
+is cancelled if Codex closes, is replaced, or crosses that deadline. Normal
+launches still provide recent task status/navigation and account usage through
+the [normal-launch fallback](DESKTOP_IPC.md) while renderer-only controls are
+temporarily unavailable.
+
+macOS can restore Codex before login starts the watcher. If Codex is already
+older than the recovery window when the watcher first sees it, the watcher
+leaves that session open. Once active work finishes, use
+`./start-codex-deck.sh start --restart` to establish the renderer connection.
+A normal close and reopen can also be recovered when the watcher is already
+running. Installing the watcher during an open session does not establish that
+connection by itself.
+
+Recent Codex builds put the native event bus in `app-shared` renderer chunks.
+Use a launcher that discovers those chunks if logs repeatedly report
+`nativeEventBus:false` while enabling Micro; repeatedly restarting the old
+launcher cannot repair that discovery failure.
+
+## Dials show Unavailable although task status works
+
+`local=ready` means the task transport is connected, not that every desktop
+control is supported. Model Preset, native Actions, FAST, TERM and DIFF require
+the renderer connection; reloading Stream Deck cannot add it to a normal Codex
+launch. The fallback is partial support, not a permanent replacement for that
+connection.
+
+For Usage, select **Auto** or **Weekly** if the account reports no five-hour
+window. Missing windows intentionally show unavailable. Plugin logs now report
+`Codex account usage available (weekly).` or a redacted failure stage, separately
+from task transport health. This confirms data retrieval, not the physical LCD;
+check the selected window and displayed feedback as well.
 
 If an older watcher is repeatedly relaunching Codex after a crash or empty battery, stop only that watcher first:
 
@@ -54,6 +89,11 @@ Then install the launcher from the newest release. This command does not start, 
 The native handler was unavailable or the action is not valid in the current composer state. Check that the relevant function is assigned in **Codex Settings > Codex Micro** and that the intended Codex window/composer is active.
 
 ## Agent assignments are unexpected
+
+The normal-launch recent-task fallback excludes internal subagent sources,
+including automatic Guardian reviews, even when Codex gives them no agent path.
+User chats remain eligible regardless of their title. A warning on a remaining
+chat can mean its live status has not arrived; it does not prove the chat failed.
 
 Codex Deck does not choose the six native tasks. Open **Codex Settings > Codex Micro > Agent keys** and select pinned, recently updated, priority, or custom assignments. For combined Pinned or Individual assignments, select the same mode in both Codex apps. Pinned tasks are interleaved between hosts; in Individual mode the Stream Deck computer wins a conflicting slot and the remote host fills empty slots. Both lists are de-duplicated, and mirrored tasks route to the host owning the exact local rollout filename.
 

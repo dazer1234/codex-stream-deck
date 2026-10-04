@@ -39,6 +39,10 @@ Tailscale remote access remains available as a separate profile; see
 5. Double-click **Start Codex Deck.cmd**. A bridge-enabled Codex session is reused. If Codex is already running normally without the bridge, the launcher explains that one restart is required before doing it.
 6. Open **Codex Settings > Codex Micro**, configure the native slots, and add the actions from the [recommended layout](../README.md#recommended-15-key-layout).
 
+### Stream Deck + knobs
+
+On a Stream Deck +, drag one **Codex Dial** action onto each knob you want to use. See the [Stream Deck + guide](STREAM_DECK_PLUS.md) for the recommended Reasoning, Agents, Actions, and Usage presets and the independent rotate/press/touch controls. Windows build and CI compatibility is not a claim of physical Stream Deck + verification; report hardware coverage only after completing the guide's behavior checklist on a real device and recording the exact environment.
+
 ## Keep the bridge available
 
 Run once from the extracted launcher folder:

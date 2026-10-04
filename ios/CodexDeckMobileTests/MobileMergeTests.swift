@@ -3,6 +3,17 @@ import XCTest
 @testable import CodexDeckMobile
 
 final class MobileMergeTests: XCTestCase {
+  func testReasoningCommandEncodesExplicitUnrestrictedUltraPolicy() throws {
+    let data = try JSONEncoder().encode(RelayCommand.reasoning(direction: "increase"))
+    let payload = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+    XCTAssertEqual(payload["kind"] as? String, "reasoning")
+    XCTAssertEqual(payload["direction"] as? String, "increase")
+    XCTAssertEqual(payload["includeUltra"] as? Bool, true)
+    XCTAssertEqual(Set(payload.keys), Set(["kind", "direction", "includeUltra"]))
+  }
+
   func testDeduplicatesMirroredThreadAndRoutesToRolloutOwner() throws {
     let windows = host("win", .win32)
     let mac = host("mac", .darwin)
