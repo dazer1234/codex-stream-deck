@@ -351,25 +351,60 @@ function safeLog(message: string): void {
   });
 }
 
+type LockOwner = { pid: number; startedAt: string; command: string; token: string };
+
 export async function acquirePidLock(lockPath = WATCHER_LOCK_PATH): Promise<(() => Promise<void>) | null> {
+  const self = processRows().find(row => row.pid === process.pid);
+  if (!self) throw new Error("Cannot identify the watcher process generation.");
+  const owner: LockOwner = { pid: self.pid, startedAt: self.startedAt, command: self.command, token: randomUUID() };
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   try {
     await mkdir(lockPath, { mode: 0o700 });
-  } catch {
-    const existing = Number((await readFile(join(lockPath, "pid"), "utf8").catch(() => "")).trim());
-    if (Number.isInteger(existing)) {
-      try { process.kill(existing, 0); return null; }
-      catch { /* Reclaim a stale lock below. */ }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const before = await stat(lockPath).catch(() => null);
+    if (!before) return null;
+    const saved = await readJson<LockOwner>(join(lockPath, "owner.json"));
+    const legacyPid = Number((await readFile(join(lockPath, "pid"), "utf8").catch(() => "")).trim());
+    const rows = processRows();
+    const live = rows.find(row => row.pid === (saved?.pid ?? legacyPid));
+    if (saved && live && live.startedAt === saved.startedAt && live.command === saved.command) return null;
+    // Older versions recorded only a PID. A live, unrelated process is not a watcher.
+    if (!saved && live?.command.endsWith(`${INSTALLED_RUNTIME_PATH} watch`) &&
+        Date.parse(live.startedAt) <= before.mtimeMs) return null;
+    // Another contender may have created the directory but not written its owner yet.
+    if (!saved && (!Number.isInteger(legacyPid) || legacyPid <= 0) && Date.now() - before.mtimeMs < 30_000) return null;
+    // All contenders for this inode use one non-empty quarantine destination.
+    // rename cannot replace that directory: a late contender cannot move the
+    // newly acquired lock after another process has already reclaimed the old one.
+    try { await writeFile(join(lockPath, ".reclaimed"), "", { flag: "wx", mode: 0o600 }); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return null;
+      if (code !== "EEXIST") throw error;
     }
-    const stale = `${lockPath}.stale.${process.pid}.${Date.now()}`;
-    try { await rename(lockPath, stale); }
-    catch { return null; }
-    await rm(stale, { recursive: true, force: true });
-    try { await mkdir(lockPath, { mode: 0o700 }); }
-    catch { return null; }
+    const current = await stat(lockPath).catch(() => null);
+    if (!current || current.dev !== before.dev || current.ino !== before.ino) return null;
+    const stale = `${lockPath}.stale.${before.dev}.${before.ino}.${before.birthtimeMs}`;
+    try {
+      await rename(lockPath, stale);
+      await mkdir(lockPath, { mode: 0o700 });
+    } catch (error) {
+      if (["EEXIST", "ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
+      throw error;
+    }
+  }
+  try {
+    await writeFile(join(lockPath, "owner.json"), `${JSON.stringify(owner)}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw error;
   }
   await writeFile(join(lockPath, "pid"), `${process.pid}\n`, { mode: 0o600 });
-  return async () => { await rm(lockPath, { recursive: true, force: true }); };
+  return async () => {
+    const current = await readJson<LockOwner>(join(lockPath, "owner.json"));
+    if (current?.token === owner.token) await rm(lockPath, { recursive: true, force: true });
+  };
 }
 
 async function runWatcher(): Promise<number> {
@@ -396,6 +431,7 @@ async function runWatcher(): Promise<number> {
   await log("Watcher started.");
   let policy = resumeWatcherPolicyState(await readJson<WatcherPolicyState>(WATCHER_STATE_PATH));
   let enabledSignature = "";
+  let preservedSignature = "";
   try {
     while (true) {
       try {
@@ -460,11 +496,12 @@ async function runWatcher(): Promise<number> {
         } else {
           enabledSignature = "";
           await removeStaleBridgeState(null, log);
-          if (decision.action.type === "restart-for-recovery" && main) {
-            await log(`Recovering Codex bridge once for generation ${main.generation} (${decision.action.reason}).`);
-            await terminateCodex(main);
-            const refreshed = await discoverCodexInstallation();
-            await launchCodex(refreshed, await chooseLoopbackPort());
+          if (!main) {
+            preservedSignature = "";
+          } else if (decision.action.type === "preserve-session" && main.generation !== preservedSignature) {
+            preservedSignature = main.generation;
+            await log("Codex is running without a healthy loopback bridge; preserving the session. " +
+              "The watcher will reconnect if the bridge becomes available; restart requires an explicit start --restart request.");
           }
         }
       } catch (error) {
@@ -662,41 +699,19 @@ async function startOnce(allowRestart: boolean): Promise<number> {
 
 async function selfTest(): Promise<void> {
   let state = createWatcherPolicyState(0);
-  let result = evaluateWatcherPolicy(state, { now: 0, generation: "A", bridgeHealthy: false });
-  assert.equal(result.action.type, "preserve-initial-session", "initial existing session remains untouched");
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 10_000, generation: "A", bridgeHealthy: false });
-  assert.equal(result.action.type, "preserve-initial-session", "same initial process is never restarted");
-
-  result = evaluateWatcherPolicy(state, { now: 10_001, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "a new process must remain stable before recovery");
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 30_001, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a stable new process can be recovered once");
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 61_000, generation: "C", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "the global circuit breaker blocks a new-generation restart loop");
-
-  state = createWatcherPolicyState(0);
-  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 8_000, generation: null, bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "the watcher never launches Codex while it is closed");
-
-  state = createWatcherPolicyState(0);
-  result = evaluateWatcherPolicy(state, { now: 0, generation: "A", bridgeHealthy: true });
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 10_000, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "wait", "a replacement process must remain stable before recovery");
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 30_000, generation: "B", bridgeHealthy: false });
-  assert.equal(result.action.type, "restart-for-recovery", "a previous healthy bridge recovers after a stable replacement");
-
-  state = createWatcherPolicyState(0);
-  result = evaluateWatcherPolicy(state, { now: 0, generation: null, bridgeHealthy: false });
-  state = result.state;
-  result = evaluateWatcherPolicy(state, { now: 2_000, generation: "RACE", bridgeHealthy: false });
-  assert.equal(result.action.type, "preserve-initial-session", "LaunchAgent startup race preserves the first normal session");
+  for (const observation of [
+    { now: 0, generation: "A", bridgeHealthy: false },
+    { now: 60_000, generation: "B", bridgeHealthy: false },
+    { now: 900_000, generation: "C", bridgeHealthy: false }
+  ]) {
+    const result = evaluateWatcherPolicy(state, observation);
+    assert.equal(result.action.type, "preserve-session", "unbridged generations must not be restarted");
+    state = result.state;
+  }
+  assert.equal(evaluateWatcherPolicy(state, { now: 901_000, generation: null, bridgeHealthy: false }).action.type,
+    "wait", "the watcher never launches a closed Codex app");
+  assert.equal(evaluateWatcherPolicy(state, { now: 902_000, generation: "D", bridgeHealthy: true }).action.type,
+    "reuse-bridge", "healthy bridges are reused");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-deck-self-test-"));
   const lockPath = join(temporaryRoot, "watcher.lock");
@@ -716,7 +731,7 @@ async function selfTest(): Promise<void> {
 
   assert.equal(isBridgeStateStale(70_000, null), true, "stale/invalid port state is rejected");
   assert.equal(isBridgeStateStale(43123, 43123), false, "the active bridge state is retained");
-  console.log("macOS self-test passed: safe recovery, circuit-breaker, race, stale-state, and single-instance scenarios.");
+  console.log("macOS self-test passed: passive watcher, stale-state, and single-instance scenarios.");
 }
 
 async function main(): Promise<number> {

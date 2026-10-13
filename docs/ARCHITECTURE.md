@@ -33,12 +33,18 @@ On macOS, the launcher discovers the running or installed app by its signed
 bundle metadata, reads `CFBundleExecutable`, and launches the app bundle through
 LaunchServices with the same loopback-only debugging arguments. The per-user
 LaunchAgent watcher stores a main-process generation (PID, start time, and
-executable path), reuses healthy bridges, and performs at most one graceful
-recovery restart for a later stable unbridged generation. It never launches a
-closed Codex app. A generation-independent cooldown prevents a failed recovery
-from becoming a PID-to-PID restart loop, even if LaunchServices immediately
-creates another process. The generation and recovery policy is persisted
-atomically and guarded by a PID-directory lock. LaunchAgent stderr is retained
+executable path) and reuses healthy bridges. A missing bridge never authorizes
+the watcher to restart a running session or launch a closed Codex app. Recovery
+timers saved by older versions are ignored; an explicit `start --restart`
+request remains the only launcher path that can replace a running session.
+Consequently, passive monitoring prevents disruptive restarts but cannot add a
+debugging port to an ordinary Codex launch.
+
+The watcher state is persisted atomically and guarded by a PID-directory lock.
+Lock ownership includes the process start time, command, and a random release
+token, so a reused PID does not indefinitely block a new watcher. Stale locks
+are reclaimed with a per-lock marker and quarantine path to keep concurrent
+reclaimers from removing a new owner's lock. LaunchAgent stderr is retained
 separately from the bounded watcher log for post-crash diagnosis.
 
 Both platforms persist a stable `hostId`, `hostName`, and platform identifier.

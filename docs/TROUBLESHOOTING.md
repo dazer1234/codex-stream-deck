@@ -30,7 +30,7 @@ tail -n 100 "$HOME/Library/Application Support/CodexDeck/watcher.log"
 
 Do not replace, re-sign, or edit the Codex app bundle. If `start` says an existing normal session needs a restart, it waits for your explicit `yes`.
 
-The installed watcher never launches Codex while it is closed. After you open Codex manually, one controlled recovery restart can occur if the new process lacks the loopback bridge. A global cooldown prevents further automatic restarts across replacement PIDs.
+The installed macOS watcher never launches or terminates Codex, including after a manual launch or app update. If the bridge is missing, it preserves the session and reports that condition once per process generation. Controls remain unavailable until a healthy bridge exists; a missing bridge no longer triggers a recovery restart. Explicit manual `start --restart` is the only restart path.
 
 If an older watcher is repeatedly relaunching Codex after a crash or empty battery, stop only that watcher first:
 

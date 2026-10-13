@@ -163,7 +163,7 @@ The Windows physical-device path and the Windows+Mac relay were exercised on the
 
 ## Troubleshooting
 
-Start with [Troubleshooting](docs/TROUBLESHOOTING.md). The important rule is: restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches a closed Codex app; after a manual app start it permits at most one guarded recovery restart and opens a global cooldown before any later recovery.
+Start with [Troubleshooting](docs/TROUBLESHOOTING.md). The important rule is: restart only the Stream Deck plugin/app for plugin updates. The macOS watcher never launches or terminates Codex. A missing bridge leaves the controls disconnected while preserving the session; restarting an existing session requires an explicit manual request.
 
 ## Build and release validation
 

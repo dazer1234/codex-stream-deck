@@ -51,7 +51,11 @@ chmod +x start-codex-deck.sh "Start Codex Deck.command"
 ./start-codex-deck.sh install
 ```
 
-`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. It does not restart a normal Codex session already open during first installation and never launches Codex while the app is closed. After you open Codex normally, a later unbridged process must remain stable before it may receive one graceful recovery restart. A global cooldown blocks further automatic recovery across replacement process IDs, preventing restart loops after crashes, power loss, or incomplete app startup.
+`install` copies the watcher runtime into Application Support and installs a per-user LaunchAgent. The watcher never launches or terminates Codex. It preserves normal sessions, app-update replacements, and sessions whose debugging bridge disappears, then reconnects when a healthy bridge becomes available. Previously stored recovery timers cannot authorize an automatic restart.
+
+An ordinary Codex launch without a debugging bridge remains disconnected from the renderer controls. Preserving that session prevents the restart bug; it does not enable the bridge. The full renderer-based controls still require a bridge-enabled launch. A normal-launch transport is separate work. Only the explicit manual `start --restart` path may terminate an existing session.
+
+Renderer discovery now includes `app-shared-*` chunks, using the shared event-bus fix from [PR #16](https://github.com/dazer1234/codex-stream-deck/pull/16). This improves discovery once a debugging bridge is available; it does not enable that bridge on an ordinary launch. Discovery-expression checks are automated, but live renderer and physical Stream Deck compatibility still require validation on the target Codex build.
 
 Update by extracting the new launcher and running `install` again. The stable host identity, optional relay configuration, and user-owned icons are preserved.
 
@@ -83,7 +87,7 @@ Update by extracting the new launcher and running `install` again. The stable ho
 ~/Library/LaunchAgents/com.simeo.codex-deck.watcher.plist
 ```
 
-State writes are atomic, a PID-directory lock prevents duplicate watchers, and logs rotate at approximately 1 MB with three retained generations. Nothing inside the Codex app bundle is modified or re-signed.
+State writes are atomic, the watcher lock verifies PID, process start time, and command, and logs rotate at approximately 1 MB with three retained generations. The lock records a unique ownership token so an old cleanup cannot remove a successor’s lock. A fresh incomplete lock is left alone; stale ownership is retained in a `watcher.lock.stale.*` directory when reclaimed. Nothing inside the Codex app bundle is modified or re-signed.
 
 ## Diagnostics
 

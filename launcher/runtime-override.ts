@@ -56,11 +56,12 @@ export function buildRuntimeOverrideExpression(gateName = MICRO_GATE): string {
     }
     for (const client of clients) client.$emt?.({ name: 'values_updated' });
 
-    // Newer Codex builds moved the persisted signal into a shared renderer
-    // chunk. Announcing the native device through the already-loaded event bus
-    // preserves the same Codex-owned detection path without naming that chunk.
+    // Newer Codex builds moved the persisted signal and native event bus into
+    // shared renderer chunks. Announcing the native device through the
+    // already-loaded event bus preserves the same Codex-owned detection path
+    // without depending on a build-specific chunk hash.
     const likelyModules = uniqueUrls.filter((url) =>
-      /(?:vscode-api|codex-micro|app-initial|artifact-tab-content)/.test(url)
+      /(?:vscode-api|codex-micro|app-initial|artifact-tab-content|app-shared)/.test(url)
     ).slice(0, 120);
     let nativeEventBus = false;
     let deviceHandlers = 0;
@@ -111,7 +112,7 @@ export function buildRuntimeVerificationExpression(): string {
       ...performance.getEntriesByType('resource').map((entry) => entry.name)
     ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
     const likelyModules = urls.filter((url) =>
-      /(?:vscode-api|codex-micro|app-initial|artifact-tab-content)/.test(url)
+      /(?:vscode-api|codex-micro|app-initial|artifact-tab-content|app-shared)/.test(url)
     ).slice(0, 120);
     let bus = null;
     for (const url of likelyModules) {

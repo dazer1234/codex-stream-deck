@@ -88,3 +88,8 @@ test("launcher verifies the settings gate and native Micro handlers", () => {
   assert.match(expression, /codex-micro-joystick-event/);
   assert.match(expression, /nativeEventBus/);
 });
+
+test("shared event bus discovery includes current app-shared chunks", () => {
+  assert.match(buildRuntimeOverrideExpression(), /app-shared/);
+  assert.match(buildRuntimeVerificationExpression(), /app-shared/);
+});

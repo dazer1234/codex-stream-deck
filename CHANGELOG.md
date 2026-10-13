@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- macOS: preserve every running Codex session when its debugging bridge is absent, including normal launches and app-update replacements; remove automatic recovery restarts.
+- macOS: validate watcher-lock process identity instead of trusting a reusable PID, preserve fresh incomplete locks, and guard cleanup with an ownership token.
+- Discover the shared Micro event bus in `app-shared-*` renderer chunks (from @tqmane’s PR #16; Windows activation changes are not included).
+- Normal launches without a debugging bridge still lack renderer controls; this change does not claim automatic full-profile connectivity.
+
 ## 0.7.0.2 - 2026-07-22
 
 - Normalize remote snapshot timestamps to local receipt time so ordinary Mac/Windows clock differences cannot hide working, selected, approval, or usage state.
