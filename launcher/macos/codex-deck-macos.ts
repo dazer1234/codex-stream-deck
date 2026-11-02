@@ -14,6 +14,7 @@ import {
   configureLocalMobilePairing, LOCAL_MOBILE_CONFIG, LOCAL_PAIRING_QR
 } from "../../src/mobile-local-pairing.js";
 import { applyRuntimeOverride, verifyMicroRuntime } from "../runtime-override.js";
+import { findMicroSlotAsset } from "./micro-asset.js";
 import {
   createWatcherPolicyState,
   evaluateWatcherPolicy,
@@ -62,6 +63,7 @@ type BridgeState = HostState & {
   updatedAt: string;
   platform: "darwin";
   codexVersion: string;
+  slotSignalsAsset?: string;
 };
 
 function run(command: string, args: string[], options: { allowFailure?: boolean } = {}): string {
@@ -258,7 +260,8 @@ async function writeBridgeState(port: number, installation: CodexInstallation): 
     updatedAt: new Date().toISOString(),
     platform: "darwin",
     ...host,
-    codexVersion: installation.version
+    codexVersion: installation.version,
+    slotSignalsAsset: await findMicroSlotAsset(join(installation.appPath, "Contents", "Resources", "app.asar")).catch(() => undefined)
   };
   await atomicWriteJson(BRIDGE_STATE_PATH, state);
   return state;

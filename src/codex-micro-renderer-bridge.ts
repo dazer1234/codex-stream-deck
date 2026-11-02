@@ -68,12 +68,12 @@ export const REASONING_ENCODER_KEYS: Record<ReasoningAdjustment, "ENC_CW" | "ENC
   increase: "ENC_CC"
 };
 
-const SNAPSHOT_EXPRESSION = `(async () => {
+function snapshotExpression(slotSignalsAsset?: string): string { return `(async () => {
   const urls = [...new Set([
     ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
     ...performance.getEntriesByType('resource').map((entry) => entry.name)
   ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
-  const slotSignalsUrl = urls.find((url) => url.includes('/assets/codex-micro-slot-signals-'));
+  const slotSignalsUrl = urls.find((url) => url.includes('/assets/codex-micro-slot-signals-')) ?? ${JSON.stringify(slotSignalsAsset ? `app://-/assets/${slotSignalsAsset}` : null)};
   if (!slotSignalsUrl) throw new Error('Codex Micro slot signals are not loaded.');
 
   const namespaces = [];
@@ -305,7 +305,7 @@ const SNAPSHOT_EXPRESSION = `(async () => {
     : undefined;
 
   return { slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme, ...(usage ? { usage } : {}) };
-})()`;
+})()`; }
 
 export class CodexMicroRendererBridge {
   private socket?: WebSocket;
@@ -321,7 +321,7 @@ export class CodexMicroRendererBridge {
   async refresh(): Promise<MicroSnapshot> {
     try {
       await this.ensureConnected();
-      const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION);
+      const nativeSnapshot = await this.evaluate<MicroSnapshot>(snapshotExpression(await readSlotSignalsAsset()));
       const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
       this.lastSnapshot = snapshot;
       return snapshot;
@@ -715,6 +715,14 @@ async function readPortFile(): Promise<number | null> {
     const port = Number(data.port);
     return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
   } catch { return null; }
+}
+
+async function readSlotSignalsAsset(): Promise<string | undefined> {
+  try {
+    const data = JSON.parse(await readFile(PORT_FILE, "utf8")) as { slotSignalsAsset?: unknown };
+    return typeof data.slotSignalsAsset === "string" && /^codex-micro-slot-signals-[A-Za-z0-9_-]+\.js$/.test(data.slotSignalsAsset)
+      ? data.slotSignalsAsset : undefined;
+  } catch { return undefined; }
 }
 
 async function isDebugPort(port: number): Promise<boolean> {
