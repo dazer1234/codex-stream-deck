@@ -8,6 +8,7 @@ import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import type { MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment } from "./types.js";
+import { selectUsageQuery } from "./usage-query.js";
 
 type DebugTarget = {
   type: string;
@@ -216,9 +217,7 @@ function snapshotExpression(slotSignalsAsset?: string): string { return `(async 
   let usage;
   for (const client of queryClients) {
     try {
-      const query = client.getQueryCache().getAll().find((candidate) =>
-        JSON.stringify(candidate.queryKey) === '["rate-limit-status"]'
-      );
+      const query = (${selectUsageQuery.toString()})(client.getQueryCache().getAll());
       const refreshKey = Symbol.for('codex-deck-rate-limit-refresh-at');
       const now = Date.now();
       const dataUpdatedAt = Number(query?.state?.dataUpdatedAt) || 0;
