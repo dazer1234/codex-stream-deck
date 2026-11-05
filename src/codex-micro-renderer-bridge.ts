@@ -10,6 +10,7 @@ import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import type { MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment } from "./types.js";
 import { selectUsageQuery } from "./usage-query.js";
 import { rendererModulesExpression } from "./renderer-modules.js";
+import { readActiveThreadKey } from "./active-thread.js";
 
 type DebugTarget = {
   type: string;
@@ -291,10 +292,7 @@ function snapshotExpression(slotSignalsAsset?: string): string { return `(async 
     : 'light';
   const activeThreadElement = document.querySelector('[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active="true"]')
     ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]');
-  const activeThreadKey = document.querySelector('[data-above-composer-conversation-id]')
-    ?.getAttribute('data-above-composer-conversation-id')
-    ?? activeThreadElement?.getAttribute('data-app-action-sidebar-thread-id')
-    ?? undefined;
+  const activeThreadKey = (${readActiveThreadKey.toString()})() ?? undefined;
   const activeThreadTitle = activeThreadElement
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
@@ -349,13 +347,7 @@ export class CodexMicroRendererBridge {
   private async ensureThreadActivated(threadKey: string): Promise<void> {
     const result = await this.evaluate<"active" | "opened" | "missing" | "failed">(`(async () => {
       const threadKey = ${JSON.stringify(threadKey)};
-      const activeThreadKey = () => document.querySelector('[data-above-composer-conversation-id]')
-        ?.getAttribute('data-above-composer-conversation-id')
-        ?? document.querySelector('[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active="true"]')
-          ?.getAttribute('data-app-action-sidebar-thread-id')
-        ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]')
-          ?.getAttribute('data-app-action-sidebar-thread-id')
-        ?? null;
+      const activeThreadKey = ${readActiveThreadKey.toString()};
       const waitForActive = async (duration) => {
         const deadline = Date.now() + duration;
         while (Date.now() < deadline) {

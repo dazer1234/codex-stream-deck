@@ -39,7 +39,7 @@ test("renderer bridge uses native Micro events and discovers hashed modules at r
   assert.match(source, /codex-micro-agent-source/);
   assert.match(source, /data-app-action-sidebar-thread-id/);
   assert.match(source, /activeThreadKey/);
-  assert.match(source, /data-above-composer-conversation-id/);
+  assert.match(source, /readActiveThreadKey/);
   assert.match(source, /data-app-action-sidebar-thread-active/);
   assert.match(source, /directSettingReader/);
   assert.match(source, /get-setting/);
