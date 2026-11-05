@@ -8,6 +8,9 @@ import { codexDeckStateRoot } from "./codex-deck-paths.js";
 import { OFFICIAL_KEYCAP_IDS, type OfficialKeycapId } from "./keycaps.js";
 import { CodexSessionOwnershipIndex } from "./session-ownership.js";
 import type { MicroActionSlot, MicroDirection, MicroSnapshot, ReasoningAdjustment } from "./types.js";
+import { selectUsageQuery } from "./usage-query.js";
+import { rendererModulesExpression } from "./renderer-modules.js";
+import { readActiveThreadKey } from "./active-thread.js";
 
 type DebugTarget = {
   type: string;
@@ -68,18 +71,13 @@ export const REASONING_ENCODER_KEYS: Record<ReasoningAdjustment, "ENC_CW" | "ENC
   increase: "ENC_CC"
 };
 
-const SNAPSHOT_EXPRESSION = `(async () => {
+function snapshotExpression(slotSignalsAsset?: string): string { return `(async () => {
   const urls = [...new Set([
     ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
     ...performance.getEntriesByType('resource').map((entry) => entry.name)
   ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
-  const slotSignalsUrl = urls.find((url) => url.includes('/assets/codex-micro-slot-signals-'));
-  if (!slotSignalsUrl) throw new Error('Codex Micro slot signals are not loaded.');
-
-  const namespaces = [];
-  for (const url of urls) {
-    try { namespaces.push(await import(url)); } catch {}
-  }
+  const slotSignalsUrl = urls.find((url) => url.includes('/assets/codex-micro-slot-signals-')) ?? ${JSON.stringify(slotSignalsAsset ? `app://-/assets/${slotSignalsAsset}` : null)};
+  const { namespaces, slotNamespaces } = await ${rendererModulesExpression()};
   const exportedValues = namespaces.flatMap((namespace) => Object.values(namespace));
   const definitions = exportedValues.find((candidate) =>
     candidate && typeof candidate === 'object' &&
@@ -98,8 +96,8 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactContainer$'));
   if (!root || !reactKey) throw new Error('Codex React root was not found.');
 
-  const slotSignals = await import(slotSignalsUrl);
-  const resolvers = Object.values(slotSignals).filter((candidate) =>
+  if (slotSignalsUrl) slotNamespaces.push(await import(slotSignalsUrl));
+  const resolvers = slotNamespaces.flatMap(namespace => Object.values(namespace)).filter((candidate) =>
     candidate && typeof candidate === 'object' &&
     typeof candidate.resolve === 'function' &&
     typeof candidate.createSubscriberAtom === 'function'
@@ -216,9 +214,7 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   let usage;
   for (const client of queryClients) {
     try {
-      const query = client.getQueryCache().getAll().find((candidate) =>
-        JSON.stringify(candidate.queryKey) === '["rate-limit-status"]'
-      );
+      const query = (${selectUsageQuery.toString()})(client.getQueryCache().getAll());
       const refreshKey = Symbol.for('codex-deck-rate-limit-refresh-at');
       const now = Date.now();
       const dataUpdatedAt = Number(query?.state?.dataUpdatedAt) || 0;
@@ -296,16 +292,13 @@ const SNAPSHOT_EXPRESSION = `(async () => {
     : 'light';
   const activeThreadElement = document.querySelector('[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active="true"]')
     ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]');
-  const activeThreadKey = document.querySelector('[data-above-composer-conversation-id]')
-    ?.getAttribute('data-above-composer-conversation-id')
-    ?? activeThreadElement?.getAttribute('data-app-action-sidebar-thread-id')
-    ?? undefined;
+  const activeThreadKey = (${readActiveThreadKey.toString()})() ?? undefined;
   const activeThreadTitle = activeThreadElement
     ? (activeThreadElement.getAttribute('aria-label') ?? activeThreadElement.textContent ?? '').trim().slice(0, 240) || undefined
     : undefined;
 
   return { slots, activeThreadKey, activeThreadTitle, layout, agentSource, lightingAutoOff, theme, ...(usage ? { usage } : {}) };
-})()`;
+})()`; }
 
 export class CodexMicroRendererBridge {
   private socket?: WebSocket;
@@ -321,7 +314,7 @@ export class CodexMicroRendererBridge {
   async refresh(): Promise<MicroSnapshot> {
     try {
       await this.ensureConnected();
-      const nativeSnapshot = await this.evaluate<MicroSnapshot>(SNAPSHOT_EXPRESSION);
+      const nativeSnapshot = await this.evaluate<MicroSnapshot>(snapshotExpression(await readSlotSignalsAsset()));
       const snapshot = await this.sessionOwnership.annotate(nativeSnapshot);
       this.lastSnapshot = snapshot;
       return snapshot;
@@ -354,13 +347,7 @@ export class CodexMicroRendererBridge {
   private async ensureThreadActivated(threadKey: string): Promise<void> {
     const result = await this.evaluate<"active" | "opened" | "missing" | "failed">(`(async () => {
       const threadKey = ${JSON.stringify(threadKey)};
-      const activeThreadKey = () => document.querySelector('[data-above-composer-conversation-id]')
-        ?.getAttribute('data-above-composer-conversation-id')
-        ?? document.querySelector('[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active="true"]')
-          ?.getAttribute('data-app-action-sidebar-thread-id')
-        ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]')
-          ?.getAttribute('data-app-action-sidebar-thread-id')
-        ?? null;
+      const activeThreadKey = ${readActiveThreadKey.toString()};
       const waitForActive = async (duration) => {
         const deadline = Date.now() + duration;
         while (Date.now() < deadline) {
@@ -418,20 +405,33 @@ export class CodexMicroRendererBridge {
       const layoutUrl = moduleUrl('codex-micro-layout-');
       const commandsUrl = moduleUrl('run-command-');
       const bridgeUrl = moduleUrl('codex-micro-bridge-');
-      const vscodeUrl = moduleUrl('vscode-api-');
-      if (!layoutUrl) throw new Error('Codex Micro keycap registry is unavailable.');
-      const layout = await import(layoutUrl);
+      const { namespaces } = await ${rendererModulesExpression()};
+      const values = namespaces.flatMap(namespace => Object.values(namespace));
+      const registry = values.find(candidate => Array.isArray(candidate) &&
+        candidate.some(keycap => keycap?.id === 'FAST' && keycap.action?.type === 'command'));
+      const layout = layoutUrl ? await import(layoutUrl) : {};
       const keycapGetter = Object.values(layout).find((candidate) => {
         if (typeof candidate !== 'function') return false;
         try { return candidate('FAST')?.id === 'FAST'; } catch { return false; }
       });
-      if (typeof keycapGetter !== 'function') throw new Error('Codex Micro keycap registry changed.');
-      const keycap = keycapGetter(${JSON.stringify(keycapId)});
+      if (typeof keycapGetter !== 'function' && !registry) throw new Error('Codex Micro keycap registry changed.');
+      const keycap = registry?.find(keycap => keycap.id === ${JSON.stringify(keycapId)})
+        ?? keycapGetter?.(${JSON.stringify(keycapId)});
       const action = keycap?.action;
       if (!action) throw new Error('The selected Codex Micro keycap has no action.');
 
       if (action.type === 'command') {
         let commandRunner = null;
+        const commandNamespace = namespaces.find(namespace => Object.values(namespace).some(candidate => {
+          try {
+            return typeof candidate === 'function' && candidate.length === 3 &&
+              Function.prototype.toString.call(candidate).includes('"keyboard_shortcut"');
+          } catch { return false; }
+        }));
+        if (commandNamespace) {
+          commandRunner = Object.values(commandNamespace).find(candidate => typeof candidate === 'function' &&
+            candidate.length === 3 && Function.prototype.toString.call(candidate).includes(',void 0,')) ?? null;
+        }
         if (commandsUrl) {
           const commands = await import(commandsUrl);
           if (typeof commands.i === 'function') commandRunner = commands.i;
@@ -461,9 +461,7 @@ export class CodexMicroRendererBridge {
         return true;
       }
 
-      if (!vscodeUrl) throw new Error('Codex VS Code event module is unavailable for this keycap.');
-      const vscode = await import(vscodeUrl);
-      const bus = [vscode.g, vscode.m, ...Object.values(vscode)].find((candidate) => candidate && typeof candidate === 'object' && (typeof candidate.dispatchHostMessage === 'function' || typeof candidate.dispatchMessage === 'function'));
+      const bus = values.find((candidate) => candidate && typeof candidate === 'object' && (typeof candidate.dispatchHostMessage === 'function' || typeof candidate.dispatchMessage === 'function'));
       if (!bus) throw new Error('Codex VS Code event bus was not found.');
       if (action.type === 'external-url' && typeof bus.dispatchMessage === 'function') {
         bus.dispatchMessage('open-in-browser', { url: action.url, source: 'manual', initiator: 'open_in_browser_bridge' });
@@ -487,14 +485,10 @@ export class CodexMicroRendererBridge {
     await this.ensureConnected();
     const redeemRequestId = randomUUID();
     const expression = `(async () => {
-      const urls = [...new Set([
-        ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
-        ...performance.getEntriesByType('resource').map((entry) => entry.name)
-      ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
+      const { namespaces } = await ${rendererModulesExpression()};
       let client = null;
-      for (const url of urls) {
+      for (const namespace of namespaces) {
         try {
-          const namespace = await import(url);
           client = Object.values(namespace).find((candidate) =>
             candidate && typeof candidate === 'object' &&
             typeof candidate.safeGet === 'function' && typeof candidate.safePost === 'function'
@@ -563,14 +557,10 @@ export class CodexMicroRendererBridge {
     await this.ensureConnected();
     const message = { type, ...payload };
     const expression = `(async () => {
-      const urls = [...new Set([
-        ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
-        ...performance.getEntriesByType('resource').map((entry) => entry.name)
-      ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
+      const { namespaces } = await ${rendererModulesExpression()};
       let bus = null;
-      for (const url of urls) {
+      for (const namespace of namespaces) {
         try {
-          const namespace = await import(url);
           bus = Object.values(namespace).find((candidate) => candidate && typeof candidate === 'object' && candidate.handlers instanceof Map && (typeof candidate.dispatchHostMessage === 'function' || typeof candidate.dispatchMessage === 'function'));
           if (bus) break;
         } catch {}
@@ -715,6 +705,14 @@ async function readPortFile(): Promise<number | null> {
     const port = Number(data.port);
     return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
   } catch { return null; }
+}
+
+async function readSlotSignalsAsset(): Promise<string | undefined> {
+  try {
+    const data = JSON.parse(await readFile(PORT_FILE, "utf8")) as { slotSignalsAsset?: unknown };
+    return typeof data.slotSignalsAsset === "string" && /^codex-micro-slot-signals-[A-Za-z0-9_-]+\.js$/.test(data.slotSignalsAsset)
+      ? data.slotSignalsAsset : undefined;
+  } catch { return undefined; }
 }
 
 async function isDebugPort(port: number): Promise<boolean> {

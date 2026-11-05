@@ -5,6 +5,34 @@ import { renderRateLimitResetKey, renderUsageLimitKey, renderUsageOverviewKey } 
 import { parseRelayCommand } from "../src/relay-protocol.js";
 import type { MicroSnapshot, UsageSnapshot, UsageWindow } from "../src/types.js";
 import { parseUsageLimitMode, selectAccountUsageSource, selectUsageWindow, usageWindowKind } from "../src/usage.js";
+import { selectUsageQuery } from "../src/usage-query.js";
+
+test("usage query selects the active account and rejects ambiguous or unrelated caches", () => {
+  const query = (key: string[], used: number, updated: number, observers: number) => ({
+    queryKey: key, state: { status: "success", dataUpdatedAt: updated, data: { rate_limit: { primary_window: { used_percent: used } } } },
+    getObserversCount: () => observers
+  });
+  const legacy = query(["rate-limit-status"], 10, 100, 0);
+  const current = query(["rate-limit-status", "user-a", "account-a"], 12, 200, 1);
+  const unrelated = query(["rate-limit-status", "image-generation", "model"], 99, 300, 1);
+  assert.equal(selectUsageQuery([legacy, unrelated, current]), current);
+  assert.equal(selectUsageQuery([legacy, unrelated]), legacy);
+  assert.equal(selectUsageQuery([legacy, query(["rate-limit-status", "user-a", "account-a"], 12, 200, 0)]), undefined);
+  assert.equal(selectUsageQuery([current, query(["rate-limit-status", "user-b", "account-b"], 50, 300, 1)]), undefined);
+});
+
+test("updated account usage changes the displayed remaining percentage", () => {
+  const legacy = { queryKey: ["rate-limit-status"], state: { status: "success", dataUpdatedAt: 1, data: { rate_limit: { primary_window: { used_percent: 10 } } } }, getObserversCount: () => 0 };
+  const current = { queryKey: ["rate-limit-status", "user-a", "account-a"], state: { status: "success", dataUpdatedAt: 2, data: { rate_limit: { primary_window: { used_percent: 12 } } } }, getObserversCount: () => 1 };
+  const display = () => {
+    const selected = selectUsageQuery([legacy, current]);
+    const remainingPercent = 100 - selected.state.data.rate_limit.primary_window.used_percent;
+    return decode(renderUsageLimitKey({ ...weekly, usedPercent: 100 - remainingPercent, remainingPercent }, "weekly", "dark"));
+  };
+  assert.match(display(), /data-usage-remaining="88"/);
+  current.state.data.rate_limit.primary_window.used_percent = 13;
+  assert.match(display(), /data-usage-remaining="87"/);
+});
 
 const fiveHour: UsageWindow = {
   id: "five-hour", kind: "five-hour", usedPercent: 26, remainingPercent: 74,
