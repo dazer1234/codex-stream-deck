@@ -75,7 +75,7 @@ test("watcher recovery decision self-test passes in PowerShell", async (context)
 test("launcher supports the current shared-chunk native detection path", () => {
   const expression = buildRuntimeOverrideExpression();
   assert.match(expression, /native-device-event/);
-  assert.match(expression, /app-shared/);
+  assert.match(expression, /__webpack_require__/);
   assert.match(expression, /codex-micro-device-state-changed/);
   assert.match(expression, /dispatchHostMessage/);
   assert.match(expression, /deviceEventDispatched/);
@@ -88,5 +88,5 @@ test("launcher verifies the settings gate and native Micro handlers", () => {
   assert.match(expression, /codex-micro-hid-event/);
   assert.match(expression, /codex-micro-joystick-event/);
   assert.match(expression, /nativeEventBus/);
-  assert.match(expression, /app-shared/);
+  assert.match(expression, /__webpack_require__/);
 });

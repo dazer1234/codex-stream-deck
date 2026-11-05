@@ -12,7 +12,8 @@ await mkdir(macOutput, { recursive: true });
 await build({
   entryPoints: [resolve("launcher/runtime-override.ts")],
   outfile: resolve(output, "runtime-override.mjs"),
-  bundle: false,
+  bundle: true,
+  external: ["ws"],
   platform: "node",
   format: "esm",
   target: "node20",

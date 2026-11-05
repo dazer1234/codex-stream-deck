@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { basename } from "node:path";
+import { rendererModulesExpression } from "../src/renderer-modules.js";
 
 const MICRO_GATE = "3207467860";
 const DETECTION_KEY = "codex-micro-has-ever-been-detected";
@@ -59,17 +60,14 @@ export function buildRuntimeOverrideExpression(gateName = MICRO_GATE): string {
     // Newer Codex builds moved the persisted signal into a shared renderer
     // chunk. Announcing the native device through the already-loaded event bus
     // preserves the same Codex-owned detection path without naming that chunk.
-    const likelyModules = uniqueUrls.filter((url) =>
-      /(?:vscode-api|codex-micro|app-initial|app-shared|artifact-tab-content)/.test(url)
-    ).slice(0, 120);
+    const { namespaces } = await ${rendererModulesExpression()};
     let nativeEventBus = false;
     let deviceHandlers = 0;
     let deviceEventDispatched = false;
     const eventDeadline = Date.now() + 5000;
     while (Date.now() < eventDeadline && !deviceEventDispatched) {
-      for (const url of likelyModules) {
+      for (const module of namespaces) {
         try {
-          const module = await import(url);
           const bus = Object.values(module).find((candidate) => candidate && typeof candidate === 'object' &&
             (typeof candidate.dispatchHostMessage === 'function' || typeof candidate.dispatchMessage === 'function'));
           if (!bus) continue;
@@ -106,17 +104,10 @@ export function buildRuntimeOverrideExpression(gateName = MICRO_GATE): string {
 
 export function buildRuntimeVerificationExpression(): string {
   return `(async () => {
-    const urls = [...new Set([
-      ...[...document.querySelectorAll('link[href], script[src]')].map((element) => element.href || element.src),
-      ...performance.getEntriesByType('resource').map((entry) => entry.name)
-    ])].filter((url) => url.includes('/assets/') && url.endsWith('.js'));
-    const likelyModules = urls.filter((url) =>
-      /(?:vscode-api|codex-micro|app-initial|app-shared|artifact-tab-content)/.test(url)
-    ).slice(0, 120);
+    const { namespaces } = await ${rendererModulesExpression()};
     let bus = null;
-    for (const url of likelyModules) {
+    for (const module of namespaces) {
       try {
-        const module = await import(url);
         bus = Object.values(module).find((candidate) => candidate && typeof candidate === 'object' &&
           (typeof candidate.dispatchHostMessage === 'function' || typeof candidate.dispatchMessage === 'function')) ?? null;
         if (bus?.handlers instanceof Map) break;
@@ -134,7 +125,7 @@ export function buildRuntimeVerificationExpression(): string {
       nativeEventBus: Boolean(bus),
       hidHandlers,
       joystickHandlers,
-      modulesInspected: likelyModules.length
+      modulesInspected: namespaces.length
     };
   })()`;
 }
